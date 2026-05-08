@@ -17,8 +17,15 @@ export interface BitbucketClientOptions {
   retries?: number;
   retryBaseDelayMs?: number;
   rateLimitWarnThreshold?: number;
+  // Soft cap on outbound calls per rolling hour. We count ourselves because
+  // BB Cloud omits X-RateLimit-* headers on success — see
+  // memory/bitbucket_rate_limit_headers.md. Default 800 leaves a 200-call
+  // buffer below BB's documented ~1000/hr per-identity limit.
+  hourlyCallBudget?: number;
   // Injectable for tests; defaults to globalThis.fetch (Node 22 native).
   fetch?: typeof globalThis.fetch;
+  // Injectable for tests of the call-ledger sliding window.
+  now?: () => number;
 }
 
 export interface RequestOptions {
@@ -49,7 +56,10 @@ const DEFAULTS = {
   retries: 3,
   retryBaseDelayMs: 250,
   rateLimitWarnThreshold: 100,
+  hourlyCallBudget: 800,
 } as const;
+
+const HOUR_MS = 3_600_000;
 
 export class BitbucketClient {
   private readonly baseUrl: string;
@@ -58,8 +68,14 @@ export class BitbucketClient {
   private readonly retries: number;
   private readonly retryBaseDelayMs: number;
   private readonly rateLimitWarnThreshold: number;
+  private readonly hourlyCallBudget: number;
   private readonly fetchFn: typeof globalThis.fetch;
+  private readonly now: () => number;
   private rateLimit: RateLimitState = { limit: null, remaining: null, resetAt: null };
+  // Sliding-window ledger of outbound-fetch timestamps. Includes retries —
+  // each network attempt costs one against the BB-side counter, even if it
+  // 429'd or 5xx'd, so it must cost one against ours too.
+  private callTimestamps: number[] = [];
 
   constructor(opts: BitbucketClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
@@ -68,12 +84,34 @@ export class BitbucketClient {
     this.retries = opts.retries ?? DEFAULTS.retries;
     this.retryBaseDelayMs = opts.retryBaseDelayMs ?? DEFAULTS.retryBaseDelayMs;
     this.rateLimitWarnThreshold = opts.rateLimitWarnThreshold ?? DEFAULTS.rateLimitWarnThreshold;
+    this.hourlyCallBudget = opts.hourlyCallBudget ?? DEFAULTS.hourlyCallBudget;
     this.fetchFn = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    this.now = opts.now ?? Date.now;
   }
 
   /** Snapshot of the most recent rate-limit headers we observed. */
   getRateLimit(): RateLimitState {
     return { ...this.rateLimit };
+  }
+
+  /** Outbound-fetch attempts made in the last rolling hour. */
+  getCallsInLastHour(): number {
+    const cutoff = this.now() - HOUR_MS;
+    // Opportunistic trim — the ledger never grows beyond ~budget entries
+    // because callers stop scheduling when remaining hits zero.
+    if (this.callTimestamps.length > 0 && this.callTimestamps[0]! < cutoff) {
+      this.callTimestamps = this.callTimestamps.filter((t) => t >= cutoff);
+    }
+    return this.callTimestamps.length;
+  }
+
+  /**
+   * Headroom under `hourlyCallBudget` in the current rolling hour. Tick
+   * orchestrators consult this before scheduling the next repo so a single
+   * cron run can't exhaust the per-identity rate limit.
+   */
+  getBudgetRemaining(): number {
+    return Math.max(0, this.hourlyCallBudget - this.getCallsInLastHour());
   }
 
   get<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -136,6 +174,7 @@ export class BitbucketClient {
     // Loop until success or unrecoverable error. Bounded by `retries`.
     for (;;) {
       let res: Response;
+      this.callTimestamps.push(this.now());
       try {
         res = await this.fetchFn(url, {
           method,

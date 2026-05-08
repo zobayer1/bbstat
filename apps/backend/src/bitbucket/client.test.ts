@@ -315,4 +315,62 @@ describe('BitbucketClient', () => {
       expect(result).toBeUndefined();
     });
   });
+
+  describe('outbound-call ledger (self-counted budget)', () => {
+    it('counts each fetch attempt; getBudgetRemaining = budget - calls', async () => {
+      fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ body: {} })));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { hourlyCallBudget: 5 });
+
+      expect(client.getCallsInLastHour()).toBe(0);
+      expect(client.getBudgetRemaining()).toBe(5);
+
+      await client.get('/workspaces/foo');
+      await client.get('/workspaces/foo');
+
+      expect(client.getCallsInLastHour()).toBe(2);
+      expect(client.getBudgetRemaining()).toBe(3);
+    });
+
+    it('counts retry attempts (429 + retry = 2 calls)', async () => {
+      fetchMock
+        .mockResolvedValueOnce(mockResponse({ status: 429, headers: { 'retry-after': '0' } }))
+        .mockResolvedValueOnce(mockResponse({ body: { ok: true } }));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      await client.get('/workspaces/foo');
+
+      expect(client.getCallsInLastHour()).toBe(2);
+    });
+
+    it('drops timestamps older than one hour from the sliding window', async () => {
+      const clock = { t: 1_000_000_000 };
+      const now = (): number => clock.t;
+      fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ body: {} })));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { hourlyCallBudget: 100, now });
+
+      await client.get('/workspaces/foo');
+      clock.t += 30 * 60_000; // +30 min
+      await client.get('/workspaces/foo');
+      expect(client.getCallsInLastHour()).toBe(2);
+
+      clock.t += 31 * 60_000; // first call now > 1h ago, second at 31min
+      expect(client.getCallsInLastHour()).toBe(1);
+
+      clock.t += 31 * 60_000; // both calls now > 1h ago
+      expect(client.getCallsInLastHour()).toBe(0);
+      expect(client.getBudgetRemaining()).toBe(100);
+    });
+
+    it('clamps getBudgetRemaining at zero (never goes negative)', async () => {
+      fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ body: {} })));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { hourlyCallBudget: 1 });
+
+      await client.get('/a');
+      await client.get('/b');
+      await client.get('/c');
+
+      expect(client.getCallsInLastHour()).toBe(3);
+      expect(client.getBudgetRemaining()).toBe(0);
+    });
+  });
 });
