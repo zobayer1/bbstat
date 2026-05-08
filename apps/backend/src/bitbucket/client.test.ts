@@ -202,6 +202,109 @@ describe('BitbucketClient', () => {
     });
   });
 
+  describe('absolute URL passthrough', () => {
+    it('hits absolute URLs unchanged (used by paginate following `next`)', async () => {
+      fetchMock.mockResolvedValueOnce(mockResponse({ body: { ok: true } }));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      await client.get('https://api.bitbucket.org/2.0/workspaces/foo/members?page=2&pagelen=100');
+
+      const [url] = fetchMock.mock.calls[0]!;
+      const parsed = new URL(url as string);
+      expect(parsed.pathname).toBe('/2.0/workspaces/foo/members');
+      expect(parsed.searchParams.get('page')).toBe('2');
+      expect(parsed.searchParams.get('pagelen')).toBe('100');
+    });
+  });
+
+  describe('paginate()', () => {
+    it('yields all items from a single-page response', async () => {
+      fetchMock.mockResolvedValueOnce(
+        mockResponse({ body: { pagelen: 100, values: [{ id: 1 }, { id: 2 }, { id: 3 }] } }),
+      );
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      const items: unknown[] = [];
+      for await (const item of client.paginate('/workspaces/foo/members')) items.push(item);
+
+      expect(items).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('follows `next` across multiple pages', async () => {
+      fetchMock
+        .mockResolvedValueOnce(
+          mockResponse({
+            body: {
+              pagelen: 2,
+              values: [{ id: 1 }, { id: 2 }],
+              next: 'https://api.bitbucket.org/2.0/workspaces/foo/members?page=2&pagelen=2',
+            },
+          }),
+        )
+        .mockResolvedValueOnce(
+          mockResponse({
+            body: {
+              pagelen: 2,
+              values: [{ id: 3 }, { id: 4 }],
+              next: 'https://api.bitbucket.org/2.0/workspaces/foo/members?page=3&pagelen=2',
+            },
+          }),
+        )
+        .mockResolvedValueOnce(mockResponse({ body: { pagelen: 2, values: [{ id: 5 }] } }));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      const items: { id: number }[] = [];
+      for await (const item of client.paginate<{ id: number }>('/workspaces/foo/members')) {
+        items.push(item);
+      }
+
+      expect(items.map((i) => i.id)).toEqual([1, 2, 3, 4, 5]);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('defaults pagelen to 100 on the initial request', async () => {
+      fetchMock.mockResolvedValueOnce(mockResponse({ body: { pagelen: 100, values: [] } }));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      const it = client.paginate('/workspaces/foo/members');
+      await it.next();
+
+      const [url] = fetchMock.mock.calls[0]!;
+      expect(new URL(url as string).searchParams.get('pagelen')).toBe('100');
+    });
+
+    it('appends `next` to the caller-supplied fields filter', async () => {
+      fetchMock.mockResolvedValueOnce(mockResponse({ body: { pagelen: 100, values: [] } }));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      const it = client.paginate('/workspaces/foo/members', {
+        fields: ['values.user.uuid', 'values.user.display_name'],
+      });
+      await it.next();
+
+      const [url] = fetchMock.mock.calls[0]!;
+      const fields = new URL(url as string).searchParams.get('fields')!.split(',');
+      expect(fields).toContain('values.user.uuid');
+      expect(fields).toContain('values.user.display_name');
+      expect(fields).toContain('next');
+    });
+
+    it('does not duplicate `next` if the caller already included it', async () => {
+      fetchMock.mockResolvedValueOnce(mockResponse({ body: { pagelen: 100, values: [] } }));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+      const it = client.paginate('/workspaces/foo/members', {
+        fields: ['values.user.uuid', 'next'],
+      });
+      await it.next();
+
+      const [url] = fetchMock.mock.calls[0]!;
+      const fields = new URL(url as string).searchParams.get('fields')!.split(',');
+      expect(fields.filter((f) => f === 'next')).toHaveLength(1);
+    });
+  });
+
   describe('204 No Content', () => {
     it('resolves to undefined without parsing the body', async () => {
       fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));

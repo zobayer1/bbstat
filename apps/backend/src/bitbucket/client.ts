@@ -35,6 +35,16 @@ export interface RateLimitState {
   resetAt: Date | null;
 }
 
+// Shape of every BitBucket Cloud paginated endpoint.
+export interface PaginatedResponse<T> {
+  pagelen: number;
+  page?: number;
+  size?: number;
+  values: T[];
+  next?: string;
+  previous?: string;
+}
+
 const DEFAULTS = {
   retries: 3,
   retryBaseDelayMs: 250,
@@ -72,6 +82,45 @@ export class BitbucketClient {
 
   post<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
     return this.request<T>('POST', path, opts);
+  }
+
+  /**
+   * Async generator that walks a BitBucket paginated endpoint, yielding each
+   * `values[]` item one at a time. Subsequent pages are fetched by following
+   * the `next` URL returned by the API; opts are applied only to the first
+   * call, since BitBucket's `next` URL preserves the original query string.
+   *
+   * Field-filtering note: paginated responses wrap items in `values[]`, so
+   * filters must use the `values.<field>` prefix. This method auto-appends
+   * `next` to the field set if the caller provided one — without it, BitBucket
+   * strips the pagination link and iteration silently stops after page 1.
+   *
+   * @example
+   *   for await (const member of client.paginate<Member>(
+   *     '/workspaces/foo/members',
+   *     { fields: ['values.user.uuid', 'values.user.display_name'] },
+   *   )) { ... }
+   */
+  async *paginate<T = unknown>(initialPath: string, opts: RequestOptions = {}): AsyncGenerator<T, void, void> {
+    const fieldsWithNext =
+      opts.fields && opts.fields.length > 0 && !opts.fields.includes('next') ? [...opts.fields, 'next'] : opts.fields;
+
+    const firstOpts: RequestOptions = {
+      ...opts,
+      ...(fieldsWithNext ? { fields: fieldsWithNext } : {}),
+      query: { pagelen: 100, ...opts.query },
+    };
+
+    let nextUrl: string | null = initialPath;
+    let useFirstOpts = true;
+    while (nextUrl !== null) {
+      const page: PaginatedResponse<T> = useFirstOpts
+        ? await this.get<PaginatedResponse<T>>(nextUrl, firstOpts)
+        : await this.get<PaginatedResponse<T>>(nextUrl);
+      useFirstOpts = false;
+      for (const item of page.values) yield item;
+      nextUrl = page.next ?? null;
+    }
   }
 
   private async request<T>(method: string, path: string, opts: RequestOptions): Promise<T> {
@@ -140,7 +189,10 @@ export class BitbucketClient {
   }
 
   private buildUrl(path: string, opts: RequestOptions): string {
-    const url = new URL(this.baseUrl + (path.startsWith('/') ? path : `/${path}`));
+    // Absolute URLs (e.g., the `next` link returned by paginated endpoints)
+    // pass through unchanged — they already carry the original query string.
+    const isAbsolute = /^https?:\/\//i.test(path);
+    const url = isAbsolute ? new URL(path) : new URL(this.baseUrl + (path.startsWith('/') ? path : `/${path}`));
     if (opts.fields && opts.fields.length > 0) {
       url.searchParams.set('fields', opts.fields.join(','));
     }
