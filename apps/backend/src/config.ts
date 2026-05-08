@@ -10,8 +10,8 @@ const envSchema = z.object({
   REDIS_URL: z.string().url().default('redis://localhost:6379'),
   BITBUCKET_BASE_URL: z.string().url().default('https://api.bitbucket.org/2.0'),
   BITBUCKET_WORKSPACE: z.string().optional(),
-  BITBUCKET_USERNAME: z.string().optional(),
-  BITBUCKET_APP_PASSWORD: z.string().optional(),
+  BITBUCKET_AUTH_EMAIL: z.string().optional(),
+  BITBUCKET_AUTH_TOKEN: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
