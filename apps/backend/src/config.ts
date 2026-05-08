@@ -12,6 +12,11 @@ const envSchema = z.object({
   BITBUCKET_WORKSPACE: z.string().optional(),
   BITBUCKET_AUTH_EMAIL: z.string().optional(),
   BITBUCKET_AUTH_TOKEN: z.string().optional(),
+
+  // Comma-separated `<workspace>/<slug>` pairs to bootstrap the curated
+  // tracked-repository set on startup. Empty = no auto-bootstrap; admins add
+  // repos via POST /api/admin/repositories instead.
+  SEED_TRACKED_REPOS: z.string().default(''),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

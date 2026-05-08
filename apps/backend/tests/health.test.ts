@@ -11,6 +11,7 @@ const testConfig: AppConfig = {
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
+  SEED_TRACKED_REPOS: '',
 };
 
 describe('health routes', () => {
