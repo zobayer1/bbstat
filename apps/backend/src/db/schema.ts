@@ -49,7 +49,7 @@ export const commits = pgTable(
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    shaRepoIdx: index('commits_sha_repo_idx').on(t.repositoryId, t.sha),
+    shaRepoUnique: uniqueIndex('commits_sha_repo_unique').on(t.repositoryId, t.sha),
     authorAuthoredIdx: index('commits_author_authored_idx').on(t.authorUserId, t.authoredAt),
   }),
 );
