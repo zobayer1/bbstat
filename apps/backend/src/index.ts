@@ -5,8 +5,10 @@ import { loadConfig } from './config.js';
 import { createLogger } from './lib/logger.js';
 import { BitbucketClient } from './bitbucket/client.js';
 import { createDb } from './db/client.js';
+import { createDrizzleCommitStore } from './sync/commit-store.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
 import { parseSeedTrackedRepos } from './sync/discovery.js';
+import { commitTickOptionsFromConfig } from './sync/runner.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 
@@ -30,10 +32,12 @@ async function main(): Promise<void> {
   let syncDeps: SyncRunnerDeps | undefined;
   if (config.BITBUCKET_AUTH_EMAIL && config.BITBUCKET_AUTH_TOKEN && config.BITBUCKET_WORKSPACE) {
     const discoveryStore = createDrizzleDiscoveryStore(db);
+    const commitStore = createDrizzleCommitStore(db);
     const client = new BitbucketClient({
       baseUrl: config.BITBUCKET_BASE_URL,
       email: config.BITBUCKET_AUTH_EMAIL,
       token: config.BITBUCKET_AUTH_TOKEN,
+      hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
       logger,
     });
     syncDeps = {
@@ -42,6 +46,8 @@ async function main(): Promise<void> {
       logger,
       workspace: config.BITBUCKET_WORKSPACE,
       seeds: parseSeedTrackedRepos(config.SEED_TRACKED_REPOS),
+      commitStore,
+      commitTickOptions: commitTickOptionsFromConfig(config),
     };
   }
 

@@ -3,6 +3,7 @@ import { buildApp } from '../src/app.js';
 import { createLogger } from '../src/lib/logger.js';
 import { BitbucketClient } from '../src/bitbucket/client.js';
 import type { AppConfig } from '../src/config.js';
+import type { CommitStore } from '../src/sync/commit-store.js';
 import type {
   DiscoveryStore,
   RepositoryInsertInput,
@@ -20,10 +21,33 @@ const testConfig: AppConfig = {
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
+  BITBUCKET_HOURLY_CALL_BUDGET: 800,
   SEED_TRACKED_REPOS: '',
   SYNC_MEMBERS_CRON: '*/10 * * * *',
   SYNC_REPOS_CRON: '*/5 * * * *',
+  SYNC_COMMITS_CRON: '*/15 * * * *',
+  COMMITS_BACKFILL_MAX_PAGES: 5,
+  COMMITS_BACKFILL_SINCE: '',
+  COMMIT_SYNC_CONCURRENCY: 3,
+  COMMIT_SYNC_BUDGET_THRESHOLD: 20,
 };
+
+// Discovery-flow admin tests don't exercise commit-sync. Provide a CommitStore
+// that throws on every method so any accidental call surfaces in test output
+// instead of silently passing.
+function noopCommitStore(): CommitStore {
+  const fail = (): never => {
+    throw new Error('CommitStore method called from discovery admin test');
+  };
+  return {
+    resolveUserIdsByUuid: fail,
+    insertCommits: fail,
+    getSyncState: fail,
+    markSyncRunning: fail,
+    markSyncSuccess: fail,
+    markSyncFailed: fail,
+  };
+}
 
 interface FakeStoreState {
   users: Map<string, UserUpsertInput>;
@@ -54,6 +78,9 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       state.repositories.set(input.fullName, row);
       state.syncStateRepoIds.add(id);
       return row;
+    },
+    async listTrackedRepositories() {
+      return Array.from(state.repositories.values());
     },
   };
   return { store, state };
@@ -87,6 +114,7 @@ function makeSyncDeps(
       logger,
       workspace: 'tigerit',
       seeds: [],
+      commitStore: noopCommitStore(),
       ...overrides,
     },
     state,

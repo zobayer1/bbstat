@@ -44,6 +44,9 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       state.syncStateRepoIds.add(id);
       return row;
     },
+    async listTrackedRepositories() {
+      return Array.from(state.repositories.values());
+    },
   };
 
   return { store, state };

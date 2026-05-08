@@ -12,17 +12,39 @@ const envSchema = z.object({
   BITBUCKET_WORKSPACE: z.string().optional(),
   BITBUCKET_AUTH_EMAIL: z.string().optional(),
   BITBUCKET_AUTH_TOKEN: z.string().optional(),
+  // Soft cap on outbound BitBucket calls per rolling hour, enforced inside
+  // BitbucketClient. BB Cloud's documented per-identity limit is ~1000/hr;
+  // 800 leaves a safety margin. See memory/bitbucket_rate_limit_headers.md.
+  BITBUCKET_HOURLY_CALL_BUDGET: z.coerce.number().int().positive().default(800),
 
   // Comma-separated `<workspace>/<slug>` pairs to bootstrap the curated
   // tracked-repository set on startup. Empty = no auto-bootstrap; admins add
   // repos via POST /api/admin/repositories instead.
   SEED_TRACKED_REPOS: z.string().default(''),
 
-  // Cron schedules for the discovery sync. Defaults are tight to make crons
-  // easy to observe during dev; lengthen them in production once we trust
-  // the runner (e.g., '0 */6 * * *' for repos, '0 0 * * *' for members).
+  // Cron schedules. Defaults are tight to make crons easy to observe during
+  // dev; lengthen them in production once we trust the runner.
   SYNC_MEMBERS_CRON: z.string().default('*/10 * * * *'),
   SYNC_REPOS_CRON: z.string().default('*/5 * * * *'),
+  SYNC_COMMITS_CRON: z.string().default('*/15 * * * *'),
+
+  // First-run cap on commit backfill per repo: stop after N pages of 100, or
+  // at any commit older than COMMITS_BACKFILL_SINCE (whichever fires first).
+  // Empty SINCE = no date cap. No effect on delta runs (those always stop at
+  // last_seen_sha).
+  COMMITS_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
+  COMMITS_BACKFILL_SINCE: z
+    .string()
+    .default('')
+    .refine((s) => s === '' || !Number.isNaN(Date.parse(s)), {
+      message: 'COMMITS_BACKFILL_SINCE must be an ISO 8601 date string or empty',
+    }),
+
+  // Tick orchestration. Concurrency = max repos in flight; threshold = budget
+  // headroom under BITBUCKET_HOURLY_CALL_BUDGET below which we stop scheduling
+  // new repos (deferred to the next tick).
+  COMMIT_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
+  COMMIT_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

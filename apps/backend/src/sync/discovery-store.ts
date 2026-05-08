@@ -46,6 +46,10 @@ export interface DiscoveryStore {
   // Atomic for our purposes: inserts the repository row and the matching
   // sync_state row in the same transaction. Returns the row that was created.
   insertRepositoryWithSyncState(input: RepositoryInsertInput): Promise<RepositoryRow>;
+  // Enumerate the curated tracked set — every row in `repositories` is by
+  // definition tracked (untracked repos are simply absent). Used by the
+  // commit-sync cron / admin trigger to build the tick's repo list.
+  listTrackedRepositories(): Promise<RepositoryRow[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +109,19 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         await tx.insert(syncState).values({ repositoryId: row.id });
         return row;
       });
+    },
+
+    async listTrackedRepositories() {
+      return await db
+        .select({
+          id: repositories.id,
+          bitbucketUuid: repositories.bitbucketUuid,
+          workspace: repositories.workspace,
+          project: repositories.project,
+          slug: repositories.slug,
+          fullName: repositories.fullName,
+        })
+        .from(repositories);
     },
   };
 }
