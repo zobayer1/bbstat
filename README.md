@@ -1,4 +1,8 @@
-# BBSTAT — BitBucket Contribution Statistics
+# ShipShow!
+
+> Part show, part shitshow.
+
+Organization-wide BitBucket contribution statistics. (Codename and package name: `bbstat`.)
 
 A dashboard-style web application for reviewing developer contributions across an entire BitBucket organization. Commit and branch activity, code-change volume, filters by project / repo / user, graphs, periodic rollups, and activity logs — all served from our own ingested store, never proxied through the BitBucket API on the request path.
 

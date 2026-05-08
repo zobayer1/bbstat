@@ -22,8 +22,8 @@ const lastSyncLabel = computed(() => {
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6 flex items-baseline justify-between">
       <div>
-        <h1 class="text-3xl font-bold tracking-tight text-slate-900">BBSTAT Dashboard</h1>
-        <p class="mt-1 text-sm text-slate-500">Organization-wide BitBucket contribution statistics.</p>
+        <h1 class="text-3xl font-bold tracking-tight text-slate-900">ShipShow!</h1>
+        <p class="mt-1 text-sm text-slate-500">Part show, part shitshow.</p>
       </div>
       <div class="text-xs text-slate-400">
         <span v-if="stats.loading">Refreshing…</span>

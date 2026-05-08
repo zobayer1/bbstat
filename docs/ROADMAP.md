@@ -1,4 +1,6 @@
-# BBSTAT Implementation Roadmap
+# ShipShow! Implementation Roadmap
+
+_Codename and package name: `bbstat`._
 
 A phased plan for building out BitBucket ingest and the dashboard surface, designed to deliver value early and minimize BitBucket API calls throughout. Total estimate: **18–22 working days**, fitting "next month" with buffer.
 

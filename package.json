@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "BitBucket organization-wide contribution statistics dashboard",
+  "description": "ShipShow! — organization-wide BitBucket contribution statistics dashboard. Part show, part shitshow.",
   "engines": {
     "node": ">=22"
   },

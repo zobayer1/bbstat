@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-BBSTAT is a dashboard-style web application for reviewing developer contributions across an entire BitBucket organization. It requires a BitBucket API account at runtime.
+**ShipShow!** (codename and package name: `bbstat`) is a dashboard-style web application for reviewing developer contributions across an entire BitBucket organization. It requires a BitBucket API account at runtime.
+
+The "ShipShow!" name is the human-facing brand — used in the UI, README title, and the HTML `<title>`. Code-side identifiers (`bbstat`, `@bbstat/backend`, `@bbstat/frontend`, `bbstat.localhost`, `bbstat-postgres` / `bbstat-redis` containers, the `bbstat` Postgres database) are unchanged. Don't rename the package or any infrastructure identifier when working on this — they're load-bearing across env vars, scripts, and Docker.
 
 Feature surface to design for:
 
