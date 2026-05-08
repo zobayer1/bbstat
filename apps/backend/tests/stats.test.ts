@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { AppConfig } from '../src/config.js';
-import type { OverviewStats, StatsStore } from '../src/dashboard/stats-store.js';
+import type { LatestCommit, OverviewStats, StatsStore, TopContributor } from '../src/dashboard/stats-store.js';
 
 const testConfig: AppConfig = {
   NODE_ENV: 'test',
@@ -24,6 +24,15 @@ const testConfig: AppConfig = {
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
 };
 
+function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
+  return {
+    getOverview: vi.fn(),
+    getLatestCommitForRepository: vi.fn(),
+    getTopContributors: vi.fn(),
+    ...overrides,
+  };
+}
+
 describe('GET /api/stats/overview', () => {
   let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
 
@@ -33,8 +42,14 @@ describe('GET /api/stats/overview', () => {
   });
 
   it('returns the overview from the injected store', async () => {
-    const overview: OverviewStats = { users: 49, repositories: 3, projects: 1 };
-    const statsStore: StatsStore = { getOverview: vi.fn().mockResolvedValue(overview) };
+    const overview: OverviewStats = {
+      users: 49,
+      repositories: 3,
+      projects: 1,
+      totalCommits: 1234,
+      commitsLast7Days: 87,
+    };
+    const statsStore = makeStatsStore({ getOverview: vi.fn().mockResolvedValue(overview) });
 
     appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
     const res = await appInstance.inject({ method: 'GET', url: '/api/stats/overview' });
@@ -49,5 +64,99 @@ describe('GET /api/stats/overview', () => {
     const res = await appInstance.inject({ method: 'GET', url: '/api/stats/overview' });
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('GET /api/stats/repositories/:workspace/:slug/latest-commit', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the latest commit when present', async () => {
+    const commit: LatestCommit = {
+      sha: 'a1b2c3',
+      message: 'feat: add thing',
+      authoredAt: '2026-05-08T12:00:00.000Z',
+      authorDisplayName: 'Alice',
+      authorBitbucketUuid: '{u1}',
+    };
+    const statsStore = makeStatsStore({
+      getLatestCommitForRepository: vi.fn().mockResolvedValue(commit),
+    });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/stats/repositories/tigerit/boing-server/latest-commit',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(commit);
+    expect(statsStore.getLatestCommitForRepository).toHaveBeenCalledWith('tigerit', 'boing-server');
+  });
+
+  it('returns 404 when no commit (untracked or empty repo)', async () => {
+    const statsStore = makeStatsStore({
+      getLatestCommitForRepository: vi.fn().mockResolvedValue(null),
+    });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/stats/repositories/tigerit/never-tracked/latest-commit',
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found', fullName: 'tigerit/never-tracked' });
+  });
+});
+
+describe('GET /api/stats/top-contributors', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('defaults to a 7-day window when no query param is given', async () => {
+    const contributors: TopContributor[] = [
+      { userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 42 },
+      { userId: 2, bitbucketUuid: '{u2}', displayName: 'Bob', commits: 17 },
+    ];
+    const getTopContributors = vi.fn().mockResolvedValue(contributors);
+    const statsStore = makeStatsStore({ getTopContributors });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/top-contributors' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(contributors);
+    expect(getTopContributors).toHaveBeenCalledWith(7);
+  });
+
+  it('forwards a 30-day window when window=30d', async () => {
+    const getTopContributors = vi.fn().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getTopContributors });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/top-contributors?window=30d' });
+
+    expect(res.statusCode).toBe(200);
+    expect(getTopContributors).toHaveBeenCalledWith(30);
+  });
+
+  it('rejects invalid window with 400', async () => {
+    const statsStore = makeStatsStore();
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/top-contributors?window=99y' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'invalid_window', allowed: ['7d', '30d'] });
+    expect(statsStore.getTopContributors).not.toHaveBeenCalled();
   });
 });
