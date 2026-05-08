@@ -51,6 +51,10 @@ export default tseslint.config(
     },
     rules: {
       'vue/multi-word-component-names': 'off',
+      // Frontend uses Composition API only — no Options API (data()/methods:/computed:/etc.).
+      // `<script setup>` is preferred; the `composition` form (`setup()` function) is also
+      // accepted for the rare cases where setup() needs to be async or return render fns.
+      'vue/component-api-style': ['error', ['script-setup', 'composition']],
     },
   },
   prettier,
