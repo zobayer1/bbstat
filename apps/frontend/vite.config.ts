@@ -6,11 +6,15 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
-  const port = Number(env.VITE_DEV_PORT) || 5173;
+  // .env lives at the monorepo root, not in apps/frontend/. Point both Vite's
+  // automatic env loading (envDir) and the explicit loadEnv() call at the
+  // repo root so VITE_* vars resolve consistently in dev/build/preview.
   const repoRoot = resolve(import.meta.dirname, '..', '..');
+  const env = loadEnv(mode, repoRoot, '');
+  const port = Number(env.VITE_DEV_PORT) || 5173;
 
   return {
+    envDir: repoRoot,
     plugins: [vue(), tailwindcss()],
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
