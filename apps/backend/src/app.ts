@@ -4,8 +4,10 @@ import sensible from '@fastify/sensible';
 import type { Logger } from 'pino';
 import { healthRoutes } from './routes/health.js';
 import { adminRoutes } from './routes/admin.js';
+import { statsRoutes } from './routes/stats.js';
 import type { AppConfig } from './config.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
+import type { StatsStore } from './dashboard/stats-store.js';
 
 export interface BuildAppOptions {
   config: AppConfig;
@@ -15,9 +17,11 @@ export interface BuildAppOptions {
   // dev environment with no BitBucket creds, or a test that doesn't need the
   // sync surface), the admin routes are simply absent.
   syncDeps?: SyncRunnerDeps;
+  // When set, /api/stats/* dashboard read endpoints are registered.
+  statsStore?: StatsStore;
 }
 
-export async function buildApp({ config, logger, https, syncDeps }: BuildAppOptions) {
+export async function buildApp({ config, logger, https, syncDeps, statsStore }: BuildAppOptions) {
   // Fastify 5: a pre-built pino instance goes on `loggerInstance`, not `logger`
   // (which is for config). Same instance ends up at app.log either way.
   const app = Fastify({
@@ -36,6 +40,10 @@ export async function buildApp({ config, logger, https, syncDeps }: BuildAppOpti
     await app.register(adminRoutes, { prefix: '/api/admin', syncDeps });
   } else {
     app.log.warn('BitBucket credentials not configured — /api/admin routes are not registered');
+  }
+
+  if (statsStore) {
+    await app.register(statsRoutes, { prefix: '/api/stats', statsStore });
   }
 
   // Suppress unused-warnings on config for consumers that may extend this.

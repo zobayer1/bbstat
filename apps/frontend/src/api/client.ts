@@ -19,6 +19,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface OverviewStats {
+  users: number;
+  repositories: number;
+  projects: number;
+}
+
 export const api = {
   health: () => request<{ status: string; uptime: number }>('/healthz'),
+  statsOverview: () => request<OverviewStats>('/api/stats/overview'),
 };

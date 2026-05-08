@@ -7,6 +7,7 @@ import { BitbucketClient } from './bitbucket/client.js';
 import { createDb } from './db/client.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
 import { parseSeedTrackedRepos } from './sync/discovery.js';
+import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 
 async function main(): Promise<void> {
@@ -19,13 +20,16 @@ async function main(): Promise<void> {
     cert: readFileSync(resolve(repoRoot, config.TLS_CERT_PATH)),
   };
 
-  // Sync deps are only built when full BitBucket credentials are configured.
-  // Without them, the API server still starts (health works) but admin routes
-  // are not registered and the dashboard runs without live data.
+  // The DB is always available (it's a hard requirement), so the read-side
+  // stats store is always constructed and the dashboard endpoints are always
+  // registered. BitBucket creds are optional — without them, admin / sync
+  // routes are absent but the rest of the app still starts.
+  const db = createDb(config.DATABASE_URL);
+  const statsStore = createDrizzleStatsStore(db);
+
   let syncDeps: SyncRunnerDeps | undefined;
   if (config.BITBUCKET_AUTH_EMAIL && config.BITBUCKET_AUTH_TOKEN && config.BITBUCKET_WORKSPACE) {
-    const db = createDb(config.DATABASE_URL);
-    const store = createDrizzleDiscoveryStore(db);
+    const discoveryStore = createDrizzleDiscoveryStore(db);
     const client = new BitbucketClient({
       baseUrl: config.BITBUCKET_BASE_URL,
       email: config.BITBUCKET_AUTH_EMAIL,
@@ -34,14 +38,14 @@ async function main(): Promise<void> {
     });
     syncDeps = {
       client,
-      store,
+      store: discoveryStore,
       logger,
       workspace: config.BITBUCKET_WORKSPACE,
       seeds: parseSeedTrackedRepos(config.SEED_TRACKED_REPOS),
     };
   }
 
-  const app = await buildApp({ config, logger, https, syncDeps });
+  const app = await buildApp({ config, logger, https, syncDeps, statsStore });
 
   try {
     await app.listen({ host: '0.0.0.0', port: config.BACKEND_PORT });
