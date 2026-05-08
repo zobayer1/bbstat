@@ -3,7 +3,7 @@ import { buildApp } from '../src/app.js';
 import { createLogger } from '../src/lib/logger.js';
 import { BitbucketClient } from '../src/bitbucket/client.js';
 import type { AppConfig } from '../src/config.js';
-import type { CommitStore } from '../src/sync/commit-store.js';
+import type { CommitInsertInput, CommitStore, SyncStateRow, SyncSuccessUpdate } from '../src/sync/commit-store.js';
 import type {
   DiscoveryStore,
   RepositoryInsertInput,
@@ -47,6 +47,65 @@ function noopCommitStore(): CommitStore {
     markSyncSuccess: fail,
     markSyncFailed: fail,
   };
+}
+
+interface FakeCommitStoreState {
+  commits: Map<string, CommitInsertInput>;
+  syncStateByRepo: Map<number, SyncStateRow>;
+  successCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
+}
+
+function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreState } {
+  const state: FakeCommitStoreState = {
+    commits: new Map(),
+    syncStateByRepo: new Map(),
+    successCalls: [],
+  };
+  const store: CommitStore = {
+    async resolveUserIdsByUuid() {
+      return new Map(); // no users seeded — every commit lands as anonymous
+    },
+    async insertCommits(input) {
+      let inserted = 0;
+      for (const c of input) {
+        const key = `${c.repositoryId}:${c.sha}`;
+        if (!state.commits.has(key)) {
+          state.commits.set(key, c);
+          inserted++;
+        }
+      }
+      return { inserted };
+    },
+    async getSyncState(repositoryId) {
+      return state.syncStateByRepo.get(repositoryId) ?? null;
+    },
+    async markSyncRunning(repositoryId) {
+      const row = state.syncStateByRepo.get(repositoryId);
+      if (row) {
+        state.syncStateByRepo.set(repositoryId, { ...row, lastSyncStatus: 'running' });
+      }
+    },
+    async markSyncSuccess(repositoryId, update) {
+      state.successCalls.push({ repositoryId, update });
+      const row = state.syncStateByRepo.get(repositoryId);
+      if (row) {
+        state.syncStateByRepo.set(repositoryId, {
+          ...row,
+          lastSyncStatus: 'success',
+          lastSyncError: null,
+          ...(update.lastSeenSha !== null ? { lastSeenSha: update.lastSeenSha } : {}),
+          totalCommitsSynced: row.totalCommitsSynced + update.commitsAdded,
+        });
+      }
+    },
+    async markSyncFailed(repositoryId, error) {
+      const row = state.syncStateByRepo.get(repositoryId);
+      if (row) {
+        state.syncStateByRepo.set(repositoryId, { ...row, lastSyncStatus: 'failed', lastSyncError: error });
+      }
+    },
+  };
+  return { store, state };
 }
 
 interface FakeStoreState {
@@ -292,6 +351,237 @@ describe('admin routes', () => {
       const body = res.json();
       expect(body.error).toBe('invalid_body');
       expect(body.issues).toBeInstanceOf(Array);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Commit-sync admin endpoints — these exercise the real CommitStore fake +
+  // mocked BB /commits responses so the tests cover the full route → runner →
+  // tick → per-repo path with the actual store contract.
+  // ---------------------------------------------------------------------------
+
+  describe('POST /api/admin/sync/repositories/:workspace/:slug/commits', () => {
+    it('returns 404 when the repo is not in the tracked set', async () => {
+      const { store: commitStore } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/sync/repositories/tigerit/never-tracked/commits',
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/never-tracked' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('runs a delta pull and returns the per-repo result', async () => {
+      const { store: commitStore, state: commitState } = createFakeCommitStore();
+      const { deps, state } = makeSyncDeps(fetchMock, { commitStore });
+      // Seed a tracked repo + sync_state row at the existing cursor.
+      const repo = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+      });
+      commitState.syncStateByRepo.set(repo.id, {
+        repositoryId: repo.id,
+        lastSeenSha: 'sha-cursor',
+        lastSyncedAt: null,
+        lastSyncStartedAt: null,
+        lastSyncStatus: 'idle',
+        lastSyncError: null,
+        totalCommitsSynced: 0,
+      });
+      // BB returns: 2 new commits, then the cursor sha → walks until cursor.
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          pagelen: 100,
+          values: [
+            {
+              hash: 'sha-new-1',
+              message: 'feat: A',
+              date: '2026-05-08T00:00:00+00:00',
+              parents: [],
+              author: { raw: 'A <a@x>' },
+            },
+            {
+              hash: 'sha-new-2',
+              message: 'feat: B',
+              date: '2026-05-07T00:00:00+00:00',
+              parents: [],
+              author: { raw: 'B <b@x>' },
+            },
+            {
+              hash: 'sha-cursor',
+              message: 'old',
+              date: '2026-05-01T00:00:00+00:00',
+              parents: [],
+              author: { raw: 'X <x@x>' },
+            },
+          ],
+        }),
+      );
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/sync/repositories/tigerit/boing-server/commits',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body).toMatchObject({
+        repositoryId: repo.id,
+        fullName: 'tigerit/boing-server',
+        mode: 'delta',
+        fetched: 2,
+        inserted: 2,
+        newCursor: 'sha-new-1',
+        hitKnownSha: true,
+      });
+      expect(commitState.commits.size).toBe(2);
+      expect(commitState.syncStateByRepo.get(repo.id)?.lastSeenSha).toBe('sha-new-1');
+      expect(state.repositories.size).toBe(1);
+    });
+
+    it('is idempotent: a second call with no new commits inserts nothing', async () => {
+      const { store: commitStore, state: commitState } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      const repo = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+      });
+      commitState.syncStateByRepo.set(repo.id, {
+        repositoryId: repo.id,
+        lastSeenSha: 'sha-cursor',
+        lastSyncedAt: null,
+        lastSyncStartedAt: null,
+        lastSyncStatus: 'idle',
+        lastSyncError: null,
+        totalCommitsSynced: 0,
+      });
+      // Cursor matches first commit immediately — empty delta.
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          jsonResponse({
+            pagelen: 100,
+            values: [
+              {
+                hash: 'sha-cursor',
+                message: 'old',
+                date: '2026-05-01T00:00:00+00:00',
+                parents: [],
+                author: { raw: 'X <x@x>' },
+              },
+            ],
+          }),
+        ),
+      );
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res1 = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/sync/repositories/tigerit/boing-server/commits',
+      });
+      const res2 = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/sync/repositories/tigerit/boing-server/commits',
+      });
+
+      expect(res1.json()).toMatchObject({ inserted: 0, hitKnownSha: true });
+      expect(res2.json()).toMatchObject({ inserted: 0, hitKnownSha: true });
+      expect(commitState.commits.size).toBe(0);
+      expect(commitState.syncStateByRepo.get(repo.id)?.lastSeenSha).toBe('sha-cursor');
+    });
+  });
+
+  describe('POST /api/admin/sync/commits', () => {
+    it('runs a full tick across the curated set and returns the structured summary', async () => {
+      const { store: commitStore, state: commitState } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      const r1 = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'a',
+        fullName: 'tigerit/a',
+      });
+      const r2 = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r2}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'b',
+        fullName: 'tigerit/b',
+      });
+      for (const id of [r1.id, r2.id]) {
+        commitState.syncStateByRepo.set(id, {
+          repositoryId: id,
+          lastSeenSha: null, // both cold
+          lastSyncedAt: null,
+          lastSyncStartedAt: null,
+          lastSyncStatus: 'idle',
+          lastSyncError: null,
+          totalCommitsSynced: 0,
+        });
+      }
+      // Each repo: a single page with one commit.
+      fetchMock.mockImplementation((url) => {
+        const slug = String(url).includes('/tigerit/a/') ? 'a' : 'b';
+        return Promise.resolve(
+          jsonResponse({
+            pagelen: 100,
+            values: [
+              {
+                hash: `${slug}-sha-1`,
+                message: `commit on ${slug}`,
+                date: '2026-05-08T00:00:00+00:00',
+                parents: [],
+                author: { raw: 'A <a@x>' },
+              },
+            ],
+          }),
+        );
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/sync/commits' });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.trigger).toBe('manual');
+      expect(body.commits).toMatchObject({
+        attempted: 2,
+        deferred: 0,
+        errors: 0,
+        totalCommitsInserted: 2,
+        stoppedEarly: false,
+      });
+      expect(body.repoResults).toHaveLength(2);
+      expect(commitState.commits.size).toBe(2);
+    });
+
+    it('returns an empty summary when no repos are tracked', async () => {
+      const { store: commitStore } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/sync/commits' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().commits).toMatchObject({
+        attempted: 0,
+        deferred: 0,
+        errors: 0,
+        totalCommitsInserted: 0,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });

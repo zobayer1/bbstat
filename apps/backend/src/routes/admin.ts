@@ -11,8 +11,10 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { syncRepositoryCommits } from '../sync/commits.js';
 import { addTrackedRepository } from '../sync/discovery.js';
-import { runDiscoverySync } from './../sync/runner.js';
+import { runCommitsSync, runDiscoverySync } from './../sync/runner.js';
+import type { RepositoryHandle } from '../sync/commits.js';
 import type { SyncRunnerDeps } from '../sync/runner.js';
 
 export interface AdminRouteOptions {
@@ -28,6 +30,41 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
   app.post('/sync/discover', async () => {
     return runDiscoverySync(opts.syncDeps, 'manual');
   });
+
+  app.post('/sync/commits', async () => {
+    return runCommitsSync(opts.syncDeps, 'manual');
+  });
+
+  // Force a fresh delta pull for a single tracked repo. Useful for backfills,
+  // for re-running after fixing a sync bug, and as the manual smoke test for
+  // commit ingest in dev. Idempotent — duplicate shas are deduped by the
+  // commits_sha_repo_unique constraint.
+  app.post<{ Params: { workspace: string; slug: string } }>(
+    '/sync/repositories/:workspace/:slug/commits',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) {
+        return reply.code(404).send({ error: 'not_tracked', fullName });
+      }
+      const handle: RepositoryHandle = {
+        repositoryId: row.id,
+        workspace: row.workspace,
+        slug: row.slug,
+        fullName: row.fullName,
+      };
+      return await syncRepositoryCommits(
+        {
+          client: opts.syncDeps.client,
+          store: opts.syncDeps.commitStore,
+          logger: opts.syncDeps.logger,
+        },
+        handle,
+        opts.syncDeps.commitTickOptions ?? {},
+      );
+    },
+  );
 
   app.post('/repositories', async (request, reply) => {
     const parsed = addRepositoryBody.safeParse(request.body);
