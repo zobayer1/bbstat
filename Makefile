@@ -83,6 +83,10 @@ dev-frontend: env-init ## Run frontend dev server only
 dev-sync: env-init ## Run the background sync runner (cron-mode stub)
 	$(PNPM) $(BACKEND) run dev:sync
 
+.PHONY: doctor
+doctor: env-init ## Verify BitBucket credentials end-to-end against your workspace
+	$(PNPM) $(BACKEND) run doctor
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
