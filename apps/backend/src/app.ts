@@ -1,29 +1,44 @@
 import Fastify from 'fastify';
-import type { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import sensible from '@fastify/sensible';
-import { registerRoutes } from './routes/index.js';
-import { loggerOptions } from './lib/logger.js';
+import type { Logger } from 'pino';
+import { healthRoutes } from './routes/health.js';
+import { adminRoutes } from './routes/admin.js';
 import type { AppConfig } from './config.js';
+import type { SyncRunnerDeps } from './sync/runner.js';
 
 export interface BuildAppOptions {
   config: AppConfig;
+  logger: Logger;
   https?: { key: Buffer; cert: Buffer };
+  // When set, /api/admin/* routes are registered. Without it (e.g., a fresh
+  // dev environment with no BitBucket creds, or a test that doesn't need the
+  // sync surface), the admin routes are simply absent.
+  syncDeps?: SyncRunnerDeps;
 }
 
-export async function buildApp({ config, https }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({ config, logger, https, syncDeps }: BuildAppOptions) {
+  // Fastify 5: a pre-built pino instance goes on `loggerInstance`, not `logger`
+  // (which is for config). Same instance ends up at app.log either way.
   const app = Fastify({
-    logger: loggerOptions(config.NODE_ENV),
+    loggerInstance: logger,
     ...(https ? { https } : {}),
   });
 
   await app.register(sensible);
   await app.register(cors, {
-    // No auth today: allow the dev frontend origin and same-origin requests.
     origin: true,
     credentials: false,
   });
-  await app.register(registerRoutes);
+  await app.register(healthRoutes);
 
+  if (syncDeps) {
+    await app.register(adminRoutes, { prefix: '/api/admin', syncDeps });
+  } else {
+    app.log.warn('BitBucket credentials not configured — /api/admin routes are not registered');
+  }
+
+  // Suppress unused-warnings on config for consumers that may extend this.
+  void config;
   return app;
 }

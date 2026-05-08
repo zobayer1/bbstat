@@ -17,6 +17,12 @@ const envSchema = z.object({
   // tracked-repository set on startup. Empty = no auto-bootstrap; admins add
   // repos via POST /api/admin/repositories instead.
   SEED_TRACKED_REPOS: z.string().default(''),
+
+  // Cron schedules for the discovery sync. Defaults are tight to make crons
+  // easy to observe during dev; lengthen them in production once we trust
+  // the runner (e.g., '0 */6 * * *' for repos, '0 0 * * *' for members).
+  SYNC_MEMBERS_CRON: z.string().default('*/10 * * * *'),
+  SYNC_REPOS_CRON: z.string().default('*/5 * * * *'),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
