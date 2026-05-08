@@ -1,0 +1,13 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  vue-demi: true
+
+# Force-bump transitive deps that ship deprecated versions to keep
+# `pnpm install` quiet (zero-warnings policy — see README/CLAUDE.md).
+overrides:
+  glob: '^11.0.0'

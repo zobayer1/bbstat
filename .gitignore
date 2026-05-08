@@ -1,0 +1,56 @@
+# --- Dependencies ---
+node_modules/
+.pnpm-store/
+
+# --- Build output ---
+dist/
+build/
+.vite/
+.cache/
+.turbo/
+.parcel-cache/
+
+# --- TypeScript ---
+*.tsbuildinfo
+
+# --- Test / coverage ---
+coverage/
+.nyc_output/
+*.lcov
+
+# --- Logs ---
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# --- OS metadata ---
+.DS_Store
+Thumbs.db
+
+# --- Environment files (examples are committed) ---
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+!.env.example
+
+# --- Local TLS material ---
+# Per-developer self-signed CA + server cert. See CLAUDE.md / etc/tls/README.
+etc/tls/
+
+# --- Misc ---
+*.tmp
+*.bak
+reports/

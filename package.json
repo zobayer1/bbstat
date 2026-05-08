@@ -1,0 +1,35 @@
+{
+  "name": "bbstat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "BitBucket organization-wide contribution statistics dashboard",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.0.8",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter='./apps/*' run dev",
+    "dev:backend": "pnpm --filter @bbstat/backend run dev",
+    "dev:frontend": "pnpm --filter @bbstat/frontend run dev",
+    "build": "pnpm -r --filter='./apps/*' run build",
+    "test": "pnpm -r --filter='./apps/*' run test",
+    "test:watch": "pnpm -r --parallel --filter='./apps/*' run test:watch",
+    "typecheck": "pnpm -r --filter='./apps/*' run typecheck",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "eslint": "^9.15.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-vue": "^9.31.0",
+    "globals": "^15.12.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.16.0",
+    "vue-eslint-parser": "^9.4.3"
+  }
+}
