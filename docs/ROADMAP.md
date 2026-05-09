@@ -54,7 +54,7 @@ Get the curated set into the database; enumerate users.
 
 **API budget:** ~5–10 calls per slow refresh cycle. Daily total ≪ 1% of the rate limit.
 
-### Phase 2 — Commit ingest (~5–6 days)
+### Phase 2 — Commit ingest (~5–6 days) ✅ Landed
 
 The core data source. Most of the API-minimization care lands here.
 
@@ -69,6 +69,8 @@ The core data source. Most of the API-minimization care lands here.
 **API budget:** ~50 active repos × ~4 ticks/hour × 1–2 calls each ≈ 200–400 calls/hour. Idle days drop to <100 calls/hour.
 
 **Deliverable:** dashboard shows real commit counts, latest commit per repo, top contributors.
+
+**Status:** Landed across `09b86c1`..`412525b` (7 commits). Operator + reader notes — modes, cursor guarantees, budget gate, all env knobs, admin + dashboard endpoints — live in [`docs/sync.md`](sync.md). Frontend dashboard now shows 5 stat cards plus a Top Contributors panel with a 7d/30d window toggle.
 
 ### Phase 3 — Rollups + Redis user-summary cache (~3–4 days)
 
