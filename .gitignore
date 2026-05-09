@@ -26,7 +26,11 @@ yarn-debug.log*
 yarn-error.log*
 
 # --- Editors / IDEs ---
-.vscode/
+# Per-developer prefs are private; a small allowlist of shared editor config
+# is committed (Vue/TS plugin nudges so a fresh clone "just works" in VSCode).
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
 .idea/
 *.iml
 *.swp
