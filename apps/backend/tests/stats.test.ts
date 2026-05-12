@@ -28,6 +28,9 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     getOverview: vi.fn(),
     getLatestCommitForRepository: vi.fn(),
     getTopContributors: vi.fn(),
+    getUserSummary: vi.fn(),
+    getProjectStats: vi.fn(),
+    getRepositoryActivity: vi.fn(),
     ...overrides,
   };
 }
