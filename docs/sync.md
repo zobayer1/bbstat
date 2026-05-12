@@ -1,9 +1,10 @@
 # Sync & data ingest
 
-Operator + reader notes for the commit-ingest pipeline that lands in Phase 2.
+Operator + reader notes for the commit-ingest pipeline (Phase 2) and the
+downstream `commit_daily` rollup + Redis user-summary cache (Phase 3).
 Architectural rationale lives in `CLAUDE.md`; this doc is the operational
-reference — what each knob does, what the cursor guarantees, and how to read
-the logs when something looks off.
+reference — what each knob does, what the cursor guarantees, when the rollup
+drifts, and how to read the logs when something looks off.
 
 ## Three sync entry points
 
@@ -101,6 +102,33 @@ The default budget (800) leaves a 200-call buffer below BB's documented cap;
 the default threshold (20) is sized above the worst-case per-repo cost
 (`firstRunMaxPages × concurrency` = 15 + slack).
 
+## Rollups
+
+The dashboard reads from `commit_daily`, a per-day per-(repo, user) rollup
+of the commit log. UTC-aligned `day` column; `UNIQUE NULLS NOT DISTINCT
+(day, repository_id, author_user_id)` collapses anonymous commits to one
+row per (day, repo). All commit-aggregation endpoints (`/overview`,
+`/top-contributors`, `/users/:id/summary`, `/projects/:key`,
+`/repositories`, `/repositories/:ws/:slug/activity`) read here instead of
+scanning `commits`, keeping latency flat as the commit log grows.
+
+**How it stays current.** After each successful per-repo commit sync with
+`inserted > 0`, `withRollupRecompute` (`apps/backend/src/dashboard/rollup-hook.ts`)
+re-aggregates `commit_daily` over the touched day range and DELs the
+Redis user-summary cache for users whose commits just landed. Recompute
+runs **before** invalidation so concurrent reads always refill cache from
+fresh data. Both side effects are independently failure-isolated — a
+rollup or cache error never poisons the commit-sync result.
+
+**When it can drift.** The migration backfill (`V1_3__commit_daily.sql`)
+uses `ON CONFLICT DO NOTHING` so re-applying it is safe but doesn't fix
+stale rows. So: commits that land through any code path **other than** a
+`withRollupRecompute`-wrapped sync (e.g. raw SQL inserts, restoring from
+a backup, applying the migration after sync runs had already happened
+without the hook) leave the rollup behind by exactly those commits. The
+sync hook keeps it current going forward. A "rebuild rollups" admin tool
+to reconcile drift on demand is planned (see roadmap follow-ups).
+
 ## Configuration
 
 All knobs have safe defaults — a fresh clone runs the cron without
@@ -142,7 +170,7 @@ lengthen in production if you want.
 | `GET /api/stats/repositories/:workspace/:slug/activity`      | Repo activity: 30-day daily sparkline, last 20 commits, 30-day contributors.           |
 | `GET /api/stats/repositories`                                | All tracked repositories with `project`, `commits30d`, and `lastCommitAt`.             |
 
-All `/api/stats/*` endpoints read from `commit_daily` (after T16) joined to
+All `/api/stats/*` endpoints read from `commit_daily` joined to
 `repositories` / `users` and return 404 when a specific target entity doesn't
 exist. The repository-list endpoint drives the dashboard's Projects panel
 (derived client-side by grouping on `project`) and Repositories panel.

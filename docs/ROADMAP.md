@@ -72,14 +72,16 @@ The core data source. Most of the API-minimization care lands here.
 
 **Status:** Landed across `09b86c1`..`412525b` (7 commits). Operator + reader notes — modes, cursor guarantees, budget gate, all env knobs, admin + dashboard endpoints — live in [`docs/sync.md`](sync.md). Frontend dashboard now shows 5 stat cards plus a Top Contributors panel with a 7d/30d window toggle.
 
-### Phase 3 — Rollups + Redis user-summary cache (~3–4 days)
+### Phase 3 — Rollups + Redis user-summary cache (~3–4 days) ✅ Landed
 
 Dashboard reads from pre-computed summaries, not raw aggregations on every page load. **Zero new API calls — pure local compute.**
 
-- Postgres rollup tables (or matviews): per-user-per-day, per-repo-per-day, per-project-per-week.
-- After each sync run, recompute affected user summaries → Redis with 1h TTL + hard invalidation when new commits land for the user. This is where the "Redis is for user summaries only" rule from `CLAUDE.md` finally activates.
-- Backend endpoints: `/api/users/:id/summary`, `/api/projects/:slug/stats`, `/api/repos/:slug/activity`.
-- Frontend: Pinia stores hydrate from these endpoints; persisted across reloads; UI reads Pinia first per the offline-first rule.
+- One Postgres rollup table — `commit_daily(day, repository_id, author_user_id, commit_count, additions, deletions)` with `UNIQUE NULLS NOT DISTINCT` on the key so anonymous-author commits collapse to one row per `(day, repo)`. Per-user / per-repo / per-project rollups are SQL aggregations off this single base, not separate tables.
+- After each successful per-repo commit sync, the rollup is recomputed for the touched day range and the affected users' Redis cache entries are DEL'd. Recompute runs before invalidation so concurrent reads always repopulate from fresh data. The "Redis is for user summaries only" rule from `CLAUDE.md` is now active — Redis key prefix `bbstat:user-summary:{id}`, 1h TTL.
+- Backend endpoints under `/api/stats/`: `users/:id/summary`, `projects/:projectKey`, `repositories/:ws/:slug/activity`, plus `repositories` (dashboard listing).
+- Frontend: keyed Pinia stores (`userSummary`, `projectStats`, `repoActivity`) hydrate from these endpoints, persist across reloads, and back three new detail pages reachable from the dashboard's Top Contributors / Projects / Tracked Repositories panels.
+
+**Status:** Landed across `3dacb15`..`a06d292` (12 commits). Operator notes — rollup mechanics, drift conditions, cache invalidation, all six dashboard endpoints — live in [`docs/sync.md`](sync.md). Frontend now has user / project / repo detail pages all reachable from the dashboard, and the legacy `/overview` + `/top-contributors` endpoints read from `commit_daily` so latency stays flat as the commit log grows.
 
 ### Phase 4 — Code-change volume + activity feed (~3–4 days)
 
