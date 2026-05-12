@@ -31,7 +31,11 @@ export interface SyncRunnerDeps {
   store: DiscoveryStore;
   logger: BitbucketLogger;
   workspace: string;
-  seeds: RepoSeed[];
+  // Thunk so each sync invocation re-reads the seed file. Lets operators
+  // edit `tracked-repos.yaml` and have the next `POST /sync/discover` (or
+  // next cron tick) pick up the change with no restart. A malformed file
+  // throws here, surfaced as the sync's error path.
+  seeds: () => RepoSeed[];
   commitStore: CommitStore;
   // Defaults applied by runCommitsTick if absent.
   commitTickOptions?: CommitsTickOptions;
@@ -85,8 +89,9 @@ export async function runMembersSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
 
 export async function runReposSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<ReposSyncResult> {
   const startedAt = new Date().toISOString();
-  deps.logger.info?.({ trigger, workspace: deps.workspace, seedCount: deps.seeds.length }, 'repos sync start');
-  const repos = await bootstrapTrackedRepositories(deps, deps.seeds);
+  const seeds = deps.seeds();
+  deps.logger.info?.({ trigger, workspace: deps.workspace, seedCount: seeds.length }, 'repos sync start');
+  const repos = await bootstrapTrackedRepositories(deps, seeds);
   const finishedAt = new Date().toISOString();
   deps.logger.info?.({ trigger, repos, startedAt, finishedAt }, 'repos sync complete');
   return { trigger, startedAt, finishedAt, repos };
@@ -96,7 +101,7 @@ export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigge
   const startedAt = new Date().toISOString();
   deps.logger.info?.({ trigger, workspace: deps.workspace }, 'discovery sync start');
   const members = await syncWorkspaceMembers(deps, deps.workspace);
-  const repos = await bootstrapTrackedRepositories(deps, deps.seeds);
+  const repos = await bootstrapTrackedRepositories(deps, deps.seeds());
   const finishedAt = new Date().toISOString();
   deps.logger.info?.({ trigger, members, repos, startedAt, finishedAt }, 'discovery sync complete');
   return { trigger, startedAt, finishedAt, members, repos };

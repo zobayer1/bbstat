@@ -1,12 +1,15 @@
 // Discovery: the slow-cadence sync work that establishes who and what we
 // track. Workspace members go into `users`; the curated repo list (from
-// SEED_TRACKED_REPOS plus admin-added entries) goes into `repositories` +
-// `sync_state`.
+// the SEED_REPO_FILE_PATH YAML plus admin-added entries) goes into
+// `repositories` + `sync_state`.
 //
 // All functions here are pure (relative to the injected `client` and
 // `store`), so they're trivial to test without a database. Wiring into
 // runSync() / cron / admin endpoints lives in Phase 1.3.
 
+import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
+import { z } from 'zod';
 import type { BitbucketClient } from '../bitbucket/client.js';
 import type { BitbucketLogger } from '../bitbucket/client.js';
 import type { DiscoveryStore } from './discovery-store.js';
@@ -80,22 +83,46 @@ export interface RepoSeed {
   slug: string;
 }
 
-// Parse SEED_TRACKED_REPOS — comma-separated `<workspace>/<slug>`. Whitespace
-// is tolerated; empty entries are skipped. Throws on malformed entries so a
-// typo at startup fails loud.
-export function parseSeedTrackedRepos(raw: string | undefined): RepoSeed[] {
-  if (!raw) return [];
-  return raw
-    .split(',')
+// Shape of the seed file: a top-level `repos:` list of "<workspace>/<slug>"
+// strings. Wrapping in a key (vs. a bare top-level list) leaves room to grow
+// the file with sibling sections later without a breaking format change.
+const seedFileSchema = z.object({
+  repos: z.array(z.string()),
+});
+
+// Parse the raw YAML text of a seed file into RepoSeed[]. Pure — no IO.
+// Throws on shape mismatches or malformed entries so typos fail loud.
+export function parseSeedRepoFile(text: string): RepoSeed[] {
+  const raw: unknown = parseYaml(text);
+  const parsed = seedFileSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    throw new Error(`Seed repo file is malformed: ${issues}`);
+  }
+  return parsed.data.repos
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
     .map((entry) => {
       const parts = entry.split('/');
       if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        throw new Error(`SEED_TRACKED_REPOS entry must be "<workspace>/<slug>" — got "${entry}"`);
+        throw new Error(`Seed repo file entry must be "<workspace>/<slug>" — got "${entry}"`);
       }
       return { workspace: parts[0], slug: parts[1] };
     });
+}
+
+// Load seeds from `filePath`. When `required` is true (env explicitly set),
+// a missing file throws; otherwise (default path) missing is a no-op.
+export function loadSeedTrackedRepos(filePath: string, options: { required: boolean }): RepoSeed[] {
+  let text: string;
+  try {
+    text = readFileSync(filePath, 'utf8');
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === 'ENOENT' && !options.required) return [];
+    throw new Error(`Seed repo file at ${filePath} could not be read: ${e.message}`);
+  }
+  return parseSeedRepoFile(text);
 }
 
 export interface AddTrackedRepoResult {

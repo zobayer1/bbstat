@@ -13,7 +13,6 @@ const testConfig: AppConfig = {
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
-  SEED_TRACKED_REPOS: '',
   SYNC_MEMBERS_CRON: '*/10 * * * *',
   SYNC_REPOS_CRON: '*/5 * * * *',
   SYNC_COMMITS_CRON: '*/15 * * * *',

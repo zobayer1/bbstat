@@ -54,6 +54,10 @@ Thumbs.db
 # Per-developer self-signed CA + server cert. See CLAUDE.md / etc/tls/README.
 etc/tls/
 
+# --- Curated tracked-repo seed list (per-developer; example is committed) ---
+tracked-repos.yaml
+!tracked-repos.yaml.example
+
 # --- Misc ---
 *.tmp
 *.bak

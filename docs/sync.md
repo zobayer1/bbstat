@@ -21,6 +21,28 @@ share the same dedupe / idempotency / store contracts:
 stopping the API server doesn't stop the sync. Triggering work manually goes
 through the admin endpoints (below); the same runner functions are reused.
 
+## Curated tracked set
+
+The set of repos `runReposSync` / `runCommitsSync` operate on is sourced from
+`tracked-repos.yaml` at the repo root (gitignored — copy from
+`tracked-repos.yaml.example` on a fresh clone). The file holds one top-level
+`repos:` list of `<workspace>/<slug>` strings. Each entry is upserted into
+`repositories` + `sync_state` via `bootstrapTrackedRepositories`, idempotent
+across runs.
+
+The file is read on backend startup (one-time fail-loud parse check) and
+re-read on every `runReposSync` / `runDiscoverySync` invocation, so YAML edits
+land at the next sync without a restart. A missing file at the default path
+is a no-op; an explicit `SEED_REPO_FILE_PATH` that doesn't exist fails loud
+at startup. Malformed YAML throws — at boot if bad on startup, otherwise as
+the sync's error path (500 on `POST /sync/discover`, error log under cron).
+
+Removal isn't symmetric: deleting a YAML entry stops the repo being
+re-bootstrapped, but the already-tracked row stays in `repositories` and
+keeps getting synced. Soft-delete via a `tracked` column is on the Phase 5
+roadmap; for now the workaround is a manual DELETE against `repositories`
+(cascades to `sync_state` and `commits`).
+
 ## Commit-sync modes
 
 Each tracked repo has one row in `sync_state` with a single cursor:

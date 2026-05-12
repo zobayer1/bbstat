@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import cron from 'node-cron';
 import { loadConfig } from '../config.js';
 import { createLogger } from '../lib/logger.js';
@@ -5,7 +6,7 @@ import { createDb } from '../db/client.js';
 import { BitbucketClient } from '../bitbucket/client.js';
 import { createDrizzleCommitStore } from './commit-store.js';
 import { createDrizzleDiscoveryStore } from './discovery-store.js';
-import { parseSeedTrackedRepos } from './discovery.js';
+import { loadSeedTrackedRepos } from './discovery.js';
 import { commitTickOptionsFromConfig, runCommitsSync, runMembersSync, runReposSync } from './runner.js';
 import type { SyncRunnerDeps } from './runner.js';
 
@@ -28,7 +29,16 @@ async function main(): Promise<void> {
     hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
     logger,
   });
-  const seeds = parseSeedTrackedRepos(config.SEED_TRACKED_REPOS);
+  // Mirror the main backend entrypoint: seed path resolves against repo root
+  // (apps/backend/src/sync → ../../../../), explicit path required, default
+  // optional. Loader runs once at startup as a fail-loud parse check, then is
+  // re-invoked by the runner on each sync so YAML edits land without restart.
+  const repoRoot = resolve(import.meta.dirname, '..', '..', '..', '..');
+  const seedFilePath = resolve(repoRoot, config.SEED_REPO_FILE_PATH ?? 'tracked-repos.yaml');
+  const seedRequired = config.SEED_REPO_FILE_PATH !== undefined;
+  const loadSeeds = (): ReturnType<typeof loadSeedTrackedRepos> =>
+    loadSeedTrackedRepos(seedFilePath, { required: seedRequired });
+  const initialSeeds = loadSeeds();
   const commitTickOptions = commitTickOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
@@ -36,7 +46,7 @@ async function main(): Promise<void> {
     store,
     logger,
     workspace: config.BITBUCKET_WORKSPACE,
-    seeds,
+    seeds: loadSeeds,
     commitStore,
     commitTickOptions,
   };
@@ -63,7 +73,7 @@ async function main(): Promise<void> {
       commitsCron: config.SYNC_COMMITS_CRON,
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
       commitTickOptions,
-      seedCount: seeds.length,
+      seedCount: initialSeeds.length,
     },
     'Sync runner scheduled. Press Ctrl+C to exit.',
   );

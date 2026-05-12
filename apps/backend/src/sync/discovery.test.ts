@@ -1,9 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BitbucketClient } from '../bitbucket/client.js';
 import {
   addTrackedRepository,
   bootstrapTrackedRepositories,
-  parseSeedTrackedRepos,
+  loadSeedTrackedRepos,
+  parseSeedRepoFile,
   syncWorkspaceMembers,
 } from './discovery.js';
 import type { DiscoveryStore, RepositoryInsertInput, RepositoryRow, UserUpsertInput } from './discovery-store.js';
@@ -72,23 +76,59 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 // ---------------------------------------------------------------------------
 
-describe('parseSeedTrackedRepos', () => {
-  it('returns empty array for empty/undefined input', () => {
-    expect(parseSeedTrackedRepos('')).toEqual([]);
-    expect(parseSeedTrackedRepos(undefined)).toEqual([]);
+describe('parseSeedRepoFile', () => {
+  it('returns empty array when repos list is empty', () => {
+    expect(parseSeedRepoFile('repos: []')).toEqual([]);
   });
 
-  it('parses comma-separated workspace/slug pairs and tolerates whitespace', () => {
-    expect(parseSeedTrackedRepos('  tigerit/boing-server, tigerit/boing-relay ')).toEqual([
+  it('parses workspace/slug strings and tolerates surrounding whitespace', () => {
+    const text = `
+repos:
+  - "  tigerit/boing-server  "
+  - tigerit/boing-relay
+`;
+    expect(parseSeedRepoFile(text)).toEqual([
       { workspace: 'tigerit', slug: 'boing-server' },
       { workspace: 'tigerit', slug: 'boing-relay' },
     ]);
   });
 
   it('throws on malformed entries', () => {
-    expect(() => parseSeedTrackedRepos('tigerit')).toThrow(/must be "<workspace>\/<slug>"/);
-    expect(() => parseSeedTrackedRepos('tigerit/')).toThrow(/must be "<workspace>\/<slug>"/);
-    expect(() => parseSeedTrackedRepos('/repo')).toThrow(/must be "<workspace>\/<slug>"/);
+    expect(() => parseSeedRepoFile('repos: ["tigerit"]')).toThrow(/must be "<workspace>\/<slug>"/);
+    expect(() => parseSeedRepoFile('repos: ["tigerit/"]')).toThrow(/must be "<workspace>\/<slug>"/);
+    expect(() => parseSeedRepoFile('repos: ["/repo"]')).toThrow(/must be "<workspace>\/<slug>"/);
+  });
+
+  it('throws when the top-level shape is wrong', () => {
+    expect(() => parseSeedRepoFile('not_repos: []')).toThrow(/malformed/);
+    expect(() => parseSeedRepoFile('repos: [1, 2]')).toThrow(/malformed/);
+    expect(() => parseSeedRepoFile('repos: not-a-list')).toThrow(/malformed/);
+  });
+});
+
+describe('loadSeedTrackedRepos', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'bbstat-seed-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns [] for a missing file when required=false (default path)', () => {
+    expect(loadSeedTrackedRepos(join(dir, 'missing.yaml'), { required: false })).toEqual([]);
+  });
+
+  it('throws on a missing file when required=true (explicit path)', () => {
+    expect(() => loadSeedTrackedRepos(join(dir, 'missing.yaml'), { required: true })).toThrow(/could not be read/);
+  });
+
+  it('reads and parses an existing seed file', () => {
+    const path = join(dir, 'seeds.yaml');
+    writeFileSync(path, 'repos:\n  - tigerit/boing-server\n');
+    expect(loadSeedTrackedRepos(path, { required: false })).toEqual([{ workspace: 'tigerit', slug: 'boing-server' }]);
   });
 });
 

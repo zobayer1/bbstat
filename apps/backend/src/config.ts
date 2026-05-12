@@ -17,10 +17,12 @@ const envSchema = z.object({
   // 800 leaves a safety margin. See memory/bitbucket_rate_limit_headers.md.
   BITBUCKET_HOURLY_CALL_BUDGET: z.coerce.number().int().positive().default(800),
 
-  // Comma-separated `<workspace>/<slug>` pairs to bootstrap the curated
-  // tracked-repository set on startup. Empty = no auto-bootstrap; admins add
-  // repos via POST /api/admin/repositories instead.
-  SEED_TRACKED_REPOS: z.string().default(''),
+  // Path to the curated tracked-repository seed file (YAML). Resolved against
+  // the repo root if relative. If unset, defaults to `tracked-repos.yaml` at
+  // the repo root — and a missing default file is a no-op (admins add repos
+  // via POST /api/admin/repositories instead). If explicitly set, the file
+  // must exist or startup fails loud.
+  SEED_REPO_FILE_PATH: z.string().optional(),
 
   // Cron schedules. Defaults are tight to make crons easy to observe during
   // dev; lengthen them in production once we trust the runner.

@@ -54,7 +54,8 @@ bbstat/
 ├── eslint.config.js    # Flat config, applies to all workspaces
 ├── tsconfig.base.json  # Shared strict TS settings
 ├── pnpm-workspace.yaml # Workspaces: apps/*, packages/*
-└── .env.example        # Copy to .env at repo root for both apps
+├── .env.example        # Copy to .env at repo root for both apps
+└── tracked-repos.yaml.example  # Copy to tracked-repos.yaml — curated seed list (gitignored)
 ```
 
 There is no `packages/*` yet. If shared TS types between backend and frontend become useful, that is where they'd land (e.g. `packages/shared`).
@@ -108,7 +109,8 @@ pnpm --filter @bbstat/frontend exec vitest run tests/StatCard.test.ts
    (Most modern resolvers already map `*.localhost` to `127.0.0.1`, but pin it explicitly to avoid surprises.)
 2. **Trust the local CA** — `etc/tls/ca.crt` must be imported into the OS / browser trust store, otherwise the dev server will throw cert warnings. Each developer does this once on their machine.
 3. **Copy `.env.example` to `.env`** at the repo root. Both apps load it (backend via `node --env-file`, frontend via Vite's `loadEnv`). Fill in BitBucket credentials when ready to ingest.
-4. **Postgres + Redis** — start via `docker compose up -d` before running the backend.
+4. **Copy `tracked-repos.yaml.example` to `tracked-repos.yaml`** at the repo root and edit the `repos:` list. Each `<workspace>/<slug>` entry is auto-inserted into the `repositories` table on backend startup, and the file is re-read on every `runReposSync` / `runDiscoverySync`, so edits land at the next sync without a restart. Override the location with `SEED_REPO_FILE_PATH` in `.env` (default: `tracked-repos.yaml` at the repo root; a missing default file is a no-op).
+5. **Postgres + Redis** — start via `docker compose up -d` before running the backend.
 
 ## Local TLS (`etc/tls/`)
 

@@ -35,7 +35,7 @@ The plumbing every later phase depends on.
 - Drizzle schema additions: `branches`, `pull_requests`, `sync_state` (per-repo cursor table). `repositories` represents the curated tracked set — no `is_tracked` flag, just presence/absence in the table.
 - Generate first real migration, apply via `make db-migrate`.
 - Rename env vars: `BITBUCKET_USERNAME` → `BITBUCKET_AUTH_EMAIL`, `BITBUCKET_APP_PASSWORD` → `BITBUCKET_AUTH_TOKEN`.
-- New env var: `SEED_TRACKED_REPOS` (comma-separated `workspace/slug` list) — bootstraps the curated set on first migration.
+- Curated seed list lives in `tracked-repos.yaml` at the repo root (gitignored; `tracked-repos.yaml.example` is committed). A top-level `repos:` list of `<workspace>/<slug>` strings bootstraps the curated set on backend startup. Override the file path via `SEED_REPO_FILE_PATH` in `.env`.
 - `pnpm doctor` (Makefile: `make doctor`) script that hits `/workspaces/<ws>` and prints a green check — proves end-to-end auth before any sync code runs.
 
 **Deliverable:** doctor passes, migrations applied, no functional sync yet.
@@ -45,7 +45,7 @@ The plumbing every later phase depends on.
 Get the curated set into the database; enumerate users.
 
 - Sync workspace members → `users`. Single paginated call set (~30 devs / 1 page). Runs every ~24h.
-- On startup, reconcile `repositories` against `SEED_TRACKED_REPOS`: insert any missing rows, fetch fresh metadata per repo (`/repositories/{ws}/{slug}` — 1 call each, only for new entries).
+- On startup (and on every `runReposSync` / `runDiscoverySync`), reconcile `repositories` against `tracked-repos.yaml`: insert any missing rows, fetch fresh metadata per repo (`/repositories/{ws}/{slug}` — 1 call each, only for new entries). The re-read on each sync means YAML edits land without a restart.
 - Admin endpoint: `POST /api/admin/repositories` to add a repo to the curated set (idempotent; queues first backfill).
 - Field-filter heavily on every list call: `uuid`, `slug`, `name`, `project.key`, `updated_on`.
 - Manual trigger: `POST /api/admin/sync/discover` — re-syncs members and repo metadata.
@@ -106,7 +106,7 @@ Kill polling for hot repos; give operators visibility and self-service.
 
 The "start small, expand gradually" approach has a clear path:
 
-1. Seed via `SEED_TRACKED_REPOS` at first install (Phase 0–1).
+1. Seed via `tracked-repos.yaml` at first install (Phase 0–1); hot-reloaded on every discovery sync.
 2. Admin endpoint to add repos (Phase 1) — usable via `curl` immediately.
 3. Admin UI with workspace browser to pick repos (Phase 5).
 4. Removal: keep historical commits but stop syncing — soft-delete via `repositories.tracked = false` if/when needed; not in initial scope.

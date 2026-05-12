@@ -48,6 +48,7 @@ bbstat/
 corepack enable                              # one-time, enables pnpm
 make install                                 # install all workspaces
 cp .env.example .env                         # fill in BitBucket creds when ready
+cp tracked-repos.yaml.example tracked-repos.yaml  # curated tracked-repo seed list (gitignored)
 make up                                      # start postgres + redis
 make dev                                     # backend on :8443, frontend on :5173 (both HTTPS)
 ```

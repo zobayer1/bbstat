@@ -7,7 +7,7 @@ import { BitbucketClient } from './bitbucket/client.js';
 import { createDb } from './db/client.js';
 import { createDrizzleCommitStore } from './sync/commit-store.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
-import { parseSeedTrackedRepos } from './sync/discovery.js';
+import { loadSeedTrackedRepos } from './sync/discovery.js';
 import { commitTickOptionsFromConfig } from './sync/runner.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
@@ -40,12 +40,23 @@ async function main(): Promise<void> {
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
       logger,
     });
+    // Seed file path: explicit env wins; otherwise default to
+    // `<repo-root>/tracked-repos.yaml`. Required when explicit so a typo
+    // fails loud; optional on the default path so fresh clones boot fine
+    // without a seed file. We invoke the loader once at startup as a
+    // fail-loud parse check, then pass the same thunk through to the
+    // runner so each sync invocation re-reads the file (no-restart edits).
+    const seedFilePath = resolve(repoRoot, config.SEED_REPO_FILE_PATH ?? 'tracked-repos.yaml');
+    const seedRequired = config.SEED_REPO_FILE_PATH !== undefined;
+    const loadSeeds = (): ReturnType<typeof loadSeedTrackedRepos> =>
+      loadSeedTrackedRepos(seedFilePath, { required: seedRequired });
+    loadSeeds();
     syncDeps = {
       client,
       store: discoveryStore,
       logger,
       workspace: config.BITBUCKET_WORKSPACE,
-      seeds: parseSeedTrackedRepos(config.SEED_TRACKED_REPOS),
+      seeds: loadSeeds,
       commitStore,
       commitTickOptions: commitTickOptionsFromConfig(config),
     };

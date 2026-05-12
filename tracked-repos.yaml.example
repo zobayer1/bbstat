@@ -1,0 +1,17 @@
+# Seed tracked-repo list — bootstrapped into the `repositories` table on
+# backend startup. The list lives in YAML (not `.env`) so it's easy to read,
+# diff, and comment lines in or out as the curated set grows.
+#
+# Copy this file to `tracked-repos.yaml` (gitignored) and edit there.
+# Override the location with SEED_REPO_FILE_PATH in `.env` if needed; otherwise
+# the backend reads `tracked-repos.yaml` from the repo root by default.
+#
+# Each entry is a plain "<workspace>/<slug>" string. Missing file is treated
+# as "no seeds" when using the default path; explicit paths must exist.
+
+repos:
+  - tigerit/boing-server
+  - tigerit/boing-relay
+  - tigerit/boing-instances
+  # - tigerit/comm-adm
+  # - tigerit/comm-video-chat
