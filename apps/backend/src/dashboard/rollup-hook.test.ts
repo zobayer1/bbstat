@@ -21,6 +21,7 @@ function makeRollupStore(overrides: Partial<RollupStore> = {}): RollupStore {
   return {
     recomputeCommitDailyForRepo: vi.fn(async () => ({ rowsAffected: 1 })),
     listAffectedUserIdsForRepo: vi.fn(async () => []),
+    rebuildAll: vi.fn(async () => ({ rowsAffected: 0 })),
     ...overrides,
   };
 }

@@ -10,6 +10,7 @@
     "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
     "dev:sync": "tsx watch --env-file-if-exists=../../.env src/sync/index.ts",
     "doctor": "tsx --env-file-if-exists=../../.env src/scripts/doctor.ts",
+    "rebuild:rollups": "tsx --env-file-if-exists=../../.env src/scripts/rebuild-rollups.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
     "start:sync": "node --env-file-if-exists=../../.env dist/sync/index.js",

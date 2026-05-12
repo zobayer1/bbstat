@@ -126,8 +126,17 @@ stale rows. So: commits that land through any code path **other than** a
 `withRollupRecompute`-wrapped sync (e.g. raw SQL inserts, restoring from
 a backup, applying the migration after sync runs had already happened
 without the hook) leave the rollup behind by exactly those commits. The
-sync hook keeps it current going forward. A "rebuild rollups" admin tool
-to reconcile drift on demand is planned (see roadmap follow-ups).
+sync hook keeps it current going forward.
+
+**Repairing drift.** `make rebuild-rollups` runs an unscoped UPSERT over
+the whole `commits` table — same aggregate shape as the migration
+backfill but `ON CONFLICT DO UPDATE`, so it overwrites stale buckets
+instead of skipping them. Shipped as a script rather than an HTTP admin
+endpoint because the deployment has no auth yet; the underlying
+`RollupStore.rebuildAll()` is the seam to lift into an authenticated
+admin route later. The rebuild does NOT prune orphan rollup rows whose
+backing commits were `DELETE`d out-of-band; the repo FK cascade handles
+repo removals, and manual commit deletion is the only remaining edge.
 
 ## Configuration
 

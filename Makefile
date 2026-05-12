@@ -87,6 +87,10 @@ dev-sync: env-init ## Run the background sync runner (cron-mode stub)
 doctor: env-init ## Verify BitBucket credentials end-to-end against your workspace
 	$(PNPM) $(BACKEND) run doctor
 
+.PHONY: rebuild-rollups
+rebuild-rollups: ## Re-aggregate commit_daily from commits (drift repair)
+	$(PNPM) $(BACKEND) run rebuild:rollups
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

@@ -34,6 +34,14 @@ export interface RollupStore {
   // on the given repo. Used by the cache-invalidation hook so we only DEL
   // Redis entries for users whose summaries actually changed.
   listAffectedUserIdsForRepo(repositoryId: number, range: DayRange): Promise<number[]>;
+
+  // Full unscoped UPSERT — re-aggregates every (day, repo, user) bucket from
+  // `commits` and writes through to `commit_daily`. Operator escape hatch for
+  // drift; invoked via `make rebuild-rollups`. Does NOT prune orphan rollup
+  // rows whose backing commits were deleted out-of-band; the FK cascade from
+  // `repositories` covers repo removals, leaving only manual `DELETE FROM
+  // commits …` as an unhandled edge.
+  rebuildAll(): Promise<RecomputeResult>;
 }
 
 export function createDrizzleRollupStore(db: Database): RollupStore {
@@ -74,6 +82,31 @@ export function createDrizzleRollupStore(db: Database): RollupStore {
           AND author_user_id IS NOT NULL
       `);
       return rows.rows.map((r) => r.author_user_id);
+    },
+
+    async rebuildAll() {
+      // Same aggregate shape as the V1_3 migration backfill, but ON CONFLICT
+      // DO UPDATE so it actually fixes drifted rows (the migration was DO
+      // NOTHING for idempotent re-apply, which can't reconcile staleness).
+      const result = await db.execute(sql`
+        INSERT INTO commit_daily (day, repository_id, author_user_id, commit_count, additions, deletions, updated_at)
+        SELECT
+          (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date AS day,
+          repository_id,
+          author_user_id,
+          count(*)::int,
+          sum(additions)::int,
+          sum(deletions)::int,
+          now()
+        FROM commits
+        GROUP BY 1, 2, 3
+        ON CONFLICT ON CONSTRAINT commit_daily_day_repo_user_unique DO UPDATE SET
+          commit_count = EXCLUDED.commit_count,
+          additions = EXCLUDED.additions,
+          deletions = EXCLUDED.deletions,
+          updated_at = now()
+      `);
+      return { rowsAffected: result.rowCount ?? 0 };
     },
   };
 }
