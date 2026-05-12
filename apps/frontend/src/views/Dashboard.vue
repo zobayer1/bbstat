@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue';
+import { RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import { useStatsStore } from '@/stores/stats';
 import type { ContributorWindow } from '@/api/client';
@@ -75,7 +76,12 @@ const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Las
           >
             <div class="flex items-center gap-3">
               <span class="w-5 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-              <span class="text-sm font-medium text-slate-900">{{ c.displayName }}</span>
+              <RouterLink
+                :to="{ name: 'user', params: { userId: c.userId } }"
+                class="text-sm font-medium text-slate-900 hover:text-slate-600"
+              >
+                {{ c.displayName }}
+              </RouterLink>
             </div>
             <span class="text-sm text-slate-500">{{ c.commits }} commits</span>
           </li>
