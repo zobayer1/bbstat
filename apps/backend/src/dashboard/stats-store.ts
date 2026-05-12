@@ -2,12 +2,16 @@
 // Drizzle impl — to keep route tests pure (fake store, no DB) and to keep
 // the Phase 3 rollups + Redis cache pluggable behind the same interface.
 //
-// Phase 2 methods (getOverview, getLatestCommitForRepository, getTopContributors)
-// currently scan `commits` directly. Phase 3 T16 swaps them to read from
-// `commit_daily`. The three new methods below (user / project / repo activity)
-// read from `commit_daily` from day one.
+// All commit-aggregation methods now read from `commit_daily` (per-day per
+// repo per author rollup). The aggregation reads use UTC day buckets — the
+// pre-rollup implementation used rolling time windows down to the millisecond,
+// but day buckets are what the dashboard reasonably means by "last 7 days"
+// and match what the rollup table can give us cheaply at any size. Methods
+// that need per-commit detail (`getLatestCommitForRepository`,
+// `getRepositoryActivity.recentCommits`) still hit `commits` directly — the
+// rollup doesn't carry shas, messages, or precise timestamps.
 
-import { and, desc, eq, gte, isNotNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { commits, repositories, users } from '../db/schema.js';
 
@@ -105,24 +109,31 @@ export interface StatsStore {
 export function createDrizzleStatsStore(db: Database): StatsStore {
   return {
     async getOverview() {
-      const sevenDaysAgo = new Date(Date.now() - 7 * 86_400_000);
-      const [usersRow] = await db.select({ count: sql<number>`count(*)::int` }).from(users);
-      const [reposRow] = await db.select({ count: sql<number>`count(*)::int` }).from(repositories);
-      const [projectsRow] = await db
-        .select({ count: sql<number>`count(distinct project)::int` })
-        .from(repositories)
-        .where(isNotNull(repositories.project));
-      const [totalCommitsRow] = await db.select({ count: sql<number>`count(*)::int` }).from(commits);
-      const [recentCommitsRow] = await db
-        .select({ count: sql<number>`count(*)::int` })
-        .from(commits)
-        .where(gte(commits.authoredAt, sevenDaysAgo));
+      // users / repositories / projects are base-table counts and aren't
+      // related to the rollup. totalCommits and commitsLast7Days now read
+      // from commit_daily so this endpoint stays cheap regardless of how
+      // large `commits` grows.
+      const [usersRows, reposRows, projectsRows, totalCommitsRows, recentCommitsRows] = await Promise.all([
+        db.select({ count: sql<number>`count(*)::int` }).from(users),
+        db.select({ count: sql<number>`count(*)::int` }).from(repositories),
+        db
+          .select({ count: sql<number>`count(distinct project)::int` })
+          .from(repositories)
+          .where(isNotNull(repositories.project)),
+        db.execute<{ total_commits: number }>(sql`
+          SELECT COALESCE(sum(commit_count), 0)::int AS total_commits FROM commit_daily
+        `),
+        db.execute<{ commits_last_7_days: number }>(sql`
+          SELECT COALESCE(sum(commit_count), 0)::int AS commits_last_7_days
+          FROM commit_daily WHERE day >= current_date - 6
+        `),
+      ]);
       return {
-        users: usersRow?.count ?? 0,
-        repositories: reposRow?.count ?? 0,
-        projects: projectsRow?.count ?? 0,
-        totalCommits: totalCommitsRow?.count ?? 0,
-        commitsLast7Days: recentCommitsRow?.count ?? 0,
+        users: usersRows[0]?.count ?? 0,
+        repositories: reposRows[0]?.count ?? 0,
+        projects: projectsRows[0]?.count ?? 0,
+        totalCommits: totalCommitsRows.rows[0]?.total_commits ?? 0,
+        commitsLast7Days: recentCommitsRows.rows[0]?.commits_last_7_days ?? 0,
       };
     },
 
@@ -153,20 +164,30 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getTopContributors(windowDays, limit = 10) {
-      const cutoff = new Date(Date.now() - windowDays * 86_400_000);
-      return await db
-        .select({
-          userId: users.id,
-          bitbucketUuid: users.bitbucketUuid,
-          displayName: users.displayName,
-          commits: sql<number>`count(${commits.id})::int`,
-        })
-        .from(commits)
-        .innerJoin(users, eq(commits.authorUserId, users.id))
-        .where(gte(commits.authoredAt, cutoff))
-        .groupBy(users.id, users.bitbucketUuid, users.displayName)
-        .orderBy(desc(sql`count(${commits.id})`))
-        .limit(limit);
+      // INNER JOIN to users naturally excludes anonymous-author rows
+      // (cd.author_user_id IS NULL won't match any users row), matching the
+      // pre-rollup behavior. Window is `windowDays` UTC day buckets ending
+      // today: e.g. windowDays=7 → day >= current_date - 6 covers 7 days.
+      const rows = await db.execute<{
+        user_id: number;
+        bitbucket_uuid: string;
+        display_name: string;
+        commits: number;
+      }>(sql`
+        SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
+        FROM commit_daily cd
+        JOIN users u ON u.id = cd.author_user_id
+        WHERE cd.day >= current_date - ${windowDays - 1}
+        GROUP BY u.id, u.bitbucket_uuid, u.display_name
+        ORDER BY sum(cd.commit_count) DESC
+        LIMIT ${limit}
+      `);
+      return rows.rows.map((r) => ({
+        userId: r.user_id,
+        bitbucketUuid: r.bitbucket_uuid,
+        displayName: r.display_name,
+        commits: r.commits,
+      }));
     },
 
     async getUserSummary(userId) {
