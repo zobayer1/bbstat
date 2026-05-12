@@ -168,6 +168,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       // (cd.author_user_id IS NULL won't match any users row), matching the
       // pre-rollup behavior. Window is `windowDays` UTC day buckets ending
       // today: e.g. windowDays=7 → day >= current_date - 6 covers 7 days.
+      //
+      // The ::int cast on the bound param is load-bearing: without it
+      // Postgres can't infer the type of `current_date - $1` and falls back
+      // to the `date - date` overload (which yields integer), then the
+      // outer comparison `day >= integer` fails to resolve.
       const rows = await db.execute<{
         user_id: number;
         bitbucket_uuid: string;
@@ -177,7 +182,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
         FROM commit_daily cd
         JOIN users u ON u.id = cd.author_user_id
-        WHERE cd.day >= current_date - ${windowDays - 1}
+        WHERE cd.day >= current_date - ${windowDays - 1}::int
         GROUP BY u.id, u.bitbucket_uuid, u.display_name
         ORDER BY sum(cd.commit_count) DESC
         LIMIT ${limit}
