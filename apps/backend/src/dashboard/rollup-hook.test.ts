@@ -2,6 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { withRollupRecompute } from './rollup-hook.js';
 import type { CommitSyncDeps, RepoCommitSyncResult, RepositoryHandle } from '../sync/commits.js';
 import type { RollupStore } from './rollup-store.js';
+import type { UserSummaryCache } from './user-summary-cache.js';
+
+function makeCache(overrides: Partial<UserSummaryCache> = {}): UserSummaryCache {
+  return {
+    get: vi.fn(async () => null),
+    set: vi.fn(async () => undefined),
+    invalidate: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
 
 function makeRepo(): RepositoryHandle {
   return { repositoryId: 1, workspace: 'tigerit', slug: 'r', fullName: 'tigerit/r' };
@@ -77,5 +87,83 @@ describe('withRollupRecompute', () => {
 
     expect(result.inserted).toBe(5);
     expect(result.insertedRange).toEqual({ sinceDay: '2026-05-01', untilDay: '2026-05-07' });
+  });
+
+  it('invalidates user-summary cache for each affected user when cache is wired', async () => {
+    const rollup = makeRollupStore({
+      listAffectedUserIdsForRepo: vi.fn(async () => [3, 7, 11]),
+    });
+    const cache = makeCache();
+    const inner = vi.fn(async () =>
+      makeResult({ inserted: 5, insertedRange: { sinceDay: '2026-05-01', untilDay: '2026-05-07' } }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup, userSummaryCache: cache });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(cache.invalidate).toHaveBeenCalledTimes(3);
+    expect(cache.invalidate).toHaveBeenCalledWith(3);
+    expect(cache.invalidate).toHaveBeenCalledWith(7);
+    expect(cache.invalidate).toHaveBeenCalledWith(11);
+  });
+
+  it('skips cache invalidation when cache is absent', async () => {
+    const rollup = makeRollupStore({
+      listAffectedUserIdsForRepo: vi.fn(async () => [3]),
+    });
+    const inner = vi.fn(async () =>
+      makeResult({ inserted: 5, insertedRange: { sinceDay: '2026-05-01', untilDay: '2026-05-07' } }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(rollup.listAffectedUserIdsForRepo).not.toHaveBeenCalled();
+  });
+
+  it('swallows cache-invalidation errors and still returns the inner result', async () => {
+    const rollup = makeRollupStore({
+      listAffectedUserIdsForRepo: vi.fn(async () => [3]),
+    });
+    const cache = makeCache({
+      invalidate: vi.fn(async () => {
+        throw new Error('redis down');
+      }),
+    });
+    const inner = vi.fn(async () =>
+      makeResult({ inserted: 5, insertedRange: { sinceDay: '2026-05-01', untilDay: '2026-05-07' } }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup, userSummaryCache: cache });
+
+    const result = await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(result.inserted).toBe(5);
+  });
+
+  it('recomputes rollup before invalidating cache (ordering)', async () => {
+    const calls: string[] = [];
+    const rollup = makeRollupStore({
+      recomputeCommitDailyForRepo: vi.fn(async () => {
+        calls.push('recompute');
+        return { rowsAffected: 1 };
+      }),
+      listAffectedUserIdsForRepo: vi.fn(async () => {
+        calls.push('list-users');
+        return [3];
+      }),
+    });
+    const cache = makeCache({
+      invalidate: vi.fn(async () => {
+        calls.push('invalidate');
+      }),
+    });
+    const inner = vi.fn(async () =>
+      makeResult({ inserted: 5, insertedRange: { sinceDay: '2026-05-01', untilDay: '2026-05-07' } }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup, userSummaryCache: cache });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(calls).toEqual(['recompute', 'list-users', 'invalidate']);
   });
 });

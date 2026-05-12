@@ -26,6 +26,7 @@ import type { RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { BootstrapReposResult, RepoSeed, SyncMembersResult } from './discovery.js';
 import type { DiscoveryStore } from './discovery-store.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
+import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
 
 export type SyncTrigger = 'manual' | 'cron' | 'webhook';
 
@@ -44,6 +45,9 @@ export interface SyncRunnerDeps {
   // successful insert triggers a scoped commit_daily recompute. Absent in
   // tests that don't care about rollups.
   rollupStore?: RollupStore;
+  // Optional. When present (alongside rollupStore), summaries for users with
+  // commits in the touched range are DEL'd after the recompute completes.
+  userSummaryCache?: UserSummaryCache;
   // Defaults applied by runCommitsTick if absent.
   commitTickOptions?: CommitsTickOptions;
 }
@@ -126,10 +130,16 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   deps.logger.info?.({ trigger, workspace: deps.workspace, repoCount: handles.length }, 'commit sync start');
 
   // When a rollupStore is wired, decorate the per-repo syncer so each
-  // successful insert triggers a scoped commit_daily recompute. Rollup
-  // failures never poison commit-sync results — see rollup-hook.ts.
+  // successful insert triggers a scoped commit_daily recompute (and, if
+  // userSummaryCache is also wired, invalidates affected user-summary
+  // entries). Failures in either never poison commit-sync results — see
+  // rollup-hook.ts.
   const syncOne = deps.rollupStore
-    ? withRollupRecompute(syncRepositoryCommits, { rollupStore: deps.rollupStore, logger: deps.logger })
+    ? withRollupRecompute(syncRepositoryCommits, {
+        rollupStore: deps.rollupStore,
+        ...(deps.userSummaryCache ? { userSummaryCache: deps.userSummaryCache } : {}),
+        logger: deps.logger,
+      })
     : syncRepositoryCommits;
 
   const tick = await runCommitsTick(

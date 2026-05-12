@@ -9,8 +9,10 @@ import { createDrizzleCommitStore } from './sync/commit-store.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
 import { loadSeedTrackedRepos } from './sync/discovery.js';
 import { commitTickOptionsFromConfig } from './sync/runner.js';
+import { createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
+import { createRedisUserSummaryCache } from './dashboard/user-summary-cache.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 
 async function main(): Promise<void> {
@@ -35,6 +37,11 @@ async function main(): Promise<void> {
     const discoveryStore = createDrizzleDiscoveryStore(db);
     const commitStore = createDrizzleCommitStore(db);
     const rollupStore = createDrizzleRollupStore(db);
+    // Redis client is lazy-connect; first use happens when the sync hook
+    // (rollup-hook.ts) invalidates a user-summary key after a successful
+    // per-repo commit insert.
+    const redis = createCache(config.REDIS_URL);
+    const userSummaryCache = createRedisUserSummaryCache(redis);
     const client = new BitbucketClient({
       baseUrl: config.BITBUCKET_BASE_URL,
       email: config.BITBUCKET_AUTH_EMAIL,
@@ -61,6 +68,7 @@ async function main(): Promise<void> {
       seeds: loadSeeds,
       commitStore,
       rollupStore,
+      userSummaryCache,
       commitTickOptions: commitTickOptionsFromConfig(config),
     };
   }
