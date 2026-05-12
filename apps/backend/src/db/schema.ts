@@ -1,4 +1,16 @@
-import { pgTable, pgEnum, serial, text, timestamp, integer, boolean, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  pgEnum,
+  serial,
+  text,
+  timestamp,
+  date,
+  integer,
+  boolean,
+  index,
+  unique,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -51,6 +63,41 @@ export const commits = pgTable(
   (t) => ({
     shaRepoUnique: uniqueIndex('commits_sha_repo_unique').on(t.repositoryId, t.sha),
     authorAuthoredIdx: index('commits_author_authored_idx').on(t.authorUserId, t.authoredAt),
+  }),
+);
+
+// Per-day per-(repo, user) commit rollup. Populated by the sync runner after
+// each successful per-repo commit tick (see dashboard/rollup-store.ts). The
+// dashboard reads from this table instead of re-scanning `commits` on every
+// request, keeping query latency flat as the commit log grows.
+//
+// `author_user_id` is nullable: anonymous / unmatched-author commits get a
+// single row per (day, repository_id) thanks to NULLS NOT DISTINCT on the
+// unique index — without it, NULL would compare unequal and we'd accumulate
+// one duplicate per anonymous commit. Postgres ≥ 15 required.
+export const commitDaily = pgTable(
+  'commit_daily',
+  {
+    day: date('day').notNull(),
+    repositoryId: integer('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    authorUserId: integer('author_user_id').references(() => users.id, { onDelete: 'set null' }),
+    commitCount: integer('commit_count').notNull().default(0),
+    additions: integer('additions').notNull().default(0),
+    deletions: integer('deletions').notNull().default(0),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    // UNIQUE constraint (not index) because Drizzle 0.36's `.nullsNotDistinct()`
+    // is exposed on `unique()` but not on `uniqueIndex()`. ON CONFLICT can
+    // still target it by constraint name. NULLS NOT DISTINCT makes anonymous
+    // commits (author_user_id IS NULL) collapse to one row per (day, repo).
+    dayRepoUserUnique: unique('commit_daily_day_repo_user_unique')
+      .on(t.day, t.repositoryId, t.authorUserId)
+      .nullsNotDistinct(),
+    repoDayIdx: index('commit_daily_repo_day_idx').on(t.repositoryId, t.day),
+    userDayIdx: index('commit_daily_user_day_idx').on(t.authorUserId, t.day),
   }),
 );
 
