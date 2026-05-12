@@ -88,6 +88,15 @@ export interface RepoActivity {
   contributors: TopContributor[];
 }
 
+export interface TrackedRepositorySummary {
+  workspace: string;
+  slug: string;
+  fullName: string;
+  project: string | null;
+  commits30d: number;
+  lastCommitAt: string | null;
+}
+
 export const api = {
   health: () => request<{ status: string; uptime: number }>('/healthz'),
   statsOverview: () => request<OverviewStats>('/api/stats/overview'),
@@ -103,4 +112,5 @@ export const api = {
     request<RepoActivity>(
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/activity`,
     ),
+  listRepositories: () => request<TrackedRepositorySummary[]>('/api/stats/repositories'),
 };

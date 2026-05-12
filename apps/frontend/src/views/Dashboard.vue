@@ -23,6 +23,22 @@ const lastSyncLabel = computed(() => {
 
 const windows: ContributorWindow[] = ['7d', '30d'];
 const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Last 30 days');
+
+// Projects panel is derived from the repository list — group by project key
+// (skipping repos with no project assignment), then sort by 30d activity.
+const projectsPanel = computed(() => {
+  const buckets = new Map<string, { repoCount: number; commits30d: number }>();
+  for (const r of stats.repositories) {
+    if (r.project === null) continue;
+    const cur = buckets.get(r.project) ?? { repoCount: 0, commits30d: 0 };
+    cur.repoCount++;
+    cur.commits30d += r.commits30d;
+    buckets.set(r.project, cur);
+  }
+  return Array.from(buckets, ([projectKey, b]) => ({ projectKey, ...b })).sort((a, b) => b.commits30d - a.commits30d);
+});
+
+const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
 </script>
 
 <template>
@@ -89,6 +105,69 @@ const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Las
         <p v-else class="px-4 py-6 text-center text-sm text-slate-400">
           No commits in the {{ windowLabel(stats.contributorsWindow).toLowerCase() }}.
         </p>
+      </div>
+    </section>
+
+    <section class="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div>
+        <h2 class="mb-3 text-lg font-semibold text-slate-900">Projects</h2>
+        <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <ul v-if="projectsPanel.length > 0" class="divide-y divide-slate-100">
+            <li v-for="p in projectsPanel" :key="p.projectKey" class="flex items-center justify-between px-4 py-3">
+              <RouterLink
+                :to="{ name: 'project', params: { projectKey: p.projectKey } }"
+                class="text-sm font-medium text-slate-900 hover:text-slate-600"
+              >
+                {{ p.projectKey }}
+              </RouterLink>
+              <span class="text-sm text-slate-500">
+                {{ p.repoCount }} {{ p.repoCount === 1 ? 'repo' : 'repos' }} · {{ p.commits30d }} commits 30d
+              </span>
+            </li>
+          </ul>
+          <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No projects with tracked repositories.</p>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="mb-3 text-lg font-semibold text-slate-900">Tracked repositories</h2>
+        <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+          <table v-if="stats.repositories.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
+            <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+              <tr>
+                <th class="px-4 py-2 text-left font-medium">Repository</th>
+                <th class="px-4 py-2 text-left font-medium">Project</th>
+                <th class="px-4 py-2 text-right font-medium">30d</th>
+                <th class="px-4 py-2 text-right font-medium">Last commit</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              <tr v-for="r in stats.repositories" :key="r.fullName">
+                <td class="px-4 py-2">
+                  <RouterLink
+                    :to="{ name: 'repository', params: { workspace: r.workspace, slug: r.slug } }"
+                    class="font-medium text-slate-900 hover:text-slate-600"
+                  >
+                    {{ r.fullName }}
+                  </RouterLink>
+                </td>
+                <td class="px-4 py-2">
+                  <RouterLink
+                    v-if="r.project"
+                    :to="{ name: 'project', params: { projectKey: r.project } }"
+                    class="text-slate-700 hover:text-slate-500"
+                  >
+                    {{ r.project }}
+                  </RouterLink>
+                  <span v-else class="text-slate-400">—</span>
+                </td>
+                <td class="px-4 py-2 text-right text-slate-900">{{ r.commits30d }}</td>
+                <td class="px-4 py-2 text-right text-slate-500">{{ formatLastCommit(r.lastCommitAt) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No tracked repositories.</p>
+        </div>
       </div>
     </section>
 

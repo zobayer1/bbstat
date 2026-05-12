@@ -1,17 +1,18 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
-import type { ContributorWindow, OverviewStats, TopContributor } from '@/api/client';
+import type { ContributorWindow, OverviewStats, TopContributor, TrackedRepositorySummary } from '@/api/client';
 
 // Pinia is the client-side cache (per CLAUDE.md). Hydrates from
-// /api/stats/overview + /api/stats/top-contributors; persisted state keeps
-// the dashboard usable across reloads even when the backend is briefly
-// unreachable (offline-first).
+// /api/stats/overview + /api/stats/top-contributors + /api/stats/repositories;
+// persisted state keeps the dashboard usable across reloads even when the
+// backend is briefly unreachable (offline-first).
 export const useStatsStore = defineStore(
   'stats',
   () => {
     const overview = ref<OverviewStats | null>(null);
     const topContributors = ref<TopContributor[]>([]);
+    const repositories = ref<TrackedRepositorySummary[]>([]);
     const contributorsWindow = ref<ContributorWindow>('7d');
     const lastSyncedAt = ref<string | null>(null);
     const loading = ref(false);
@@ -21,9 +22,14 @@ export const useStatsStore = defineStore(
       loading.value = true;
       error.value = null;
       try {
-        const [ov, contribs] = await Promise.all([api.statsOverview(), api.topContributors(contributorsWindow.value)]);
+        const [ov, contribs, repos] = await Promise.all([
+          api.statsOverview(),
+          api.topContributors(contributorsWindow.value),
+          api.listRepositories(),
+        ]);
         overview.value = ov;
         topContributors.value = contribs;
+        repositories.value = repos;
         lastSyncedAt.value = new Date().toISOString();
       } catch (e) {
         error.value = e instanceof Error ? e.message : String(e);
@@ -45,6 +51,7 @@ export const useStatsStore = defineStore(
     function clear() {
       overview.value = null;
       topContributors.value = [];
+      repositories.value = [];
       lastSyncedAt.value = null;
       error.value = null;
     }
@@ -52,6 +59,7 @@ export const useStatsStore = defineStore(
     return {
       overview,
       topContributors,
+      repositories,
       contributorsWindow,
       lastSyncedAt,
       loading,
@@ -61,5 +69,5 @@ export const useStatsStore = defineStore(
       clear,
     };
   },
-  { persist: { pick: ['overview', 'topContributors', 'contributorsWindow', 'lastSyncedAt'] } },
+  { persist: { pick: ['overview', 'topContributors', 'repositories', 'contributorsWindow', 'lastSyncedAt'] } },
 );

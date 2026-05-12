@@ -6,6 +6,7 @@ vi.mock('../src/api/client', () => ({
   api: {
     statsOverview: vi.fn(),
     topContributors: vi.fn(),
+    listRepositories: vi.fn(),
   },
 }));
 
@@ -22,34 +23,49 @@ const sampleContributors = [
   { userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 42 },
   { userId: 2, bitbucketUuid: '{u2}', displayName: 'Bob', commits: 17 },
 ];
+const sampleRepositories = [
+  {
+    workspace: 'tigerit',
+    slug: 'r1',
+    fullName: 'tigerit/r1',
+    project: 'COMM',
+    commits30d: 30,
+    lastCommitAt: '2026-05-12T00:00:00.000Z',
+  },
+];
 
 describe('stats store', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
     vi.mocked(api.topContributors).mockResolvedValue([]);
+    vi.mocked(api.listRepositories).mockResolvedValue([]);
   });
 
   it('starts empty, not loading, no error', () => {
     const store = useStatsStore();
     expect(store.overview).toBeNull();
     expect(store.topContributors).toEqual([]);
+    expect(store.repositories).toEqual([]);
     expect(store.contributorsWindow).toBe('7d');
     expect(store.lastSyncedAt).toBeNull();
     expect(store.loading).toBe(false);
     expect(store.error).toBeNull();
   });
 
-  it('fetchOverview() hydrates overview + topContributors and stamps lastSyncedAt', async () => {
+  it('fetchOverview() hydrates overview + topContributors + repositories and stamps lastSyncedAt', async () => {
     vi.mocked(api.statsOverview).mockResolvedValueOnce(sampleOverview);
     vi.mocked(api.topContributors).mockResolvedValueOnce(sampleContributors);
+    vi.mocked(api.listRepositories).mockResolvedValueOnce(sampleRepositories);
     const store = useStatsStore();
 
     await store.fetchOverview();
 
     expect(store.overview).toEqual(sampleOverview);
     expect(store.topContributors).toEqual(sampleContributors);
+    expect(store.repositories).toEqual(sampleRepositories);
     expect(api.topContributors).toHaveBeenCalledWith('7d');
+    expect(api.listRepositories).toHaveBeenCalledTimes(1);
     expect(store.lastSyncedAt).not.toBeNull();
     expect(store.error).toBeNull();
     expect(store.loading).toBe(false);
@@ -58,6 +74,7 @@ describe('stats store', () => {
   it('fetchOverview() captures the error and leaves stale state in place', async () => {
     vi.mocked(api.statsOverview).mockResolvedValueOnce(sampleOverview);
     vi.mocked(api.topContributors).mockResolvedValueOnce(sampleContributors);
+    vi.mocked(api.listRepositories).mockResolvedValueOnce(sampleRepositories);
     const store = useStatsStore();
     await store.fetchOverview();
 
@@ -68,6 +85,7 @@ describe('stats store', () => {
     // Stale state preserved (offline-first)
     expect(store.overview).toEqual(sampleOverview);
     expect(store.topContributors).toEqual(sampleContributors);
+    expect(store.repositories).toEqual(sampleRepositories);
     expect(store.loading).toBe(false);
   });
 
@@ -94,10 +112,11 @@ describe('stats store', () => {
 
   it('clear() resets everything', () => {
     const store = useStatsStore();
-    store.$patch({ overview: sampleOverview, topContributors: sampleContributors });
+    store.$patch({ overview: sampleOverview, topContributors: sampleContributors, repositories: sampleRepositories });
     store.clear();
     expect(store.overview).toBeNull();
     expect(store.topContributors).toEqual([]);
+    expect(store.repositories).toEqual([]);
     expect(store.lastSyncedAt).toBeNull();
     expect(store.error).toBeNull();
   });

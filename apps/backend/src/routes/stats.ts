@@ -76,4 +76,8 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
       return activity;
     },
   );
+
+  app.get('/repositories', async () => {
+    return opts.statsStore.listTrackedRepositoriesWithStats();
+  });
 };

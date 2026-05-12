@@ -86,6 +86,16 @@ export interface RepoActivity {
   contributors: TopContributor[];
 }
 
+export interface TrackedRepositorySummary {
+  workspace: string;
+  slug: string;
+  fullName: string;
+  // Project key as stored on repositories.project (null for unassigned repos).
+  project: string | null;
+  commits30d: number;
+  lastCommitAt: string | null;
+}
+
 export interface StatsStore {
   getOverview(): Promise<OverviewStats>;
   // Returns null when the repo isn't tracked or has no commits ingested yet.
@@ -104,6 +114,10 @@ export interface StatsStore {
   // Returns null when the repo isn't tracked. A tracked repo with no commits
   // returns empty arrays.
   getRepositoryActivity(workspace: string, slug: string): Promise<RepoActivity | null>;
+  // Dashboard list endpoint. All tracked repositories, ordered by most-recent
+  // activity. The dashboard renders this directly as the Repositories panel
+  // and groups by `project` client-side to drive the Projects panel.
+  listTrackedRepositoriesWithStats(): Promise<TrackedRepositorySummary[]>;
 }
 
 export function createDrizzleStatsStore(db: Database): StatsStore {
@@ -370,6 +384,38 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
         })),
       };
+    },
+
+    async listTrackedRepositoriesWithStats() {
+      const rows = await db.execute<{
+        workspace: string;
+        slug: string;
+        full_name: string;
+        project: string | null;
+        commits_30d: number;
+        last_commit_at: string | Date | null;
+      }>(sql`
+        SELECT
+          r.workspace,
+          r.slug,
+          r.full_name,
+          r.project,
+          COALESCE((
+            SELECT sum(commit_count)::int FROM commit_daily
+            WHERE repository_id = r.id AND day >= current_date - 29
+          ), 0) AS commits_30d,
+          (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at
+        FROM repositories r
+        ORDER BY last_commit_at DESC NULLS LAST
+      `);
+      return rows.rows.map((r) => ({
+        workspace: r.workspace,
+        slug: r.slug,
+        fullName: r.full_name,
+        project: r.project,
+        commits30d: r.commits_30d,
+        lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
+      }));
     },
 
     async getRepositoryActivity(workspace, slug) {

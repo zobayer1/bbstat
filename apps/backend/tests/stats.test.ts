@@ -49,6 +49,7 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     getUserSummary: vi.fn(),
     getProjectStats: vi.fn(),
     getRepositoryActivity: vi.fn(),
+    listTrackedRepositoriesWithStats: vi.fn(),
     ...overrides,
   };
 }
@@ -367,5 +368,44 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
 
     expect(res.statusCode).toBe(404);
     expect(res.json()).toEqual({ error: 'not_found', fullName: 'tigerit/never-tracked' });
+  });
+});
+
+describe('GET /api/stats/repositories', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the tracked-repository list from the store', async () => {
+    const repos = [
+      {
+        workspace: 'tigerit',
+        slug: 'r1',
+        fullName: 'tigerit/r1',
+        project: 'COMM',
+        commits30d: 30,
+        lastCommitAt: '2026-05-12T00:00:00.000Z',
+      },
+      {
+        workspace: 'tigerit',
+        slug: 'orphan',
+        fullName: 'tigerit/orphan',
+        project: null,
+        commits30d: 0,
+        lastCommitAt: null,
+      },
+    ];
+    const listTrackedRepositoriesWithStats = vi.fn().mockResolvedValue(repos);
+    const statsStore = makeStatsStore({ listTrackedRepositoriesWithStats });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/repositories' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(repos);
+    expect(listTrackedRepositoriesWithStats).toHaveBeenCalledTimes(1);
   });
 });

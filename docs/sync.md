@@ -140,11 +140,12 @@ lengthen in production if you want.
 | `GET /api/stats/users/:userId/summary`                       | Per-user summary: 7d/30d/all-time totals, 30-day daily sparkline, top 5 repos in 30d.  |
 | `GET /api/stats/projects/:projectKey`                        | Project rollup: totals, 12-week sparkline, top 10 contributors, per-repo summary list. |
 | `GET /api/stats/repositories/:workspace/:slug/activity`      | Repo activity: 30-day daily sparkline, last 20 commits, 30-day contributors.           |
+| `GET /api/stats/repositories`                                | All tracked repositories with `project`, `commits30d`, and `lastCommitAt`.             |
 
-The first three currently hit `commits` directly and stay that way until T16
-swaps them to `commit_daily`. The last three were rollup-backed from day one
-of Phase 3 — they read from `commit_daily` joined to `repositories` / `users`
-and return 404 when the target entity doesn't exist.
+All `/api/stats/*` endpoints read from `commit_daily` (after T16) joined to
+`repositories` / `users` and return 404 when a specific target entity doesn't
+exist. The repository-list endpoint drives the dashboard's Projects panel
+(derived client-side by grouping on `project`) and Repositories panel.
 
 ### Caching
 
