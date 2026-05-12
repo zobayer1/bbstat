@@ -81,7 +81,7 @@ Dashboard reads from pre-computed summaries, not raw aggregations on every page 
 - Backend endpoints under `/api/stats/`: `users/:id/summary`, `projects/:projectKey`, `repositories/:ws/:slug/activity`, plus `repositories` (dashboard listing).
 - Frontend: keyed Pinia stores (`userSummary`, `projectStats`, `repoActivity`) hydrate from these endpoints, persist across reloads, and back three new detail pages reachable from the dashboard's Top Contributors / Projects / Tracked Repositories panels.
 
-**Status:** Landed across `3dacb15`..`a06d292` (12 commits). Operator notes — rollup mechanics, drift conditions, cache invalidation, all six dashboard endpoints — live in [`docs/sync.md`](sync.md). Frontend now has user / project / repo detail pages all reachable from the dashboard, and the legacy `/overview` + `/top-contributors` endpoints read from `commit_daily` so latency stays flat as the commit log grows.
+**Status:** Landed across `3dacb15`..`d4fd42d` (14 commits). Operator notes — rollup mechanics, drift conditions, cache invalidation, all six dashboard endpoints, and the `make rebuild-rollups` repair script — live in [`docs/sync.md`](sync.md). Frontend now has user / project / repo detail pages all reachable from the dashboard, and the legacy `/overview` + `/top-contributors` endpoints read from `commit_daily` so latency stays flat as the commit log grows.
 
 ### Phase 4 — Code-change volume + activity feed (~3–4 days)
 
@@ -119,3 +119,5 @@ The "start small, expand gradually" approach has a clear path:
 - **Multi-workspace support** — currently scoped to one workspace via `BITBUCKET_WORKSPACE`. If we add a second, schema needs `workspace_id` propagated.
 - **Service-account credential** — the current API token is personal. For long-running production deploy, switch to a workspace-owned token or service account.
 - **Production deploy / Traefik** — `etc/tls/` and `docker-compose.yml` are dev-only. Production would terminate TLS at Traefik, run sync as a separate service, etc.
+- **Deprecated transitive deps** — `pnpm install` warns about a handful of deprecated subdeps (currently `@esbuild-kit/core-utils`, `@esbuild-kit/esm-loader`, an older `glob` reachable via `tsx`'s dependency chain). Our own code is clean and our `pnpm.overrides` already pin `glob` to v11; the residue is upstream-owned. Worth a revisit once `tsx` / its deps ship modern replacements — at that point bump or swap and drop overrides.
+- **Move "rebuild rollups" to an authenticated admin endpoint** — currently shipped as `make rebuild-rollups` because there's no auth yet. Once OAuth lands, lift `RollupStore.rebuildAll()` into `POST /api/admin/dashboard/rebuild-rollups` (the SQL stays untouched; route is ~5 lines).
