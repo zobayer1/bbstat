@@ -132,14 +132,28 @@ lengthen in production if you want.
 
 ### Dashboard read side
 
-| Endpoint                                                     | Returns                                                                              |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `GET /api/stats/overview`                                    | `{ users, repositories, projects, totalCommits, commitsLast7Days }`                  |
-| `GET /api/stats/repositories/:workspace/:slug/latest-commit` | Newest commit + author, or 404 if the repo is untracked / has no ingested commits.   |
-| `GET /api/stats/top-contributors?window=7d\|30d`             | Top 10 developers by commit count over the trailing window. Window defaults to `7d`. |
+| Endpoint                                                     | Returns                                                                                |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `GET /api/stats/overview`                                    | `{ users, repositories, projects, totalCommits, commitsLast7Days }`                    |
+| `GET /api/stats/repositories/:workspace/:slug/latest-commit` | Newest commit + author, or 404 if the repo is untracked / has no ingested commits.     |
+| `GET /api/stats/top-contributors?window=7d\|30d`             | Top 10 developers by commit count over the trailing window. Window defaults to `7d`.   |
+| `GET /api/stats/users/:userId/summary`                       | Per-user summary: 7d/30d/all-time totals, 30-day daily sparkline, top 5 repos in 30d.  |
+| `GET /api/stats/projects/:projectKey`                        | Project rollup: totals, 12-week sparkline, top 10 contributors, per-repo summary list. |
+| `GET /api/stats/repositories/:workspace/:slug/activity`      | Repo activity: 30-day daily sparkline, last 20 commits, 30-day contributors.           |
 
-These hit `commits` directly. Phase 3 swaps in pre-aggregated rollups + a
-Redis user-summary cache behind the same `StatsStore` interface.
+The first three currently hit `commits` directly and stay that way until T16
+swaps them to `commit_daily`. The last three were rollup-backed from day one
+of Phase 3 — they read from `commit_daily` joined to `repositories` / `users`
+and return 404 when the target entity doesn't exist.
+
+### Caching
+
+`GET /api/stats/users/:userId/summary` is read-through against a Redis cache
+(`bbstat:user-summary:{id}`, 1h TTL). The sync hook in `rollup-hook.ts` DELs
+the same key the moment new commits land for that user, so the TTL is only a
+backstop for inactive users — fresh data is immediate after a sync. Project
+and repo endpoints read from the rollup table directly per CLAUDE.md's
+"Redis is user-summary only" rule.
 
 ## Reading sync logs
 

@@ -294,13 +294,16 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           LIMIT 10
         `),
         // Per-repo last-commit-at comes from `commits` (the rollup doesn't
-        // carry timestamps). Cheap subquery — bounded by repo count per project.
+        // carry timestamps). Cheap subquery — bounded by repo count per
+        // project. `db.execute` returns timestamps as strings (unlike the
+        // Drizzle query builder which parses to Date), so we accept either
+        // and normalize via `new Date(...).toISOString()` below.
         db.execute<{
           workspace: string;
           slug: string;
           full_name: string;
           commits_30d: number;
-          last_commit_at: Date | null;
+          last_commit_at: string | Date | null;
         }>(sql`
           SELECT
             r.workspace,
@@ -338,7 +341,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           slug: r.slug,
           fullName: r.full_name,
           commits30d: r.commits_30d,
-          lastCommitAt: r.last_commit_at ? r.last_commit_at.toISOString() : null,
+          lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
         })),
       };
     },

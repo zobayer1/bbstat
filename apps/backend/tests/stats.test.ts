@@ -2,7 +2,25 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { AppConfig } from '../src/config.js';
-import type { LatestCommit, OverviewStats, StatsStore, TopContributor } from '../src/dashboard/stats-store.js';
+import type {
+  LatestCommit,
+  OverviewStats,
+  ProjectStats,
+  RepoActivity,
+  StatsStore,
+  TopContributor,
+  UserSummary,
+} from '../src/dashboard/stats-store.js';
+import type { UserSummaryCache } from '../src/dashboard/user-summary-cache.js';
+
+function makeCache(overrides: Partial<UserSummaryCache<UserSummary>> = {}): UserSummaryCache<UserSummary> {
+  return {
+    get: vi.fn(async () => null),
+    set: vi.fn(async () => undefined),
+    invalidate: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
 
 const testConfig: AppConfig = {
   NODE_ENV: 'test',
@@ -160,5 +178,194 @@ describe('GET /api/stats/top-contributors', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toEqual({ error: 'invalid_window', allowed: ['7d', '30d'] });
     expect(statsStore.getTopContributors).not.toHaveBeenCalled();
+  });
+});
+
+const sampleUserSummary: UserSummary = {
+  user: { id: 7, bitbucketUuid: '{u7}', displayName: 'Alice' },
+  totals: {
+    commits7d: 12,
+    commits30d: 40,
+    commitsAllTime: 200,
+    additions7d: 0,
+    deletions7d: 0,
+    additions30d: 0,
+    deletions30d: 0,
+  },
+  dailyCommits: [{ date: '2026-05-12', commits: 3 }],
+  topRepos: [{ workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', commits: 8 }],
+};
+
+describe('GET /api/stats/users/:userId/summary', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the summary from the store on cache miss and writes through', async () => {
+    const getUserSummary = vi.fn().mockResolvedValue(sampleUserSummary);
+    const statsStore = makeStatsStore({ getUserSummary });
+    const cache = makeCache();
+    appInstance = await buildApp({
+      config: testConfig,
+      logger: createLogger('test'),
+      statsStore,
+      userSummaryCache: cache,
+    });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/users/7/summary' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(sampleUserSummary);
+    expect(cache.get).toHaveBeenCalledWith(7);
+    expect(getUserSummary).toHaveBeenCalledWith(7);
+    expect(cache.set).toHaveBeenCalledWith(7, sampleUserSummary);
+  });
+
+  it('returns the cached value without calling the store on a cache hit', async () => {
+    const getUserSummary = vi.fn();
+    const statsStore = makeStatsStore({ getUserSummary });
+    const cache = makeCache({ get: vi.fn(async () => sampleUserSummary) });
+    appInstance = await buildApp({
+      config: testConfig,
+      logger: createLogger('test'),
+      statsStore,
+      userSummaryCache: cache,
+    });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/users/7/summary' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(sampleUserSummary);
+    expect(getUserSummary).not.toHaveBeenCalled();
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the store reports the user does not exist', async () => {
+    const getUserSummary = vi.fn().mockResolvedValue(null);
+    const statsStore = makeStatsStore({ getUserSummary });
+    const cache = makeCache();
+    appInstance = await buildApp({
+      config: testConfig,
+      logger: createLogger('test'),
+      statsStore,
+      userSummaryCache: cache,
+    });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/users/999/summary' });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found', userId: 999 });
+    expect(cache.set).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when userId is not a positive integer', async () => {
+    const statsStore = makeStatsStore();
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/users/-3/summary' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'invalid_user_id' });
+    expect(statsStore.getUserSummary).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/stats/projects/:projectKey', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the project stats from the store', async () => {
+    const project: ProjectStats = {
+      project: 'COMM',
+      totals: { commits7d: 1, commits30d: 2, contributorCount7d: 3, repositoryCount: 4 },
+      weeklyCommits: [{ weekStart: '2026-05-04', commits: 5 }],
+      topContributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 9 }],
+      repositories: [
+        {
+          workspace: 'tigerit',
+          slug: 'r1',
+          fullName: 'tigerit/r1',
+          commits30d: 7,
+          lastCommitAt: '2026-05-12T00:00:00.000Z',
+        },
+      ],
+    };
+    const getProjectStats = vi.fn().mockResolvedValue(project);
+    const statsStore = makeStatsStore({ getProjectStats });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/projects/COMM' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(project);
+    expect(getProjectStats).toHaveBeenCalledWith('COMM');
+  });
+
+  it('returns 404 for unknown project keys', async () => {
+    const statsStore = makeStatsStore({ getProjectStats: vi.fn().mockResolvedValue(null) });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/projects/UNKNOWN' });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found', projectKey: 'UNKNOWN' });
+  });
+});
+
+describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the repo activity from the store', async () => {
+    const activity: RepoActivity = {
+      repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+      dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
+      recentCommits: [
+        {
+          sha: 'abc',
+          message: 'msg',
+          authoredAt: '2026-05-12T00:00:00.000Z',
+          authorDisplayName: 'Alice',
+          authorBitbucketUuid: '{u1}',
+        },
+      ],
+      contributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 4 }],
+    };
+    const getRepositoryActivity = vi.fn().mockResolvedValue(activity);
+    const statsStore = makeStatsStore({ getRepositoryActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/stats/repositories/tigerit/r1/activity',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(activity);
+    expect(getRepositoryActivity).toHaveBeenCalledWith('tigerit', 'r1');
+  });
+
+  it('returns 404 for untracked repos', async () => {
+    const statsStore = makeStatsStore({ getRepositoryActivity: vi.fn().mockResolvedValue(null) });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/stats/repositories/tigerit/never-tracked/activity',
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found', fullName: 'tigerit/never-tracked' });
   });
 });

@@ -7,7 +7,8 @@ import { adminRoutes } from './routes/admin.js';
 import { statsRoutes } from './routes/stats.js';
 import type { AppConfig } from './config.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
-import type { StatsStore } from './dashboard/stats-store.js';
+import type { StatsStore, UserSummary } from './dashboard/stats-store.js';
+import type { UserSummaryCache } from './dashboard/user-summary-cache.js';
 
 export interface BuildAppOptions {
   config: AppConfig;
@@ -19,9 +20,12 @@ export interface BuildAppOptions {
   syncDeps?: SyncRunnerDeps;
   // When set, /api/stats/* dashboard read endpoints are registered.
   statsStore?: StatsStore;
+  // Optional. When wired alongside statsStore, /users/:id/summary uses it
+  // as a read-through cache. Absent in unit tests that don't care.
+  userSummaryCache?: UserSummaryCache<UserSummary>;
 }
 
-export async function buildApp({ config, logger, https, syncDeps, statsStore }: BuildAppOptions) {
+export async function buildApp({ config, logger, https, syncDeps, statsStore, userSummaryCache }: BuildAppOptions) {
   // Fastify 5: a pre-built pino instance goes on `loggerInstance`, not `logger`
   // (which is for config). Same instance ends up at app.log either way.
   const app = Fastify({
@@ -43,7 +47,11 @@ export async function buildApp({ config, logger, https, syncDeps, statsStore }: 
   }
 
   if (statsStore) {
-    await app.register(statsRoutes, { prefix: '/api/stats', statsStore });
+    await app.register(statsRoutes, {
+      prefix: '/api/stats',
+      statsStore,
+      ...(userSummaryCache ? { userSummaryCache } : {}),
+    });
   }
 
   // Suppress unused-warnings on config for consumers that may extend this.

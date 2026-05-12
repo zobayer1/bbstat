@@ -12,7 +12,8 @@ import { commitTickOptionsFromConfig } from './sync/runner.js';
 import { createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
-import { createRedisUserSummaryCache } from './dashboard/user-summary-cache.js';
+import { createRedisUserSummaryCache, type UserSummaryCache } from './dashboard/user-summary-cache.js';
+import type { UserSummary } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 
 async function main(): Promise<void> {
@@ -33,15 +34,18 @@ async function main(): Promise<void> {
   const statsStore = createDrizzleStatsStore(db);
 
   let syncDeps: SyncRunnerDeps | undefined;
+  // Declared at the outer scope so both syncDeps wiring (below) and buildApp
+  // (further below) can share the same Redis-backed cache instance. The
+  // sync hook DELs the same keys the route reads/writes.
+  let userSummaryCache: UserSummaryCache<UserSummary> | undefined;
   if (config.BITBUCKET_AUTH_EMAIL && config.BITBUCKET_AUTH_TOKEN && config.BITBUCKET_WORKSPACE) {
     const discoveryStore = createDrizzleDiscoveryStore(db);
     const commitStore = createDrizzleCommitStore(db);
     const rollupStore = createDrizzleRollupStore(db);
-    // Redis client is lazy-connect; first use happens when the sync hook
-    // (rollup-hook.ts) invalidates a user-summary key after a successful
-    // per-repo commit insert.
+    // Redis client is lazy-connect; first use is either the sync hook DEL
+    // (rollup-hook.ts) or a GET from the user-summary route.
     const redis = createCache(config.REDIS_URL);
-    const userSummaryCache = createRedisUserSummaryCache(redis);
+    userSummaryCache = createRedisUserSummaryCache<UserSummary>(redis);
     const client = new BitbucketClient({
       baseUrl: config.BITBUCKET_BASE_URL,
       email: config.BITBUCKET_AUTH_EMAIL,
@@ -73,7 +77,14 @@ async function main(): Promise<void> {
     };
   }
 
-  const app = await buildApp({ config, logger, https, syncDeps, statsStore });
+  const app = await buildApp({
+    config,
+    logger,
+    https,
+    syncDeps,
+    statsStore,
+    ...(userSummaryCache ? { userSummaryCache } : {}),
+  });
 
   try {
     await app.listen({ host: '0.0.0.0', port: config.BACKEND_PORT });
