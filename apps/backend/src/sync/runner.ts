@@ -16,6 +16,8 @@
 
 import { bootstrapTrackedRepositories, syncWorkspaceMembers } from './discovery.js';
 import { runCommitsTick } from './commits-tick.js';
+import { syncRepositoryCommits } from './commits.js';
+import { withRollupRecompute } from '../dashboard/rollup-hook.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import type { AppConfig } from '../config.js';
 import type { CommitStore } from './commit-store.js';
@@ -23,6 +25,7 @@ import type { CommitsTickOptions } from './commits-tick.js';
 import type { RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { BootstrapReposResult, RepoSeed, SyncMembersResult } from './discovery.js';
 import type { DiscoveryStore } from './discovery-store.js';
+import type { RollupStore } from '../dashboard/rollup-store.js';
 
 export type SyncTrigger = 'manual' | 'cron' | 'webhook';
 
@@ -37,6 +40,10 @@ export interface SyncRunnerDeps {
   // throws here, surfaced as the sync's error path.
   seeds: () => RepoSeed[];
   commitStore: CommitStore;
+  // Optional. When present, each per-repo commit sync is wrapped so that a
+  // successful insert triggers a scoped commit_daily recompute. Absent in
+  // tests that don't care about rollups.
+  rollupStore?: RollupStore;
   // Defaults applied by runCommitsTick if absent.
   commitTickOptions?: CommitsTickOptions;
 }
@@ -118,8 +125,15 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   }));
   deps.logger.info?.({ trigger, workspace: deps.workspace, repoCount: handles.length }, 'commit sync start');
 
+  // When a rollupStore is wired, decorate the per-repo syncer so each
+  // successful insert triggers a scoped commit_daily recompute. Rollup
+  // failures never poison commit-sync results — see rollup-hook.ts.
+  const syncOne = deps.rollupStore
+    ? withRollupRecompute(syncRepositoryCommits, { rollupStore: deps.rollupStore, logger: deps.logger })
+    : syncRepositoryCommits;
+
   const tick = await runCommitsTick(
-    { client: deps.client, store: deps.commitStore, logger: deps.logger },
+    { client: deps.client, store: deps.commitStore, logger: deps.logger, syncOne },
     handles,
     deps.commitTickOptions ?? {},
   );

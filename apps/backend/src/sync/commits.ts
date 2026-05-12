@@ -52,6 +52,11 @@ export interface RepoCommitSyncResult {
   hitKnownSha: boolean;
   hitPageCap: boolean;
   hitDateCap: boolean;
+  // UTC day window covering every commit in the just-pulled batch. Set only
+  // when the batch is non-empty (regardless of how many actually inserted —
+  // some may have lost the ON CONFLICT race). Consumed by the rollup hook
+  // in dashboard/rollup-hook.ts to scope the commit_daily recompute.
+  insertedRange: { sinceDay: string; untilDay: string } | null;
 }
 
 export interface CommitSyncDeps {
@@ -124,6 +129,7 @@ export async function syncRepositoryCommits(
       hitKnownSha: pull.hitKnownSha,
       hitPageCap: pull.hitPageCap,
       hitDateCap: pull.hitDateCap,
+      insertedRange: rangeOfBatch(pull.batch),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -185,5 +191,21 @@ function emptyResult(repo: RepositoryHandle, mode: SyncMode): RepoCommitSyncResu
     hitKnownSha: false,
     hitPageCap: false,
     hitDateCap: false,
+    insertedRange: null,
+  };
+}
+
+// UTC day bounds for a newest-first commit batch. batch[0] is the most
+// recent commit (→ untilDay); the tail is the oldest (→ sinceDay). Returns
+// null for an empty batch. The slice(0,10) trick reads the YYYY-MM-DD of
+// an ISO timestamp, which matches Postgres
+// `date_trunc('day', x AT TIME ZONE 'UTC')::date` exactly.
+function rangeOfBatch(batch: BitbucketCommit[]): { sinceDay: string; untilDay: string } | null {
+  if (batch.length === 0) return null;
+  const newest = batch[0]!.date;
+  const oldest = batch[batch.length - 1]!.date;
+  return {
+    sinceDay: new Date(oldest).toISOString().slice(0, 10),
+    untilDay: new Date(newest).toISOString().slice(0, 10),
   };
 }

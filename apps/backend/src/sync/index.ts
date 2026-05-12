@@ -8,6 +8,7 @@ import { createDrizzleCommitStore } from './commit-store.js';
 import { createDrizzleDiscoveryStore } from './discovery-store.js';
 import { loadSeedTrackedRepos } from './discovery.js';
 import { commitTickOptionsFromConfig, runCommitsSync, runMembersSync, runReposSync } from './runner.js';
+import { createDrizzleRollupStore } from '../dashboard/rollup-store.js';
 import type { SyncRunnerDeps } from './runner.js';
 
 async function main(): Promise<void> {
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
   const db = createDb(config.DATABASE_URL);
   const store = createDrizzleDiscoveryStore(db);
   const commitStore = createDrizzleCommitStore(db);
+  const rollupStore = createDrizzleRollupStore(db);
   const client = new BitbucketClient({
     baseUrl: config.BITBUCKET_BASE_URL,
     email: config.BITBUCKET_AUTH_EMAIL,
@@ -48,6 +50,7 @@ async function main(): Promise<void> {
     workspace: config.BITBUCKET_WORKSPACE,
     seeds: loadSeeds,
     commitStore,
+    rollupStore,
     commitTickOptions,
   };
 

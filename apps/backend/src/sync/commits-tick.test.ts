@@ -58,6 +58,7 @@ function makeOkResult(repo: RepositoryHandle): RepoCommitSyncResult {
     hitKnownSha: false,
     hitPageCap: false,
     hitDateCap: false,
+    insertedRange: null,
   };
 }
 
