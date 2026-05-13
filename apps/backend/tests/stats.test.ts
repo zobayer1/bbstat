@@ -387,6 +387,7 @@ describe('GET /api/stats/repositories', () => {
         fullName: 'tigerit/r1',
         project: 'COMM',
         commits30d: 30,
+        contributors30d: 4,
         lastCommitAt: '2026-05-12T00:00:00.000Z',
       },
       {
@@ -395,6 +396,7 @@ describe('GET /api/stats/repositories', () => {
         fullName: 'tigerit/orphan',
         project: null,
         commits30d: 0,
+        contributors30d: 0,
         lastCommitAt: null,
       },
     ];

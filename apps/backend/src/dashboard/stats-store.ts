@@ -93,6 +93,11 @@ export interface TrackedRepositorySummary {
   // Project key as stored on repositories.project (null for unassigned repos).
   project: string | null;
   commits30d: number;
+  // Distinct non-null author_user_id values active in the last 30 days.
+  // Anonymous / unmatched-author commits don't count toward this — the
+  // dashboard column reflects "developers who landed code", not raw author
+  // identities.
+  contributors30d: number;
   lastCommitAt: string | null;
 }
 
@@ -393,6 +398,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         full_name: string;
         project: string | null;
         commits_30d: number;
+        contributors_30d: number;
         last_commit_at: string | Date | null;
       }>(sql`
         SELECT
@@ -404,6 +410,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             SELECT sum(commit_count)::int FROM commit_daily
             WHERE repository_id = r.id AND day >= current_date - 29
           ), 0) AS commits_30d,
+          COALESCE((
+            SELECT count(DISTINCT author_user_id)::int FROM commit_daily
+            WHERE repository_id = r.id
+              AND day >= current_date - 29
+              AND author_user_id IS NOT NULL
+          ), 0) AS contributors_30d,
           (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at
         FROM repositories r
         ORDER BY last_commit_at DESC NULLS LAST
@@ -414,6 +426,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         fullName: r.full_name,
         project: r.project,
         commits30d: r.commits_30d,
+        contributors30d: r.contributors_30d,
         lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
       }));
     },

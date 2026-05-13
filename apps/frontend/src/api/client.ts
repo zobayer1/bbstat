@@ -94,6 +94,7 @@ export interface TrackedRepositorySummary {
   fullName: string;
   project: string | null;
   commits30d: number;
+  contributors30d: number;
   lastCommitAt: string | null;
 }
 

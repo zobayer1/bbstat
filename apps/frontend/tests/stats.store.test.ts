@@ -30,6 +30,7 @@ const sampleRepositories = [
     fullName: 'tigerit/r1',
     project: 'COMM',
     commits30d: 30,
+    contributors30d: 4,
     lastCommitAt: '2026-05-12T00:00:00.000Z',
   },
 ];
