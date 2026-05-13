@@ -2,6 +2,7 @@
 import { computed, onMounted, watch } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
+import ActivityFeed from '@/components/ActivityFeed.vue';
 import { useProjectStatsStore } from '@/stores/projectStats';
 
 const route = useRoute();
@@ -108,6 +109,11 @@ const formatLastCommit = (iso: string | null): string => (iso === null ? '—' :
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
+        <ActivityFeed :project="projectKey" />
       </section>
     </template>
   </main>

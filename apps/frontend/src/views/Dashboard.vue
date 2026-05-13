@@ -1,15 +1,54 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { RouterLink } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
+import Sparkline from '@/components/Sparkline.vue';
+import ActivityFeed from '@/components/ActivityFeed.vue';
 import { useStatsStore } from '@/stores/stats';
 import type { ContributorWindow } from '@/api/client';
 
 const stats = useStatsStore();
+const route = useRoute();
+const router = useRouter();
 
 onMounted(() => {
   void stats.fetchOverview();
 });
+
+// Filter state is URL-synced (router.replace, no history entries) so deep
+// links work — e.g. /?actor=42&repo=tigerit/foo lands on a pre-filtered
+// view. Bare values get omitted from the query string when cleared.
+function setQueryParam(key: string, value: string | number | undefined) {
+  const next = { ...route.query };
+  if (value === undefined || value === '') delete next[key];
+  else next[key] = String(value);
+  void router.replace({ query: next });
+}
+
+const filterActor = computed<number | undefined>({
+  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
+  set: (v) => setQueryParam('actor', v),
+});
+const filterRepo = computed<string | undefined>({
+  get: () => (typeof route.query.repo === 'string' ? route.query.repo : undefined),
+  set: (v) => setQueryParam('repo', v),
+});
+const filterProject = computed<string | undefined>({
+  get: () => (typeof route.query.project === 'string' ? route.query.project : undefined),
+  set: (v) => setQueryParam('project', v),
+});
+
+const filtersActive = computed(
+  () => filterActor.value !== undefined || filterRepo.value !== undefined || filterProject.value !== undefined,
+);
+
+function clearFilters() {
+  const next = { ...route.query };
+  delete next.actor;
+  delete next.repo;
+  delete next.project;
+  void router.replace({ query: next });
+}
 
 const repos = computed(() => stats.overview?.repositories ?? '—');
 const projects = computed(() => stats.overview?.projects ?? '—');
@@ -133,13 +172,68 @@ const pagedRepositories = computed(() => {
                 {{ c.displayName }}
               </RouterLink>
             </div>
-            <span class="text-sm text-slate-500">{{ c.commits }} commits</span>
+            <div class="flex items-center gap-3">
+              <Sparkline :points="c.last30Days" :width="64" :height="16" class="text-slate-400" />
+              <span class="w-24 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
+            </div>
           </li>
         </ul>
         <p v-else class="px-4 py-6 text-center text-sm text-slate-400">
           No commits in the {{ windowLabel(stats.contributorsWindow).toLowerCase() }}.
         </p>
       </div>
+    </section>
+
+    <section class="mt-8">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
+        <button
+          v-if="filtersActive"
+          type="button"
+          class="text-xs text-slate-500 hover:text-slate-700"
+          @click="clearFilters"
+        >
+          Clear filters
+        </button>
+      </div>
+
+      <div class="mb-3 flex flex-wrap gap-2 text-xs">
+        <label class="flex items-center gap-1">
+          <span class="text-slate-500">Project:</span>
+          <select
+            v-model="filterProject"
+            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+            aria-label="Filter by project"
+          >
+            <option :value="undefined">All</option>
+            <option v-for="p in projectsPanel" :key="p.projectKey" :value="p.projectKey">{{ p.projectKey }}</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-1">
+          <span class="text-slate-500">Repository:</span>
+          <select
+            v-model="filterRepo"
+            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+            aria-label="Filter by repository"
+          >
+            <option :value="undefined">All</option>
+            <option v-for="r in stats.repositories" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-1">
+          <span class="text-slate-500">User:</span>
+          <select
+            v-model.number="filterActor"
+            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+            aria-label="Filter by user"
+          >
+            <option :value="undefined">All</option>
+            <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
+          </select>
+        </label>
+      </div>
+
+      <ActivityFeed :actor="filterActor" :repo="filterRepo" :project="filterProject" />
     </section>
 
     <section class="mt-8">

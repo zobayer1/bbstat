@@ -2,6 +2,7 @@
 import { computed, onMounted, watch } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
+import ActivityFeed from '@/components/ActivityFeed.vue';
 import { useUserSummaryStore } from '@/stores/userSummary';
 
 const route = useRoute();
@@ -92,6 +93,11 @@ watch(userId, (next) => void store.fetch(next));
             <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No repos in the last 30 days.</p>
           </div>
         </div>
+      </section>
+
+      <section class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
+        <ActivityFeed :actor="userId" />
       </section>
     </template>
   </main>

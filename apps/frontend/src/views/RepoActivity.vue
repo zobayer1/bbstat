@@ -2,6 +2,7 @@
 import { computed, onMounted, watch } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
+import ActivityFeed from '@/components/ActivityFeed.vue';
 import { useRepoActivityStore } from '@/stores/repoActivity';
 
 const route = useRoute();
@@ -100,6 +101,11 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
           </ul>
           <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No commits ingested yet.</p>
         </div>
+      </section>
+
+      <section class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
+        <ActivityFeed :repo="fullName" />
       </section>
     </template>
   </main>
