@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   pgTable,
   pgEnum,
@@ -35,6 +36,11 @@ export const users = pgTable('users', {
 // `repositories` represents the curated *tracked* set — only repos in this
 // table are ingested by sync workers. Untracked repos in the workspace are
 // simply absent. See docs/ROADMAP.md "Curated list growth".
+//
+// `diff_stats_enabled` is the Phase 4 opt-in for fetching per-commit additions
+// / deletions via /diffstat/:sha. Authoritative source for the flag is the
+// `repositories` row; `tracked-repos.yaml` writes through it on every
+// discovery sync so toggling the YAML knob re-applies at the next tick.
 export const repositories = pgTable('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
@@ -42,9 +48,19 @@ export const repositories = pgTable('repositories', {
   project: text('project'),
   slug: text('slug').notNull(),
   fullName: text('full_name').notNull(),
+  diffStatsEnabled: boolean('diff_stats_enabled').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// `diff_stats_synced_at` is the Phase 4 resumability marker for per-commit
+// diff-stat ingest. NULL = "diff stats not fetched yet" (the only state at
+// insertion time). Set to now() once /diffstat/:sha lands and additions /
+// deletions are persisted. The partial index commits_pending_diff_stats_idx
+// makes the pickup query (`WHERE repository_id = $1 AND diff_stats_synced_at
+// IS NULL`) cheap regardless of how large `commits` grows.
+//
+// Repos with `repositories.diff_stats_enabled = false` simply never have the
+// fetch happen — their rows stay at additions=0, deletions=0, NULL.
 export const commits = pgTable(
   'commits',
   {
@@ -57,12 +73,16 @@ export const commits = pgTable(
     message: text('message').notNull(),
     additions: integer('additions').notNull().default(0),
     deletions: integer('deletions').notNull().default(0),
+    diffStatsSyncedAt: timestamp('diff_stats_synced_at', { withTimezone: true }),
     authoredAt: timestamp('authored_at', { withTimezone: true }).notNull(),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     shaRepoUnique: uniqueIndex('commits_sha_repo_unique').on(t.repositoryId, t.sha),
     authorAuthoredIdx: index('commits_author_authored_idx').on(t.authorUserId, t.authoredAt),
+    pendingDiffStatsIdx: index('commits_pending_diff_stats_idx')
+      .on(t.repositoryId)
+      .where(sql`${t.diffStatsSyncedAt} IS NULL`),
   }),
 );
 

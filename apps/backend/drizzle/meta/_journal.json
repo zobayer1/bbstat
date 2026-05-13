@@ -22,6 +22,13 @@
       "when": 1778609166331,
       "tag": "0002_soft_karen_page",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1778677804508,
+      "tag": "0003_violet_starhawk",
+      "breakpoints": true
     }
   ]
 }
