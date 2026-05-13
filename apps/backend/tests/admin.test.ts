@@ -131,11 +131,16 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       return state.repositories.get(fullName) ?? null;
     },
     async insertRepositoryWithSyncState(input: RepositoryInsertInput) {
+      for (const existing of state.repositories.values()) {
+        if (existing.bitbucketUuid === input.bitbucketUuid) {
+          return { row: existing, inserted: false };
+        }
+      }
       const id = state.nextRepoId++;
       const row: RepositoryRow = { id, ...input };
       state.repositories.set(input.fullName, row);
       state.syncStateRepoIds.add(id);
-      return row;
+      return { row, inserted: true };
     },
     async listTrackedRepositories() {
       return Array.from(state.repositories.values());
@@ -242,6 +247,7 @@ describe('admin routes', () => {
         inserted: 1,
         alreadyTracked: 0,
         notFound: [],
+        errors: [],
       });
       expect(state.users.size).toBe(2);
       expect(state.repositories.size).toBe(1);
@@ -379,7 +385,7 @@ describe('admin routes', () => {
       const { store: commitStore, state: commitState } = createFakeCommitStore();
       const { deps, state } = makeSyncDeps(fetchMock, { commitStore });
       // Seed a tracked repo + sync_state row at the existing cursor.
-      const repo = await deps.store.insertRepositoryWithSyncState({
+      const { row: repo } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
         workspace: 'tigerit',
         project: 'BOING',
@@ -450,7 +456,7 @@ describe('admin routes', () => {
     it('is idempotent: a second call with no new commits inserts nothing', async () => {
       const { store: commitStore, state: commitState } = createFakeCommitStore();
       const { deps } = makeSyncDeps(fetchMock, { commitStore });
-      const repo = await deps.store.insertRepositoryWithSyncState({
+      const { row: repo } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
         workspace: 'tigerit',
         project: 'BOING',
@@ -505,14 +511,14 @@ describe('admin routes', () => {
     it('runs a full tick across the curated set and returns the structured summary', async () => {
       const { store: commitStore, state: commitState } = createFakeCommitStore();
       const { deps } = makeSyncDeps(fetchMock, { commitStore });
-      const r1 = await deps.store.insertRepositoryWithSyncState({
+      const { row: r1 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
         workspace: 'tigerit',
         project: null,
         slug: 'a',
         fullName: 'tigerit/a',
       });
-      const r2 = await deps.store.insertRepositoryWithSyncState({
+      const { row: r2 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r2}',
         workspace: 'tigerit',
         project: null,

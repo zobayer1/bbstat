@@ -40,12 +40,23 @@ export interface RepositoryInsertInput {
   fullName: string;
 }
 
+export interface InsertRepositoryResult {
+  row: RepositoryRow;
+  // True iff this call actually inserted a new row. False when the input's
+  // bitbucket_uuid already existed (e.g., a YAML alias like a case variant
+  // resolved to the same canonical BitBucket repo, or a race between two
+  // concurrent triggers). In the false case `row` is the existing row.
+  inserted: boolean;
+}
+
 export interface DiscoveryStore {
   upsertUser(input: UserUpsertInput): Promise<UserUpsertResult>;
   findRepositoryByFullName(fullName: string): Promise<RepositoryRow | null>;
   // Atomic for our purposes: inserts the repository row and the matching
-  // sync_state row in the same transaction. Returns the row that was created.
-  insertRepositoryWithSyncState(input: RepositoryInsertInput): Promise<RepositoryRow>;
+  // sync_state row in the same transaction. Idempotent against UUID
+  // conflicts: if the bitbucket_uuid already exists, the existing row is
+  // returned with `inserted: false` (caller treats as already-tracked).
+  insertRepositoryWithSyncState(input: RepositoryInsertInput): Promise<InsertRepositoryResult>;
   // Enumerate the curated tracked set — every row in `repositories` is by
   // definition tracked (untracked repos are simply absent). Used by the
   // commit-sync cron / admin trigger to build the tick's repo list.
@@ -97,17 +108,44 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
 
     async insertRepositoryWithSyncState(input) {
       return await db.transaction(async (tx) => {
-        const inserted = await tx.insert(repositories).values(input).returning({
-          id: repositories.id,
-          bitbucketUuid: repositories.bitbucketUuid,
-          workspace: repositories.workspace,
-          project: repositories.project,
-          slug: repositories.slug,
-          fullName: repositories.fullName,
-        });
-        const row = inserted[0]!;
-        await tx.insert(syncState).values({ repositoryId: row.id });
-        return row;
+        const inserted = await tx
+          .insert(repositories)
+          .values(input)
+          .onConflictDoNothing({ target: repositories.bitbucketUuid })
+          .returning({
+            id: repositories.id,
+            bitbucketUuid: repositories.bitbucketUuid,
+            workspace: repositories.workspace,
+            project: repositories.project,
+            slug: repositories.slug,
+            fullName: repositories.fullName,
+          });
+        if (inserted.length > 0) {
+          const row = inserted[0]!;
+          // sync_state PK is repository_id, so a fresh row always succeeds;
+          // the DO NOTHING is just belt-and-braces against a concurrent
+          // bootstrap that happened to land between the inserts above.
+          await tx.insert(syncState).values({ repositoryId: row.id }).onConflictDoNothing();
+          return { row, inserted: true };
+        }
+        // bitbucket_uuid collision — the canonical row is already present.
+        // Fetch it so the caller can report the canonical full_name (which
+        // may differ from the input alias).
+        const existing = await tx
+          .select({
+            id: repositories.id,
+            bitbucketUuid: repositories.bitbucketUuid,
+            workspace: repositories.workspace,
+            project: repositories.project,
+            slug: repositories.slug,
+            fullName: repositories.fullName,
+          })
+          .from(repositories)
+          .where(eq(repositories.bitbucketUuid, input.bitbucketUuid))
+          .limit(1);
+        const row = existing[0]!;
+        await tx.insert(syncState).values({ repositoryId: row.id }).onConflictDoNothing();
+        return { row, inserted: false };
       });
     },
 

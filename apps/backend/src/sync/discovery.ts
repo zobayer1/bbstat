@@ -130,18 +130,25 @@ export interface AddTrackedRepoResult {
   status: 'inserted' | 'already-tracked' | 'not-found';
 }
 
-// Idempotent: returns 'already-tracked' if the repo is already in our table,
-// 'inserted' on first add, 'not-found' if BitBucket says the repo doesn't
-// exist (or we lack access).
+// Idempotent at two layers: the early `findRepositoryByFullName` short-circuit
+// avoids a BB call when the input string already matches a tracked row, and
+// the underlying insert uses ON CONFLICT on bitbucket_uuid so an alias of an
+// existing repo (e.g. a YAML entry whose casing differs from the canonical
+// slug, or a race between two concurrent triggers) resolves to the canonical
+// row with `status: 'already-tracked'` instead of bubbling up a 23505.
+//
+// The returned `fullName` is always the canonical BitBucket-side full_name,
+// not the caller's input — so logs and admin responses identify the repo
+// consistently across alias retries.
 export async function addTrackedRepository(
   deps: DiscoveryDeps,
   workspace: string,
   slug: string,
 ): Promise<AddTrackedRepoResult> {
-  const fullName = `${workspace}/${slug}`;
+  const inputFullName = `${workspace}/${slug}`;
 
-  const existing = await deps.store.findRepositoryByFullName(fullName);
-  if (existing !== null) return { fullName, status: 'already-tracked' };
+  const existing = await deps.store.findRepositoryByFullName(inputFullName);
+  if (existing !== null) return { fullName: existing.fullName, status: 'already-tracked' };
 
   let repo: RepositoryResponse;
   try {
@@ -150,13 +157,13 @@ export async function addTrackedRepository(
     });
   } catch (err) {
     if (err instanceof BitbucketApiError && err.status === 404) {
-      deps.logger?.warn?.({ fullName }, 'tracked-repo not found on BitBucket');
-      return { fullName, status: 'not-found' };
+      deps.logger?.warn?.({ fullName: inputFullName }, 'tracked-repo not found on BitBucket');
+      return { fullName: inputFullName, status: 'not-found' };
     }
     throw err;
   }
 
-  await deps.store.insertRepositoryWithSyncState({
+  const { row, inserted } = await deps.store.insertRepositoryWithSyncState({
     bitbucketUuid: repo.uuid,
     workspace: repo.workspace.slug,
     project: repo.project?.key ?? null,
@@ -164,8 +171,15 @@ export async function addTrackedRepository(
     fullName: repo.full_name,
   });
 
-  deps.logger?.info?.({ fullName }, 'tracked-repo added');
-  return { fullName, status: 'inserted' };
+  if (inserted) {
+    deps.logger?.info?.({ fullName: row.fullName }, 'tracked-repo added');
+    return { fullName: row.fullName, status: 'inserted' };
+  }
+  deps.logger?.info?.(
+    { inputFullName, canonicalFullName: row.fullName },
+    'tracked-repo already tracked (canonical uuid matched)',
+  );
+  return { fullName: row.fullName, status: 'already-tracked' };
 }
 
 export interface BootstrapReposResult {
@@ -173,6 +187,12 @@ export interface BootstrapReposResult {
   inserted: number;
   alreadyTracked: number;
   notFound: string[];
+  // Per-seed failures collected during the loop. A single bad seed never
+  // aborts the run — every entry in `seeds` is attempted, and unexpected
+  // throws land here with the offending repo's input full_name so the admin
+  // / cron caller can see exactly which repo failed and why (e.g. a BB 5xx,
+  // a transient network error, an unknown DB constraint hit).
+  errors: Array<{ fullName: string; error: string }>;
 }
 
 export async function bootstrapTrackedRepositories(
@@ -184,15 +204,23 @@ export async function bootstrapTrackedRepositories(
     inserted: 0,
     alreadyTracked: 0,
     notFound: [],
+    errors: [],
   };
 
   // Sequential intentionally — BitBucket rate-limit budget plus deterministic
   // logs. Phase 2 introduces parallelism with budget awareness.
   for (const seed of seeds) {
-    const r = await addTrackedRepository(deps, seed.workspace, seed.slug);
-    if (r.status === 'inserted') result.inserted++;
-    else if (r.status === 'already-tracked') result.alreadyTracked++;
-    else result.notFound.push(r.fullName);
+    const inputFullName = `${seed.workspace}/${seed.slug}`;
+    try {
+      const r = await addTrackedRepository(deps, seed.workspace, seed.slug);
+      if (r.status === 'inserted') result.inserted++;
+      else if (r.status === 'already-tracked') result.alreadyTracked++;
+      else result.notFound.push(r.fullName);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      result.errors.push({ fullName: inputFullName, error: message });
+      deps.logger?.error?.(err, `tracked-repo bootstrap failed: ${inputFullName}`);
+    }
   }
 
   deps.logger?.info?.(result, 'tracked-repo bootstrap complete');

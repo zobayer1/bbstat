@@ -42,11 +42,19 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       return state.repositories.get(fullName) ?? null;
     },
     async insertRepositoryWithSyncState(input: RepositoryInsertInput) {
+      // Mirror the Drizzle impl: idempotent on bitbucket_uuid. If a row with
+      // the same uuid already exists, return it with inserted: false so the
+      // caller can treat alias retries as already-tracked.
+      for (const existing of state.repositories.values()) {
+        if (existing.bitbucketUuid === input.bitbucketUuid) {
+          return { row: existing, inserted: false };
+        }
+      }
       const id = state.nextRepoId++;
       const row: RepositoryRow = { id, ...input };
       state.repositories.set(input.fullName, row);
       state.syncStateRepoIds.add(id);
-      return row;
+      return { row, inserted: true };
     },
     async listTrackedRepositories() {
       return Array.from(state.repositories.values());
@@ -282,6 +290,38 @@ describe('addTrackedRepository', () => {
 
     expect(state.repositories.get('tigerit/orphan')!.project).toBeNull();
   });
+
+  it('returns already-tracked when the canonical bitbucket_uuid already exists', async () => {
+    // The canonical row is keyed at tigerit/boing-server in the store. An
+    // input alias like tigerit/Boing-Server misses findRepositoryByFullName
+    // (strict string compare), proceeds to fetch BB, which returns the
+    // canonical entity with the same uuid {r1}. The store-level ON CONFLICT
+    // recovers — no 23505 bubbles up.
+    const { store, state } = createFakeStore();
+    await store.insertRepositoryWithSyncState({
+      bitbucketUuid: '{r1}',
+      workspace: 'tigerit',
+      project: 'BOING',
+      slug: 'boing-server',
+      fullName: 'tigerit/boing-server',
+    });
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        uuid: '{r1}',
+        slug: 'boing-server',
+        full_name: 'tigerit/boing-server',
+        workspace: { slug: 'tigerit' },
+        project: { key: 'BOING' },
+      }),
+    );
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await addTrackedRepository(deps, 'tigerit', 'Boing-Server');
+
+    expect(result).toEqual({ fullName: 'tigerit/boing-server', status: 'already-tracked' });
+    // Still just one row — no duplicate inserted.
+    expect(state.repositories.size).toBe(1);
+  });
 });
 
 describe('bootstrapTrackedRepositories', () => {
@@ -326,6 +366,7 @@ describe('bootstrapTrackedRepositories', () => {
       inserted: 1,
       alreadyTracked: 1,
       notFound: ['tigerit/c'],
+      errors: [],
     });
     // 2 HTTP calls total — `b` was a cache hit and made none.
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -337,7 +378,36 @@ describe('bootstrapTrackedRepositories', () => {
 
     const result = await bootstrapTrackedRepositories(deps, []);
 
-    expect(result).toEqual({ requested: 0, inserted: 0, alreadyTracked: 0, notFound: [] });
+    expect(result).toEqual({ requested: 0, inserted: 0, alreadyTracked: 0, notFound: [], errors: [] });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('captures per-seed errors without aborting the loop', async () => {
+    // Seed order: a (BB 400 — non-retryable, throws), b (succeeds).
+    const { store, state } = createFakeStore();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'bad' } }, 400)).mockResolvedValueOnce(
+      jsonResponse({
+        uuid: '{rb}',
+        slug: 'b',
+        full_name: 'tigerit/b',
+        workspace: { slug: 'tigerit' },
+      }),
+    );
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await bootstrapTrackedRepositories(deps, [
+      { workspace: 'tigerit', slug: 'a' },
+      { workspace: 'tigerit', slug: 'b' },
+    ]);
+
+    expect(result.requested).toBe(2);
+    expect(result.inserted).toBe(1);
+    expect(result.alreadyTracked).toBe(0);
+    expect(result.notFound).toEqual([]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toMatchObject({ fullName: 'tigerit/a' });
+    expect(result.errors[0]?.error).toContain('400');
+    // `b` still landed.
+    expect(state.repositories.has('tigerit/b')).toBe(true);
   });
 });
