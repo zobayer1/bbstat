@@ -27,7 +27,7 @@ Techniques applied across every phase, not a phase on their own:
 
 ## Phases
 
-### Phase 0 — Foundations (~2 days)
+### Phase 0 — Foundations (~2 days) ✅ Landed
 
 The plumbing every later phase depends on.
 
@@ -40,7 +40,9 @@ The plumbing every later phase depends on.
 
 **Deliverable:** doctor passes, migrations applied, no functional sync yet.
 
-### Phase 1 — Workspace + curated repo bootstrap (~2 days)
+**Status:** Landed across `29bc0c3`..`ac18e63` (8 commits including the roadmap doc itself). BitBucket client with retries / 429 backoff / sliding-window call-budget ledger lives at `apps/backend/src/bitbucket/client.ts`; Drizzle schema (`branches`, `pull_requests`, `sync_state`) at `apps/backend/src/db/schema.ts` is mirrored by Flyway-style SQL under `apps/backend/schema/`; `make doctor` proves BB auth end-to-end via `apps/backend/src/scripts/doctor.ts`. The curated seed list originally shipped as a `SEED_TRACKED_REPOS` env var and was refactored to `tracked-repos.yaml` with hot-reload in `2d439d6` during Phase 2 cleanup.
+
+### Phase 1 — Workspace + curated repo bootstrap (~2 days) ✅ Landed
 
 Get the curated set into the database; enumerate users.
 
@@ -53,6 +55,8 @@ Get the curated set into the database; enumerate users.
 - Dashboard: real counts replace stub data ("Tracking N repos across M projects, K developers").
 
 **API budget:** ~5–10 calls per slow refresh cycle. Daily total ≪ 1% of the rate limit.
+
+**Status:** Landed across `90d2958`..`11b10f2` (4 commits). Discovery domain logic in `apps/backend/src/sync/discovery.ts` is shared by the slow-cadence cron (`SYNC_MEMBERS_CRON`, `SYNC_REPOS_CRON`), the manual `POST /api/admin/sync/discover`, and the per-repo `POST /api/admin/repositories` add path — all converging on the same `runSync()` entrypoint. The `BitbucketClient.paginate()` async iterator landed here and is consumed by every list endpoint downstream. Dashboard's overview endpoint reads real Postgres counts.
 
 ### Phase 2 — Commit ingest (~5–6 days) ✅ Landed
 
