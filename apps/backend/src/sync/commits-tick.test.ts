@@ -30,6 +30,8 @@ function fakeStore(): CommitStore {
     markSyncRunning: fail,
     markSyncSuccess: fail,
     markSyncFailed: fail,
+    listPendingDiffStatCommits: fail,
+    updateCommitDiffStats: fail,
   };
 }
 
@@ -65,6 +67,9 @@ function makeOkResult(repo: RepositoryHandle): RepoCommitSyncResult {
     hitPageCap: false,
     hitDateCap: false,
     insertedRange: null,
+    diffStatsUpdated: 0,
+    diffStatsFailed: 0,
+    diffStatsRange: null,
   };
 }
 

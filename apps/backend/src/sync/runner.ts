@@ -181,5 +181,9 @@ export function commitTickOptionsFromConfig(config: AppConfig): CommitsTickOptio
     ...(since !== undefined ? { firstRunSince: since } : {}),
     concurrency: config.COMMIT_SYNC_CONCURRENCY,
     budgetLowThreshold: config.COMMIT_SYNC_BUDGET_THRESHOLD,
+    diffStats: {
+      maxPerRepoPerTick: config.DIFF_STATS_MAX_PER_REPO_PER_TICK,
+      budgetThreshold: config.DIFF_STATS_BUDGET_THRESHOLD,
+    },
   };
 }

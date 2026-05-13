@@ -79,6 +79,7 @@ export async function runCommitsTick(
     ...(opts.firstRunMaxPages !== undefined ? { firstRunMaxPages: opts.firstRunMaxPages } : {}),
     ...(opts.firstRunSince !== undefined ? { firstRunSince: opts.firstRunSince } : {}),
     ...(opts.include !== undefined ? { include: opts.include } : {}),
+    ...(opts.diffStats !== undefined ? { diffStats: opts.diffStats } : {}),
   };
 
   const work = async (): Promise<void> => {

@@ -20,6 +20,7 @@
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
 import type { CommitInsertInput, CommitStore } from './commit-store.js';
+import { syncRepositoryDiffStats, type DiffStatsSyncOptions, type DiffStatsSyncResult } from './diff-stats.js';
 
 export interface RepositoryHandle {
   repositoryId: number;
@@ -43,6 +44,11 @@ export interface CommitSyncOptions {
   // Restrict history walk to a single ref. Defaults to BitBucket's main-branch
   // behavior. Mostly here for tests; production calls leave it unset.
   include?: string;
+  // Phase 4 T21: opt-in per-commit diff-stat ingest. When omitted, the
+  // diff-stats step is skipped entirely (legacy callers, tests that don't
+  // care). When present, the step runs for repos with `diffStatsEnabled` —
+  // opt-out repos still short-circuit cheaply inside `syncRepositoryDiffStats`.
+  diffStats?: DiffStatsSyncOptions;
 }
 
 export type SyncMode = 'cold' | 'delta' | 'no-state';
@@ -62,6 +68,13 @@ export interface RepoCommitSyncResult {
   // some may have lost the ON CONFLICT race). Consumed by the rollup hook
   // in dashboard/rollup-hook.ts to scope the commit_daily recompute.
   insertedRange: { sinceDay: string; untilDay: string } | null;
+  // Phase 4 T21: per-commit diff-stat ingest results. All zero / null when
+  // the repo's diffStatsEnabled flag is off or when opts.diffStats wasn't
+  // supplied. The rollup hook ORs `diffStatsRange` with `insertedRange` so
+  // commit_daily refreshes for diff-stat-only updates too.
+  diffStatsUpdated: number;
+  diffStatsFailed: number;
+  diffStatsRange: { sinceDay: string; untilDay: string } | null;
 }
 
 export interface CommitSyncDeps {
@@ -111,6 +124,31 @@ export async function syncRepositoryCommits(
       commitsAdded: inserted,
     });
 
+    // Phase 4 T21 — opt-in per-commit diff-stat ingest. Runs after
+    // markSyncSuccess so commits + cursor are durable first; a failure here
+    // doesn't poison the commit-sync result (the cursor advanced, commits
+    // landed, and pending diff stats stay NULL → retried next tick).
+    let diffStatsResult: DiffStatsSyncResult = {
+      updated: 0,
+      failed: 0,
+      hitBudgetGate: false,
+      diffStatsRange: null,
+    };
+    if (repo.diffStatsEnabled && opts.diffStats) {
+      try {
+        diffStatsResult = await syncRepositoryDiffStats(
+          { client: deps.client, store: deps.store, ...(deps.logger ? { logger: deps.logger } : {}) },
+          repo,
+          opts.diffStats,
+        );
+      } catch (err) {
+        deps.logger?.warn?.(
+          { ...repo, err: err instanceof Error ? err.message : String(err) },
+          'diff-stats step failed — commits already landed, will retry next tick',
+        );
+      }
+    }
+
     deps.logger?.info?.(
       {
         ...repo,
@@ -120,6 +158,8 @@ export async function syncRepositoryCommits(
         hitKnownSha: pull.hitKnownSha,
         hitPageCap: pull.hitPageCap,
         hitDateCap: pull.hitDateCap,
+        diffStatsUpdated: diffStatsResult.updated,
+        diffStatsFailed: diffStatsResult.failed,
       },
       'commit sync complete',
     );
@@ -135,6 +175,9 @@ export async function syncRepositoryCommits(
       hitPageCap: pull.hitPageCap,
       hitDateCap: pull.hitDateCap,
       insertedRange: rangeOfBatch(pull.batch),
+      diffStatsUpdated: diffStatsResult.updated,
+      diffStatsFailed: diffStatsResult.failed,
+      diffStatsRange: diffStatsResult.diffStatsRange,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -197,6 +240,9 @@ function emptyResult(repo: RepositoryHandle, mode: SyncMode): RepoCommitSyncResu
     hitPageCap: false,
     hitDateCap: false,
     insertedRange: null,
+    diffStatsUpdated: 0,
+    diffStatsFailed: 0,
+    diffStatsRange: null,
   };
 }
 

@@ -36,20 +36,26 @@ export type SyncOneFn = (
 export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps): SyncOneFn {
   return async (deps, repo, opts) => {
     const result = await inner(deps, repo, opts);
-    if (result.inserted === 0 || result.insertedRange === null) {
+    // commit_daily aggregates both commit counts and additions/deletions
+    // from `commits`. We refresh the rollup whenever either dimension
+    // changed: new commits landed in `inserted` (covered by insertedRange),
+    // OR existing commits' diff stats just landed (covered by
+    // diffStatsRange). The merged range is the union of both.
+    const insertedRange = result.inserted > 0 ? result.insertedRange : null;
+    const diffStatsRange = result.diffStatsUpdated > 0 ? result.diffStatsRange : null;
+    const range = mergeDayRanges(insertedRange, diffStatsRange);
+    if (range === null) {
       return result;
     }
     try {
-      const { rowsAffected } = await hookDeps.rollupStore.recomputeCommitDailyForRepo(
-        result.repositoryId,
-        result.insertedRange,
-      );
+      const { rowsAffected } = await hookDeps.rollupStore.recomputeCommitDailyForRepo(result.repositoryId, range);
       hookDeps.logger?.info?.(
         {
           repositoryId: result.repositoryId,
           fullName: result.fullName,
           inserted: result.inserted,
-          range: result.insertedRange,
+          diffStatsUpdated: result.diffStatsUpdated,
+          range,
           rowsAffected,
         },
         'rollup recompute complete',
@@ -59,7 +65,7 @@ export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps):
         {
           repositoryId: result.repositoryId,
           fullName: result.fullName,
-          range: result.insertedRange,
+          range,
           err: err instanceof Error ? err.message : String(err),
         },
         'rollup recompute failed — commits already landed; will recover on next sync',
@@ -67,10 +73,7 @@ export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps):
     }
     if (hookDeps.userSummaryCache !== undefined) {
       try {
-        const userIds = await hookDeps.rollupStore.listAffectedUserIdsForRepo(
-          result.repositoryId,
-          result.insertedRange,
-        );
+        const userIds = await hookDeps.rollupStore.listAffectedUserIdsForRepo(result.repositoryId, range);
         await Promise.all(userIds.map((id) => hookDeps.userSummaryCache!.invalidate(id)));
         hookDeps.logger?.info?.(
           {
@@ -85,7 +88,7 @@ export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps):
           {
             repositoryId: result.repositoryId,
             fullName: result.fullName,
-            range: result.insertedRange,
+            range,
             err: err instanceof Error ? err.message : String(err),
           },
           'user-summary cache invalidation failed — entries will fall out via TTL',
@@ -93,5 +96,19 @@ export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps):
       }
     }
     return result;
+  };
+}
+
+type DayRange = { sinceDay: string; untilDay: string };
+
+// Union of two UTC day-range windows (inclusive on both ends). Day strings
+// are YYYY-MM-DD so lexical compare matches chronological order.
+function mergeDayRanges(a: DayRange | null, b: DayRange | null): DayRange | null {
+  if (a === null && b === null) return null;
+  if (a === null) return b;
+  if (b === null) return a;
+  return {
+    sinceDay: a.sinceDay < b.sinceDay ? a.sinceDay : b.sinceDay,
+    untilDay: a.untilDay > b.untilDay ? a.untilDay : b.untilDay,
   };
 }

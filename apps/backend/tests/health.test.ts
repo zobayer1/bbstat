@@ -20,6 +20,8 @@ const testConfig: AppConfig = {
   COMMITS_BACKFILL_SINCE: '',
   COMMIT_SYNC_CONCURRENCY: 3,
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
+  DIFF_STATS_MAX_PER_REPO_PER_TICK: 50,
+  DIFF_STATS_BUDGET_THRESHOLD: 10,
 };
 
 describe('health routes', () => {

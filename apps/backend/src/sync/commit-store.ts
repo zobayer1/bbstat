@@ -8,7 +8,7 @@
 // (getSyncState, markSync{Running,Success,Failed}) own the sync_state row
 // lifecycle for a single repository.
 
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { commits, syncState, users } from '../db/schema.js';
 
@@ -47,6 +47,12 @@ export interface SyncSuccessUpdate {
   commitsAdded: number;
 }
 
+export interface PendingDiffStatCommit {
+  id: number;
+  sha: string;
+  authoredAt: Date;
+}
+
 export interface CommitStore {
   // Resolve a batch of BitBucket user UUIDs to local users.id values. Missing
   // UUIDs (anonymous commits, users not yet synced) are absent from the
@@ -61,6 +67,19 @@ export interface CommitStore {
   markSyncRunning(repositoryId: number): Promise<void>;
   markSyncSuccess(repositoryId: number, update: SyncSuccessUpdate): Promise<void>;
   markSyncFailed(repositoryId: number, error: string): Promise<void>;
+
+  // Phase 4 T21: pickup query for the diff-stats worker. Returns commits in
+  // this repo whose `diff_stats_synced_at IS NULL`, ordered newest-authored
+  // first (so the most recently-landed commits get their diffs prioritized)
+  // and capped at `limit`. Backed by the partial index
+  // commits_pending_diff_stats_idx so the read is cheap regardless of
+  // total commit volume.
+  listPendingDiffStatCommits(repositoryId: number, limit: number): Promise<PendingDiffStatCommit[]>;
+
+  // Phase 4 T21: persist BB-derived additions/deletions for one commit and
+  // stamp diff_stats_synced_at = now() so it's filtered out of the next
+  // pickup. Idempotent — safe to call repeatedly with the same values.
+  updateCommitDiffStats(commitId: number, input: { additions: number; deletions: number }): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +163,27 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
           updatedAt: now,
         })
         .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async listPendingDiffStatCommits(repositoryId, limit) {
+      const rows = await db
+        .select({ id: commits.id, sha: commits.sha, authoredAt: commits.authoredAt })
+        .from(commits)
+        .where(and(eq(commits.repositoryId, repositoryId), isNull(commits.diffStatsSyncedAt)))
+        .orderBy(desc(commits.authoredAt))
+        .limit(limit);
+      return rows;
+    },
+
+    async updateCommitDiffStats(commitId, input) {
+      await db
+        .update(commits)
+        .set({
+          additions: input.additions,
+          deletions: input.deletions,
+          diffStatsSyncedAt: new Date(),
+        })
+        .where(eq(commits.id, commitId));
     },
   };
 }

@@ -29,6 +29,8 @@ const testConfig: AppConfig = {
   COMMITS_BACKFILL_SINCE: '',
   COMMIT_SYNC_CONCURRENCY: 3,
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
+  DIFF_STATS_MAX_PER_REPO_PER_TICK: 50,
+  DIFF_STATS_BUDGET_THRESHOLD: 10,
 };
 
 // Discovery-flow admin tests don't exercise commit-sync. Provide a CommitStore
@@ -45,6 +47,8 @@ function noopCommitStore(): CommitStore {
     markSyncRunning: fail,
     markSyncSuccess: fail,
     markSyncFailed: fail,
+    listPendingDiffStatCommits: fail,
+    updateCommitDiffStats: fail,
   };
 }
 
@@ -102,6 +106,15 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
       if (row) {
         state.syncStateByRepo.set(repositoryId, { ...row, lastSyncStatus: 'failed', lastSyncError: error });
       }
+    },
+    async listPendingDiffStatCommits() {
+      // Tests in this file don't opt into diff_stats_enabled, so the worker
+      // never reaches the store. Return [] as a safe default for any future
+      // test that does opt in without seeding pending rows.
+      return [];
+    },
+    async updateCommitDiffStats() {
+      // No-op fallback — same reasoning as above.
     },
   };
   return { store, state };

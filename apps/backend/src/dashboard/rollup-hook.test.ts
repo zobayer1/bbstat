@@ -38,6 +38,9 @@ function makeResult(over: Partial<RepoCommitSyncResult> = {}): RepoCommitSyncRes
     hitPageCap: false,
     hitDateCap: false,
     insertedRange: null,
+    diffStatsUpdated: 0,
+    diffStatsFailed: 0,
+    diffStatsRange: null,
     ...over,
   };
 }
@@ -139,6 +142,64 @@ describe('withRollupRecompute', () => {
     const result = await wrapped({} as CommitSyncDeps, makeRepo(), {});
 
     expect(result.inserted).toBe(5);
+  });
+
+  it('triggers recompute when only diff stats updated (no inserts)', async () => {
+    const rollup = makeRollupStore();
+    const inner = vi.fn(async () =>
+      makeResult({
+        inserted: 0,
+        insertedRange: null,
+        diffStatsUpdated: 4,
+        diffStatsRange: { sinceDay: '2026-05-03', untilDay: '2026-05-06' },
+      }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(rollup.recomputeCommitDailyForRepo).toHaveBeenCalledWith(1, {
+      sinceDay: '2026-05-03',
+      untilDay: '2026-05-06',
+    });
+  });
+
+  it('passes the union of insertedRange and diffStatsRange to recompute', async () => {
+    const rollup = makeRollupStore();
+    const inner = vi.fn(async () =>
+      makeResult({
+        inserted: 3,
+        insertedRange: { sinceDay: '2026-05-05', untilDay: '2026-05-07' },
+        diffStatsUpdated: 2,
+        // Diff stats touched an earlier day window than the inserts.
+        diffStatsRange: { sinceDay: '2026-05-01', untilDay: '2026-05-04' },
+      }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(rollup.recomputeCommitDailyForRepo).toHaveBeenCalledWith(1, {
+      sinceDay: '2026-05-01',
+      untilDay: '2026-05-07',
+    });
+  });
+
+  it('skips rollup when neither inserts nor diff stats happened', async () => {
+    const rollup = makeRollupStore();
+    const inner = vi.fn(async () =>
+      makeResult({
+        inserted: 0,
+        insertedRange: null,
+        diffStatsUpdated: 0,
+        diffStatsRange: null,
+      }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(rollup.recomputeCommitDailyForRepo).not.toHaveBeenCalled();
   });
 
   it('recomputes rollup before invalidating cache (ordering)', async () => {

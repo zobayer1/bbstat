@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BitbucketClient } from '../bitbucket/client.js';
 import type { BitbucketCommit } from '../bitbucket/commits.js';
-import { type CommitInsertInput, type CommitStore, type SyncStateRow, type SyncSuccessUpdate } from './commit-store.js';
+import {
+  type CommitInsertInput,
+  type CommitStore,
+  type PendingDiffStatCommit,
+  type SyncStateRow,
+  type SyncSuccessUpdate,
+} from './commit-store.js';
 import { syncRepositoryCommits, type RepositoryHandle } from './commits.js';
 
 // ---------------------------------------------------------------------------
@@ -16,6 +22,10 @@ interface FakeCommitStoreState {
   markRunningCalls: number[]; // repositoryId, in order
   markSuccessCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
   markFailedCalls: Array<{ repositoryId: number; error: string }>;
+  // Phase 4 T21: pending-diff-stat commits keyed by id; populated by tests
+  // that want to exercise the diff-stats path.
+  pendingDiffStatCommits: Map<number, PendingDiffStatCommit>;
+  diffStatsUpdates: Array<{ commitId: number; additions: number; deletions: number }>;
 }
 
 function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Array<[string, number]> }): {
@@ -29,6 +39,8 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     markRunningCalls: [],
     markSuccessCalls: [],
     markFailedCalls: [],
+    pendingDiffStatCommits: new Map(),
+    diffStatsUpdates: [],
   };
   for (const row of seed?.syncState ?? []) state.syncStateByRepo.set(row.repositoryId, row);
   for (const [uuid, id] of seed?.users ?? []) state.usersByUuid.set(uuid, id);
@@ -88,6 +100,13 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
       if (row) {
         state.syncStateByRepo.set(repositoryId, { ...row, lastSyncStatus: 'failed', lastSyncError: error });
       }
+    },
+    async listPendingDiffStatCommits(_repositoryId, limit) {
+      return Array.from(state.pendingDiffStatCommits.values()).slice(0, limit);
+    },
+    async updateCommitDiffStats(commitId, input) {
+      state.diffStatsUpdates.push({ commitId, ...input });
+      state.pendingDiffStatCommits.delete(commitId);
     },
   };
 
@@ -383,5 +402,112 @@ describe('syncRepositoryCommits — idempotency + failure', () => {
     expect(state.markFailedCalls[0]?.repositoryId).toBe(1);
     expect(state.syncStateByRepo.get(1)?.lastSyncStatus).toBe('failed');
     expect(state.markSuccessCalls).toEqual([]);
+  });
+});
+
+describe('syncRepositoryCommits — diff-stats integration', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+  });
+
+  function repoWithDiffStats(): RepositoryHandle {
+    return { ...makeRepo(1), diffStatsEnabled: true };
+  }
+
+  it('runs the diff-stats step on opt-in repos when opts.diffStats is supplied', async () => {
+    // First call: empty commits page (delta with cursor). Second call:
+    // /diffstat/sha-pending — returns a single file with +12 / -3.
+    fetchMock
+      .mockImplementationOnce(() => Promise.resolve(commitsPage([])))
+      .mockImplementationOnce(() =>
+        Promise.resolve(jsonResponse({ pagelen: 100, values: [{ lines_added: 12, lines_removed: 3 }] })),
+      );
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    // Pre-seed one pending commit; the diff-stats worker will pick it up.
+    state.pendingDiffStatCommits.set(99, {
+      id: 99,
+      sha: 'sha-pending',
+      authoredAt: new Date('2026-05-04T12:00:00Z'),
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {
+      diffStats: { maxPerRepoPerTick: 50, budgetThreshold: 10 },
+    });
+
+    expect(result.diffStatsUpdated).toBe(1);
+    expect(result.diffStatsFailed).toBe(0);
+    expect(result.diffStatsRange).toEqual({ sinceDay: '2026-05-04', untilDay: '2026-05-04' });
+    expect(state.diffStatsUpdates).toEqual([{ commitId: 99, additions: 12, deletions: 3 }]);
+  });
+
+  it('skips the diff-stats step on opt-out repos even when opts.diffStats is supplied', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.resolve(commitsPage([])));
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    state.pendingDiffStatCommits.set(99, {
+      id: 99,
+      sha: 'sha-pending',
+      authoredAt: new Date('2026-05-04T12:00:00Z'),
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await syncRepositoryCommits(
+      deps,
+      makeRepo(1), // diffStatsEnabled defaults to false
+      { diffStats: { maxPerRepoPerTick: 50, budgetThreshold: 10 } },
+    );
+
+    expect(result.diffStatsUpdated).toBe(0);
+    expect(result.diffStatsRange).toBeNull();
+    expect(state.diffStatsUpdates).toHaveLength(0);
+    // Only the commits-list call was made; no /diffstat fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the diff-stats step when opts.diffStats is omitted, even on opt-in repos', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.resolve(commitsPage([])));
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    state.pendingDiffStatCommits.set(99, {
+      id: 99,
+      sha: 'sha-pending',
+      authoredAt: new Date('2026-05-04T12:00:00Z'),
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {});
+
+    expect(result.diffStatsUpdated).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not poison the commit-sync result when diff-stats throws unexpectedly', async () => {
+    fetchMock.mockImplementationOnce(() => Promise.resolve(commitsPage([])));
+    const { state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    // Override the store to make the pickup query throw.
+    const brokenStore: CommitStore = {
+      resolveUserIdsByUuid: async () => new Map(),
+      insertCommits: async () => ({ inserted: 0 }),
+      getSyncState: async () => state.syncStateByRepo.get(1) ?? null,
+      markSyncRunning: async () => {},
+      markSyncSuccess: async (id, update) => {
+        state.markSuccessCalls.push({ repositoryId: id, update });
+      },
+      markSyncFailed: async () => {},
+      listPendingDiffStatCommits: async () => {
+        throw new Error('pickup blew up');
+      },
+      updateCommitDiffStats: async () => {},
+    };
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store: brokenStore };
+
+    const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {
+      diffStats: { maxPerRepoPerTick: 50, budgetThreshold: 10 },
+    });
+
+    // The commit-sync portion still succeeded.
+    expect(state.markSuccessCalls).toHaveLength(1);
+    expect(result.diffStatsUpdated).toBe(0);
+    expect(result.diffStatsRange).toBeNull();
   });
 });
