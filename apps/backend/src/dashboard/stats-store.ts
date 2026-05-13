@@ -86,6 +86,58 @@ export interface RepoActivity {
   contributors: TopContributor[];
 }
 
+export interface ActivityRepository {
+  workspace: string;
+  slug: string;
+  fullName: string;
+}
+
+export interface ActivityAuthor {
+  userId: number;
+  displayName: string;
+  bitbucketUuid: string;
+}
+
+export interface ActivityCommit {
+  kind: 'commit';
+  sha: string;
+  message: string;
+  additions: number;
+  deletions: number;
+  repository: ActivityRepository;
+  author: ActivityAuthor | null;
+  // commits.authored_at, ISO 8601.
+  occurredAt: string;
+}
+
+export interface ActivityPullRequest {
+  kind: 'pr';
+  prId: number;
+  title: string;
+  state: 'OPEN' | 'MERGED' | 'DECLINED' | 'SUPERSEDED';
+  sourceBranch: string;
+  destinationBranch: string;
+  repository: ActivityRepository;
+  author: ActivityAuthor | null;
+  // pull_requests.bitbucket_updated_at — chosen over created_on so PR
+  // state changes (merge, decline, comment churn) resurface in the feed.
+  occurredAt: string;
+}
+
+export type ActivityEntry = ActivityCommit | ActivityPullRequest;
+
+export interface ActivityFilters {
+  // All filters are AND-combinable; null means "no filter on this axis".
+  actor: number | null;
+  repo: { workspace: string; slug: string } | null;
+  project: string | null;
+  // Cursor — only entries with occurredAt strictly less than this. Null on
+  // the first page; subsequent pages pass the last entry's occurredAt back.
+  before: Date | null;
+  // Default 50, max 200 — enforced at the route layer.
+  limit: number;
+}
+
 export interface TrackedRepositorySummary {
   workspace: string;
   slug: string;
@@ -123,6 +175,12 @@ export interface StatsStore {
   // activity. The dashboard renders this directly as the Repositories panel
   // and groups by `project` client-side to drive the Projects panel.
   listTrackedRepositoriesWithStats(): Promise<TrackedRepositorySummary[]>;
+  // Phase 4 T23 — unified activity feed. UNION ALL of commits + PRs with
+  // per-branch filter predicates, ordered by `occurredAt DESC` then by
+  // `kind, id DESC` so ties break deterministically (otherwise pagination
+  // can skip / duplicate). Read directly from Postgres — list endpoints
+  // bypass Redis per CLAUDE.md's "Redis is user-summary only" rule.
+  getActivity(filters: ActivityFilters): Promise<ActivityEntry[]>;
 }
 
 export function createDrizzleStatsStore(db: Database): StatsStore {
@@ -502,6 +560,143 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           commits: r.commits,
         })),
       };
+    },
+
+    async getActivity(filters) {
+      const { actor, project, before, limit } = filters;
+      const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
+      const beforeIso = before === null ? null : before.toISOString();
+
+      // Two-branch UNION ALL with filter predicates pushed into each subquery
+      // (we don't want to pull rows that the outer ORDER BY + LIMIT will
+      // discard). NULL params with explicit casts let one filter shape cover
+      // every combination of provided / omitted axes.
+      //
+      // Tie-break order: occurred_at DESC, then `kind` (commit < pr lexically)
+      // then per-table `id` DESC. Distinct id namespaces between branches
+      // means we don't need a global sequence — pagination just needs the
+      // ordering to be deterministic, which it is.
+      const result = await db.execute<{
+        kind: 'commit' | 'pr';
+        id: number;
+        sha: string | null;
+        message: string | null;
+        additions: number | null;
+        deletions: number | null;
+        pr_id: number | null;
+        title: string | null;
+        state: string | null;
+        source_branch: string | null;
+        destination_branch: string | null;
+        workspace: string;
+        slug: string;
+        full_name: string;
+        author_user_id: number | null;
+        author_display_name: string | null;
+        author_bitbucket_uuid: string | null;
+        occurred_at: Date | string;
+      }>(sql`
+        SELECT * FROM (
+          SELECT
+            'commit'::text AS kind,
+            c.id::int AS id,
+            c.sha AS sha,
+            c.message AS message,
+            c.additions AS additions,
+            c.deletions AS deletions,
+            NULL::int AS pr_id,
+            NULL::text AS title,
+            NULL::text AS state,
+            NULL::text AS source_branch,
+            NULL::text AS destination_branch,
+            r.workspace,
+            r.slug,
+            r.full_name,
+            u.id AS author_user_id,
+            u.display_name AS author_display_name,
+            u.bitbucket_uuid AS author_bitbucket_uuid,
+            c.authored_at AS occurred_at
+          FROM commits c
+          JOIN repositories r ON r.id = c.repository_id
+          LEFT JOIN users u ON u.id = c.author_user_id
+          WHERE
+            (${actor}::int IS NULL OR c.author_user_id = ${actor}::int)
+            AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
+            AND (${project}::text IS NULL OR r.project = ${project}::text)
+            AND (${beforeIso}::timestamptz IS NULL OR c.authored_at < ${beforeIso}::timestamptz)
+
+          UNION ALL
+
+          SELECT
+            'pr'::text AS kind,
+            pr.id::int AS id,
+            NULL::text AS sha,
+            NULL::text AS message,
+            NULL::int AS additions,
+            NULL::int AS deletions,
+            pr.bitbucket_pr_id AS pr_id,
+            pr.title AS title,
+            pr.state::text AS state,
+            pr.source_branch AS source_branch,
+            pr.destination_branch AS destination_branch,
+            r.workspace,
+            r.slug,
+            r.full_name,
+            u.id AS author_user_id,
+            u.display_name AS author_display_name,
+            u.bitbucket_uuid AS author_bitbucket_uuid,
+            pr.bitbucket_updated_at AS occurred_at
+          FROM pull_requests pr
+          JOIN repositories r ON r.id = pr.repository_id
+          LEFT JOIN users u ON u.id = pr.author_user_id
+          WHERE
+            (${actor}::int IS NULL OR pr.author_user_id = ${actor}::int)
+            AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
+            AND (${project}::text IS NULL OR r.project = ${project}::text)
+            AND (${beforeIso}::timestamptz IS NULL OR pr.bitbucket_updated_at < ${beforeIso}::timestamptz)
+        ) AS feed
+        ORDER BY occurred_at DESC, kind, id DESC
+        LIMIT ${limit}
+      `);
+
+      return result.rows.map((r): ActivityEntry => {
+        const repository: ActivityRepository = { workspace: r.workspace, slug: r.slug, fullName: r.full_name };
+        // db.execute returns timestamps as either Date (when Drizzle parses)
+        // or string (raw pg driver). Normalize either way.
+        const occurredAt =
+          typeof r.occurred_at === 'string' ? new Date(r.occurred_at).toISOString() : r.occurred_at.toISOString();
+        const author: ActivityAuthor | null =
+          r.author_user_id !== null
+            ? {
+                userId: r.author_user_id,
+                displayName: r.author_display_name!,
+                bitbucketUuid: r.author_bitbucket_uuid!,
+              }
+            : null;
+        if (r.kind === 'commit') {
+          return {
+            kind: 'commit',
+            sha: r.sha!,
+            message: r.message!,
+            additions: r.additions!,
+            deletions: r.deletions!,
+            repository,
+            author,
+            occurredAt,
+          };
+        }
+        return {
+          kind: 'pr',
+          prId: r.pr_id!,
+          title: r.title!,
+          state: r.state as ActivityPullRequest['state'],
+          sourceBranch: r.source_branch!,
+          destinationBranch: r.destination_branch!,
+          repository,
+          author,
+          occurredAt,
+        };
+      });
     },
   };
 }

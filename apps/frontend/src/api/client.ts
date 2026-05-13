@@ -98,6 +98,56 @@ export interface TrackedRepositorySummary {
   lastCommitAt: string | null;
 }
 
+// Phase 4 T23 — unified activity feed payload. Discriminated by `kind`.
+// `occurredAt` is commits.authored_at for commits and
+// pull_requests.bitbucket_updated_at for PRs, so a PR's row can resurface
+// in the feed each time it gets a state transition or comment churn.
+
+export interface ActivityRepository {
+  workspace: string;
+  slug: string;
+  fullName: string;
+}
+
+export interface ActivityAuthor {
+  userId: number;
+  displayName: string;
+  bitbucketUuid: string;
+}
+
+export interface ActivityCommit {
+  kind: 'commit';
+  sha: string;
+  message: string;
+  additions: number;
+  deletions: number;
+  repository: ActivityRepository;
+  author: ActivityAuthor | null;
+  occurredAt: string;
+}
+
+export interface ActivityPullRequest {
+  kind: 'pr';
+  prId: number;
+  title: string;
+  state: 'OPEN' | 'MERGED' | 'DECLINED' | 'SUPERSEDED';
+  sourceBranch: string;
+  destinationBranch: string;
+  repository: ActivityRepository;
+  author: ActivityAuthor | null;
+  occurredAt: string;
+}
+
+export type ActivityEntry = ActivityCommit | ActivityPullRequest;
+
+export interface ActivityQuery {
+  actor?: number;
+  repo?: string; // "<workspace>/<slug>"
+  project?: string;
+  before?: string; // ISO 8601
+  limit?: number; // default 50, max 200
+}
+
 export const api = {
   health: () => request<{ status: string; uptime: number }>('/healthz'),
   statsOverview: () => request<OverviewStats>('/api/stats/overview'),
@@ -114,4 +164,14 @@ export const api = {
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/activity`,
     ),
   listRepositories: () => request<TrackedRepositorySummary[]>('/api/stats/repositories'),
+  activity: (query: ActivityQuery = {}) => {
+    const params = new URLSearchParams();
+    if (query.actor !== undefined) params.set('actor', String(query.actor));
+    if (query.repo !== undefined) params.set('repo', query.repo);
+    if (query.project !== undefined) params.set('project', query.project);
+    if (query.before !== undefined) params.set('before', query.before);
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    const qs = params.toString();
+    return request<ActivityEntry[]>(`/api/stats/activity${qs.length > 0 ? `?${qs}` : ''}`);
+  },
 };

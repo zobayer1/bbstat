@@ -5,6 +5,7 @@ import type { Logger } from 'pino';
 import { healthRoutes } from './routes/health.js';
 import { adminRoutes } from './routes/admin.js';
 import { statsRoutes } from './routes/stats.js';
+import { activityRoutes } from './routes/activity.js';
 import type { AppConfig } from './config.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 import type { StatsStore, UserSummary } from './dashboard/stats-store.js';
@@ -52,6 +53,7 @@ export async function buildApp({ config, logger, https, syncDeps, statsStore, us
       statsStore,
       ...(userSummaryCache ? { userSummaryCache } : {}),
     });
+    await app.register(activityRoutes, { prefix: '/api', statsStore });
   }
 
   // Suppress unused-warnings on config for consumers that may extend this.

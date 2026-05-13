@@ -3,6 +3,8 @@ import { buildApp } from '../src/app.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { AppConfig } from '../src/config.js';
 import type {
+  ActivityEntry,
+  ActivityFilters,
   LatestCommit,
   OverviewStats,
   ProjectStats,
@@ -56,6 +58,7 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     getProjectStats: vi.fn(),
     getRepositoryActivity: vi.fn(),
     listTrackedRepositoriesWithStats: vi.fn(),
+    getActivity: vi.fn(),
     ...overrides,
   };
 }
@@ -415,5 +418,111 @@ describe('GET /api/stats/repositories', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(repos);
     expect(listTrackedRepositoriesWithStats).toHaveBeenCalledTimes(1);
+  });
+});
+
+const sampleActivity: ActivityEntry[] = [
+  {
+    kind: 'pr',
+    prId: 42,
+    title: 'feat: shiny',
+    state: 'OPEN',
+    sourceBranch: 'feat',
+    destinationBranch: 'main',
+    repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+    author: { userId: 1, displayName: 'Alice', bitbucketUuid: '{u1}' },
+    occurredAt: '2026-05-12T18:00:00.000Z',
+  },
+  {
+    kind: 'commit',
+    sha: 'a1b2c3',
+    message: 'feat: thing',
+    additions: 12,
+    deletions: 3,
+    repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+    author: null,
+    occurredAt: '2026-05-12T14:00:00.000Z',
+  },
+];
+
+describe('GET /api/activity', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the unified feed with no filters and default limit=50', async () => {
+    const getActivity = vi.fn<(f: ActivityFilters) => Promise<ActivityEntry[]>>().mockResolvedValue(sampleActivity);
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(sampleActivity);
+    expect(getActivity).toHaveBeenCalledWith({
+      actor: null,
+      repo: null,
+      project: null,
+      before: null,
+      limit: 50,
+    });
+  });
+
+  it('parses every filter axis and forwards as ActivityFilters', async () => {
+    const getActivity = vi.fn<(f: ActivityFilters) => Promise<ActivityEntry[]>>().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/activity?actor=7&repo=tigerit/boing-server&project=COMM&before=2026-05-12T18:00:00.000Z&limit=25',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(getActivity).toHaveBeenCalledWith({
+      actor: 7,
+      repo: { workspace: 'tigerit', slug: 'boing-server' },
+      project: 'COMM',
+      before: new Date('2026-05-12T18:00:00.000Z'),
+      limit: 25,
+    });
+  });
+
+  it('rejects malformed `repo` with 400 (missing slug)', async () => {
+    const getActivity = vi.fn();
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?repo=tigerit' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('invalid_query');
+    expect(getActivity).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed `before` with 400', async () => {
+    const getActivity = vi.fn();
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?before=not-a-date' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('invalid_query');
+    expect(getActivity).not.toHaveBeenCalled();
+  });
+
+  it('rejects limit above 200 with 400 (cursor-pagination bounds)', async () => {
+    const getActivity = vi.fn();
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?limit=500' });
+
+    expect(res.statusCode).toBe(400);
+    expect(getActivity).not.toHaveBeenCalled();
   });
 });
