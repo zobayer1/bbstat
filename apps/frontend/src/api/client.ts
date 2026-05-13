@@ -42,6 +42,14 @@ export interface TopContributor {
   commits: number;
 }
 
+// Phase 4 T24 — top-contributors leaderboard rows additionally carry a
+// 30-day per-day commit-count series for the sparkline on the Dashboard's
+// Top Contributors panel. Project / repo contributor lists stay on the
+// base shape.
+export interface TopContributorWithSparkline extends TopContributor {
+  last30Days: number[];
+}
+
 export type ContributorWindow = '7d' | '30d';
 
 // Phase 3 per-entity rollup endpoints. Shapes mirror the StatsStore result
@@ -156,7 +164,7 @@ export const api = {
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/latest-commit`,
     ),
   topContributors: (window: ContributorWindow = '7d') =>
-    request<TopContributor[]>(`/api/stats/top-contributors?window=${window}`),
+    request<TopContributorWithSparkline[]>(`/api/stats/top-contributors?window=${window}`),
   userSummary: (userId: number) => request<UserSummary>(`/api/stats/users/${userId}/summary`),
   projectStats: (projectKey: string) => request<ProjectStats>(`/api/stats/projects/${encodeURIComponent(projectKey)}`),
   repositoryActivity: (workspace: string, slug: string) =>

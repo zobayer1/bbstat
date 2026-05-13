@@ -20,8 +20,20 @@ const sampleOverview = {
   commitsLast7Days: 87,
 };
 const sampleContributors = [
-  { userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 42 },
-  { userId: 2, bitbucketUuid: '{u2}', displayName: 'Bob', commits: 17 },
+  {
+    userId: 1,
+    bitbucketUuid: '{u1}',
+    displayName: 'Alice',
+    commits: 42,
+    last30Days: new Array(30).fill(0),
+  },
+  {
+    userId: 2,
+    bitbucketUuid: '{u2}',
+    displayName: 'Bob',
+    commits: 17,
+    last30Days: new Array(30).fill(0),
+  },
 ];
 const sampleRepositories = [
   {
@@ -92,7 +104,7 @@ describe('stats store', () => {
 
   it('setContributorsWindow() refetches with the new window', async () => {
     vi.mocked(api.topContributors).mockResolvedValueOnce([
-      { userId: 9, bitbucketUuid: '{u9}', displayName: 'Carol', commits: 200 },
+      { userId: 9, bitbucketUuid: '{u9}', displayName: 'Carol', commits: 200, last30Days: new Array(30).fill(0) },
     ]);
     const store = useStatsStore();
 

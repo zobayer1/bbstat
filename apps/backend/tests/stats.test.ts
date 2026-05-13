@@ -10,7 +10,7 @@ import type {
   ProjectStats,
   RepoActivity,
   StatsStore,
-  TopContributor,
+  TopContributorWithSparkline,
   UserSummary,
 } from '../src/dashboard/stats-store.js';
 import type { UserSummaryCache } from '../src/dashboard/user-summary-cache.js';
@@ -153,9 +153,21 @@ describe('GET /api/stats/top-contributors', () => {
   });
 
   it('defaults to a 7-day window when no query param is given', async () => {
-    const contributors: TopContributor[] = [
-      { userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 42 },
-      { userId: 2, bitbucketUuid: '{u2}', displayName: 'Bob', commits: 17 },
+    const contributors: TopContributorWithSparkline[] = [
+      {
+        userId: 1,
+        bitbucketUuid: '{u1}',
+        displayName: 'Alice',
+        commits: 42,
+        last30Days: Array.from({ length: 30 }, (_, i) => (i === 29 ? 5 : 1)),
+      },
+      {
+        userId: 2,
+        bitbucketUuid: '{u2}',
+        displayName: 'Bob',
+        commits: 17,
+        last30Days: new Array(30).fill(0),
+      },
     ];
     const getTopContributors = vi.fn().mockResolvedValue(contributors);
     const statsStore = makeStatsStore({ getTopContributors });

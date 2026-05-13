@@ -1,7 +1,12 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
-import type { ContributorWindow, OverviewStats, TopContributor, TrackedRepositorySummary } from '@/api/client';
+import type {
+  ContributorWindow,
+  OverviewStats,
+  TopContributorWithSparkline,
+  TrackedRepositorySummary,
+} from '@/api/client';
 
 // Pinia is the client-side cache (per CLAUDE.md). Hydrates from
 // /api/stats/overview + /api/stats/top-contributors + /api/stats/repositories;
@@ -11,7 +16,7 @@ export const useStatsStore = defineStore(
   'stats',
   () => {
     const overview = ref<OverviewStats | null>(null);
-    const topContributors = ref<TopContributor[]>([]);
+    const topContributors = ref<TopContributorWithSparkline[]>([]);
     const repositories = ref<TrackedRepositorySummary[]>([]);
     const contributorsWindow = ref<ContributorWindow>('7d');
     const lastSyncedAt = ref<string | null>(null);

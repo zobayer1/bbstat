@@ -38,6 +38,17 @@ export interface TopContributor {
   commits: number;
 }
 
+// Phase 4 T24 — TopContributor enriched with a 30-day commit sparkline.
+// Used only on the org-wide `getTopContributors` leaderboard so the
+// Dashboard's Top Contributors panel can render a per-user trend line.
+// Project / repo contributor lists deliberately stay on the base shape;
+// adding sparklines to those would require parallel CTEs without giving
+// the dashboard any new information.
+export interface TopContributorWithSparkline extends TopContributor {
+  // Length 30, oldest-first, zeros for days with no commits.
+  last30Days: number[];
+}
+
 export interface UserSummary {
   user: { id: number; bitbucketUuid: string; displayName: string };
   totals: {
@@ -160,7 +171,9 @@ export interface StatsStore {
   getLatestCommitForRepository(workspace: string, slug: string): Promise<LatestCommit | null>;
   // Top N developers by commit count over the trailing window. Anonymous /
   // unmatched-author commits are excluded — they have no user to attribute.
-  getTopContributors(windowDays: number, limit?: number): Promise<TopContributor[]>;
+  // Each row also carries a 30-day commit-count series for the Dashboard
+  // sparkline rendering.
+  getTopContributors(windowDays: number, limit?: number): Promise<TopContributorWithSparkline[]>;
 
   // Returns null when the user id doesn't exist. An existing user with no
   // commits returns a populated summary with all-zero totals and empty arrays.
@@ -250,25 +263,57 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       // Postgres can't infer the type of `current_date - $1` and falls back
       // to the `date - date` overload (which yields integer), then the
       // outer comparison `day >= integer` fails to resolve.
+      //
+      // Phase 4 T24: the same query also derives a 30-day sparkline per
+      // contributor in one pass. The `top` CTE picks the leaderboard;
+      // `spark` cross-joins it with a 30-day generate_series window and
+      // LEFT JOINs the same commit_daily aggregated by user+day so missing
+      // days become zero. The result is array_agg'd in date order so the
+      // frontend can render the SVG line directly without backfilling.
       const rows = await db.execute<{
         user_id: number;
         bitbucket_uuid: string;
         display_name: string;
         commits: number;
+        last_30_days: number[];
       }>(sql`
-        SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
-        FROM commit_daily cd
-        JOIN users u ON u.id = cd.author_user_id
-        WHERE cd.day >= current_date - ${windowDays - 1}::int
-        GROUP BY u.id, u.bitbucket_uuid, u.display_name
-        ORDER BY sum(cd.commit_count) DESC
-        LIMIT ${limit}
+        WITH top AS (
+          SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
+          FROM commit_daily cd
+          JOIN users u ON u.id = cd.author_user_id
+          WHERE cd.day >= current_date - ${windowDays - 1}::int
+          GROUP BY u.id, u.bitbucket_uuid, u.display_name
+          ORDER BY sum(cd.commit_count) DESC
+          LIMIT ${limit}
+        ),
+        daily AS (
+          SELECT author_user_id, day, sum(commit_count)::int AS commits
+          FROM commit_daily
+          WHERE day >= current_date - 29
+            AND author_user_id IN (SELECT user_id FROM top)
+          GROUP BY author_user_id, day
+        ),
+        spark AS (
+          SELECT
+            t.user_id,
+            array_agg(COALESCE(daily.commits, 0) ORDER BY sd.day) AS last_30_days
+          FROM top t
+          CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval)
+            AS sd(day)
+          LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
+          GROUP BY t.user_id
+        )
+        SELECT t.user_id, t.bitbucket_uuid, t.display_name, t.commits, spark.last_30_days
+        FROM top t
+        JOIN spark ON spark.user_id = t.user_id
+        ORDER BY t.commits DESC
       `);
       return rows.rows.map((r) => ({
         userId: r.user_id,
         bitbucketUuid: r.bitbucket_uuid,
         displayName: r.display_name,
         commits: r.commits,
+        last30Days: r.last_30_days,
       }));
     },
 
