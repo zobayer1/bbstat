@@ -19,6 +19,7 @@ import { deepenOneRepo, runDeepenTick } from './deepen-backfill.js';
 interface FakeState {
   candidate: DeepenCandidate | null;
   oldestShaByRepo: Map<number, string | null>;
+  syncStateByRepo: Map<number, SyncStateRow | null>;
   inserts: CommitInsertInput[];
   markedAttempt: number[];
   markedComplete: number[];
@@ -28,6 +29,10 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
   const state: FakeState = {
     candidate: seed.candidate ?? null,
     oldestShaByRepo: seed.oldestShaByRepo ?? new Map(),
+    // Default: no sync_state row known. The empty-sha branch of
+    // deepenOneRepo treats `null` / missing as "cold mode hasn't
+    // succeeded yet" — same behavior as the previous test fixture.
+    syncStateByRepo: seed.syncStateByRepo ?? new Map(),
     inserts: [],
     markedAttempt: [],
     markedComplete: [],
@@ -53,7 +58,9 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
       }
       return { inserted: state.inserts.length - before };
     },
-    getSyncState: unreachable as () => Promise<SyncStateRow | null>,
+    async getSyncState(repositoryId) {
+      return state.syncStateByRepo.get(repositoryId) ?? null;
+    },
     markSyncRunning: unreachable as () => Promise<void>,
     markSyncSuccess: unreachable,
     markSyncFailed: unreachable,
@@ -145,6 +152,65 @@ describe('deepenOneRepo', () => {
     // Don't mark complete — wait for cold mode to land commits first.
     expect(state.markedComplete).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('marks complete when oldestSha is null AND last_sync_status=success (repo is empty on BB)', async () => {
+    // Cold mode ran successfully but returned no commits — the repo is
+    // genuinely empty on BB. Without this auto-mark, the repo would
+    // cycle through every deepen tick forever via the "no oldest sha"
+    // empty-result path.
+    const { store, state } = makeStore({
+      candidate: { ...REPO, oldestSha: null },
+      syncStateByRepo: new Map([
+        [
+          7,
+          {
+            repositoryId: 7,
+            lastSeenSha: null,
+            lastSyncedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStartedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStatus: 'success' as const,
+            lastSyncError: null,
+            totalCommitsSynced: 0,
+          } satisfies SyncStateRow,
+        ],
+      ]),
+    });
+    const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+    const result = await deepenOneRepo({ client, store }, { maxPages: 5, budgetThreshold: 100 });
+
+    expect(result?.fetched).toBe(0);
+    expect(result?.reachedRoot).toBe(true);
+    expect(state.markedAttempt).toEqual([7]);
+    expect(state.markedComplete).toEqual([7]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT mark complete when oldestSha is null AND last_sync_status=failed (transient cold-mode failure)', async () => {
+    const { store, state } = makeStore({
+      candidate: { ...REPO, oldestSha: null },
+      syncStateByRepo: new Map([
+        [
+          7,
+          {
+            repositoryId: 7,
+            lastSeenSha: null,
+            lastSyncedAt: null,
+            lastSyncStartedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStatus: 'failed' as const,
+            lastSyncError: 'something went wrong',
+            totalCommitsSynced: 0,
+          } satisfies SyncStateRow,
+        ],
+      ]),
+    });
+    const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+    const result = await deepenOneRepo({ client, store }, { maxPages: 5, budgetThreshold: 100 });
+
+    expect(result?.reachedRoot).toBe(false);
+    expect(state.markedComplete).toEqual([]);
   });
 
   it('walks backwards from the oldest sha, skips the seed, inserts the rest, marks complete when BB has no `next`', async () => {

@@ -134,12 +134,39 @@ export async function deepenOneRepo(
   await deps.store.markDeepenAttempt(candidate.repositoryId);
 
   if (candidate.oldestSha === null) {
-    // No commits ingested at all — cold mode hasn't run for this repo
-    // yet, or returned empty. Nothing to deepen from. Don't mark complete
-    // (cold mode might land commits later); just leave it for the next
-    // tick rotation.
+    // No commits ingested at all. Two sub-cases — distinguish via the
+    // repo's last_sync_status:
+    //
+    // - `'success'` — cold mode ran cleanly and BB returned an empty
+    //   `/commits` response. The repo is genuinely empty on BB (no
+    //   commits at all). Flip `deepen_complete` so it drops out of the
+    //   rotation forever instead of cycling through every tick.
+    //
+    // - anything else (`'idle' | 'running' | 'failed'` or no row) — cold
+    //   mode hasn't successfully run yet. Don't mark complete; leave it
+    //   for the next tick rotation, by which time cold mode may have
+    //   landed commits (or we'll learn the underlying error and the
+    //   operator fixes it).
+    const state = await deps.store.getSyncState(candidate.repositoryId);
+    const isEmptyOnBitbucket = state?.lastSyncStatus === 'success';
+    if (isEmptyOnBitbucket) {
+      await deps.store.markDeepenComplete(candidate.repositoryId);
+      deps.logger?.info?.(
+        { repositoryId: candidate.repositoryId, fullName: candidate.fullName },
+        'deepen-backfill: repo is empty on BB (cold-mode success, 0 commits) — marking complete',
+      );
+      return {
+        ...emptyResult(candidate.repositoryId, candidate.fullName),
+        reachedRoot: true,
+        seedMissing: false,
+      };
+    }
     deps.logger?.debug?.(
-      { repositoryId: candidate.repositoryId, fullName: candidate.fullName },
+      {
+        repositoryId: candidate.repositoryId,
+        fullName: candidate.fullName,
+        lastSyncStatus: state?.lastSyncStatus ?? null,
+      },
       'deepen-backfill: no oldest commit yet — skipping',
     );
     return { ...emptyResult(candidate.repositoryId, candidate.fullName), seedMissing: false };
