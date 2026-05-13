@@ -59,7 +59,7 @@ export interface UserSummary {
     deletions30d: number;
   };
   dailyCommits: Array<{ date: string; commits: number }>;
-  topRepos: Array<{ workspace: string; slug: string; fullName: string; commits: number }>;
+  topRepos: Array<{ workspace: string; slug: string; fullName: string; project: string | null; commits: number }>;
 }
 
 export interface ProjectStats {

@@ -53,7 +53,7 @@ export interface UserSummary {
   // the frontend backfills the gaps to render a continuous sparkline.
   dailyCommits: Array<{ date: string; commits: number }>;
   // Top 5 repos this user committed to in the last 30 days.
-  topRepos: Array<{ workspace: string; slug: string; fullName: string; commits: number }>;
+  topRepos: Array<{ workspace: string; slug: string; fullName: string; project: string | null; commits: number }>;
 }
 
 export interface ProjectStats {
@@ -255,12 +255,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY day
           ORDER BY day
         `),
-        db.execute<{ workspace: string; slug: string; full_name: string; commits: number }>(sql`
-          SELECT r.workspace, r.slug, r.full_name, sum(cd.commit_count)::int AS commits
+        db.execute<{ workspace: string; slug: string; full_name: string; project: string | null; commits: number }>(sql`
+          SELECT r.workspace, r.slug, r.full_name, r.project, sum(cd.commit_count)::int AS commits
           FROM commit_daily cd
           JOIN repositories r ON r.id = cd.repository_id
           WHERE cd.author_user_id = ${userId} AND cd.day >= current_date - 29
-          GROUP BY r.id, r.workspace, r.slug, r.full_name
+          GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project
           ORDER BY sum(cd.commit_count) DESC
           LIMIT 5
         `),
@@ -283,6 +283,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           workspace: r.workspace,
           slug: r.slug,
           fullName: r.full_name,
+          project: r.project,
           commits: r.commits,
         })),
       };
