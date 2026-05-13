@@ -113,7 +113,7 @@ const formatLastCommit = (iso: string | null): string => (iso === null ? '—' :
 
       <section class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
-        <ActivityFeed :project="projectKey" />
+        <ActivityFeed :project="projectKey" height="24rem" />
       </section>
     </template>
   </main>

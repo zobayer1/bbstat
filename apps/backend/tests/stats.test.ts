@@ -353,15 +353,6 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
     const activity: RepoActivity = {
       repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
       dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
-      recentCommits: [
-        {
-          sha: 'abc',
-          message: 'msg',
-          authoredAt: '2026-05-12T00:00:00.000Z',
-          authorDisplayName: 'Alice',
-          authorBitbucketUuid: '{u1}',
-        },
-      ],
       contributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 4 }],
     };
     const getRepositoryActivity = vi.fn().mockResolvedValue(activity);

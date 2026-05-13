@@ -92,7 +92,6 @@ export interface ProjectStats {
 export interface RepoActivity {
   repository: { workspace: string; slug: string; fullName: string };
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
-  recentCommits: LatestCommit[];
   contributors: TopContributor[];
 }
 
@@ -180,6 +179,6 @@ export const api = {
     if (query.before !== undefined) params.set('before', query.before);
     if (query.limit !== undefined) params.set('limit', String(query.limit));
     const qs = params.toString();
-    return request<ActivityEntry[]>(`/api/stats/activity${qs.length > 0 ? `?${qs}` : ''}`);
+    return request<ActivityEntry[]>(`/api/activity${qs.length > 0 ? `?${qs}` : ''}`);
   },
 };

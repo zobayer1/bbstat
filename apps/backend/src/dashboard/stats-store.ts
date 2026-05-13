@@ -6,10 +6,10 @@
 // repo per author rollup). The aggregation reads use UTC day buckets — the
 // pre-rollup implementation used rolling time windows down to the millisecond,
 // but day buckets are what the dashboard reasonably means by "last 7 days"
-// and match what the rollup table can give us cheaply at any size. Methods
-// that need per-commit detail (`getLatestCommitForRepository`,
-// `getRepositoryActivity.recentCommits`) still hit `commits` directly — the
-// rollup doesn't carry shas, messages, or precise timestamps.
+// and match what the rollup table can give us cheaply at any size. The only
+// method still reading per-commit detail from `commits` is
+// `getLatestCommitForRepository`; the unified activity feed reads commits +
+// PRs via the dedicated `getActivity` query.
 
 import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -91,8 +91,6 @@ export interface RepoActivity {
   repository: { workspace: string; slug: string; fullName: string };
   // Last 30 calendar days, oldest first. Zero-commit days omitted.
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
-  // Last 20 commits across all authors (anonymous included).
-  recentCommits: LatestCommit[];
   // All contributors active in the last 30 days, ordered by commit count desc.
   contributors: TopContributor[];
 }
@@ -548,7 +546,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         .limit(1);
       if (repo === undefined) return null;
 
-      const [dailyRows, recentRows, contributorRows] = await Promise.all([
+      const [dailyRows, contributorRows] = await Promise.all([
         db.execute<{ date: string; commits: number; additions: number; deletions: number }>(sql`
           SELECT
             day::text AS date,
@@ -560,19 +558,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY day
           ORDER BY day
         `),
-        db
-          .select({
-            sha: commits.sha,
-            message: commits.message,
-            authoredAt: commits.authoredAt,
-            authorDisplayName: users.displayName,
-            authorBitbucketUuid: users.bitbucketUuid,
-          })
-          .from(commits)
-          .leftJoin(users, eq(commits.authorUserId, users.id))
-          .where(eq(commits.repositoryId, repo.id))
-          .orderBy(desc(commits.authoredAt))
-          .limit(20),
         db.execute<{ user_id: number; bitbucket_uuid: string; display_name: string; commits: number }>(sql`
           SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
           FROM commit_daily cd
@@ -590,13 +575,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           commits: r.commits,
           additions: r.additions,
           deletions: r.deletions,
-        })),
-        recentCommits: recentRows.map((r) => ({
-          sha: r.sha,
-          message: r.message,
-          authoredAt: r.authoredAt.toISOString(),
-          authorDisplayName: r.authorDisplayName,
-          authorBitbucketUuid: r.authorBitbucketUuid,
         })),
         contributors: contributorRows.rows.map((r) => ({
           userId: r.user_id,

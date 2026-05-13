@@ -63,6 +63,20 @@ const lastSyncLabel = computed(() => {
 const windows: ContributorWindow[] = ['7d', '30d'];
 const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Last 30 days');
 
+// Top Contributors + Activity share the same vertical real estate via a
+// tab control. Default to Contributors per user spec; switching tabs is
+// pure component state (no URL sync — filters in the URL still apply to
+// the Activity tab when it's open, the tab itself doesn't need persisting).
+type DashboardTab = 'contributors' | 'activity';
+const activeTab = ref<DashboardTab>('contributors');
+// Sized to the Top Contributors content (~10 rows × ~46px ≈ 28rem). The
+// Contributors container uses `overflow-y: hidden` — a hairline overflow
+// doesn't surface a scrollbar, and any future content growth (bigger
+// LIMIT, longer names wrapping) gets clipped cleanly inside the box
+// instead of escaping into the panels below. Activity keeps its
+// `overflow-y: auto` so paging works.
+const ACTIVITY_PANEL_HEIGHT = '28rem';
+
 // Projects panel is derived from the repository list — group by project key
 // (skipping repos with no project assignment), sum commits/repos, and take the
 // max last-commit timestamp as the project's "last activity". Sorted by 30d
@@ -85,10 +99,9 @@ const projectsPanel = computed(() => {
 const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
 
 // Collapsed by default — tracked-set listings can be long. Pagination lives
-// in component state (not the store) so it resets per visit; default size of
-// 20 matches typical org/project list density and keeps the page tall enough
-// to scan without scrolling forever.
-const PAGE_SIZE = 20;
+// in component state (not the store) so it resets per visit; 10 rows per
+// page keeps the panels visually compact even when fully expanded.
+const PAGE_SIZE = 10;
 const projectsExpanded = ref(false);
 const repositoriesExpanded = ref(false);
 const projectsPage = ref(1);
@@ -136,9 +149,35 @@ const pagedRepositories = computed(() => {
     </section>
 
     <section class="mt-8">
-      <div class="mb-3 flex items-baseline justify-between">
-        <h2 class="text-lg font-semibold text-slate-900">Top contributors</h2>
-        <div class="flex gap-2 text-xs">
+      <!-- Tab buttons + contextual controls. Switching the active tab swaps
+           both the right-side controls (window vs. filter dropdowns) and the
+           panel below. Both panels are height-capped to the same value so the
+           surrounding layout stays stable across tab switches. -->
+      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+        <div role="tablist" class="flex gap-1 text-sm" aria-label="Dashboard panels">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === 'contributors'"
+            class="rounded-md px-3 py-1 font-medium transition"
+            :class="activeTab === 'contributors' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'"
+            @click="activeTab = 'contributors'"
+          >
+            Top contributors
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === 'activity'"
+            class="rounded-md px-3 py-1 font-medium transition"
+            :class="activeTab === 'activity' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'"
+            @click="activeTab = 'activity'"
+          >
+            Recent activity
+          </button>
+        </div>
+
+        <div v-if="activeTab === 'contributors'" class="flex gap-2 text-xs">
           <button
             v-for="w in windows"
             :key="w"
@@ -154,86 +193,93 @@ const pagedRepositories = computed(() => {
             {{ windowLabel(w) }}
           </button>
         </div>
+
+        <div v-else class="flex flex-wrap items-center gap-2 text-xs">
+          <label class="flex items-center gap-1">
+            <span class="text-slate-500">Project:</span>
+            <select
+              v-model="filterProject"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter by project"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="p in projectsPanel" :key="p.projectKey" :value="p.projectKey">{{ p.projectKey }}</option>
+            </select>
+          </label>
+          <label class="flex items-center gap-1">
+            <span class="text-slate-500">Repository:</span>
+            <select
+              v-model="filterRepo"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter by repository"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="r in stats.repositories" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+            </select>
+          </label>
+          <label class="flex items-center gap-1">
+            <span class="text-slate-500">User:</span>
+            <select
+              v-model.number="filterActor"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter by user"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
+            </select>
+          </label>
+          <button v-if="filtersActive" type="button" class="text-slate-500 hover:text-slate-700" @click="clearFilters">
+            Clear
+          </button>
+        </div>
       </div>
 
-      <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
-          <li
-            v-for="(c, i) in stats.topContributors"
-            :key="c.bitbucketUuid"
-            class="flex items-center justify-between px-4 py-3"
-          >
-            <div class="flex items-center gap-3">
-              <span class="w-5 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-              <RouterLink
-                :to="{ name: 'user', params: { userId: c.userId } }"
-                class="text-sm font-medium text-slate-900 hover:text-slate-600"
-              >
-                {{ c.displayName }}
-              </RouterLink>
-            </div>
-            <div class="flex items-center gap-3">
-              <Sparkline :points="c.last30Days" :width="64" :height="16" class="text-slate-400" />
-              <span class="w-24 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
-            </div>
-          </li>
-        </ul>
-        <p v-else class="px-4 py-6 text-center text-sm text-slate-400">
-          No commits in the {{ windowLabel(stats.contributorsWindow).toLowerCase() }}.
-        </p>
-      </div>
-    </section>
-
-    <section class="mt-8">
-      <div class="mb-3 flex items-center justify-between gap-3">
-        <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
-        <button
-          v-if="filtersActive"
-          type="button"
-          class="text-xs text-slate-500 hover:text-slate-700"
-          @click="clearFilters"
-        >
-          Clear filters
-        </button>
+      <!-- Contributors tab — internal scroll matches the activity panel so
+           swapping tabs doesn't reflow the page. -->
+      <div
+        v-show="activeTab === 'contributors'"
+        role="tabpanel"
+        class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
+      >
+        <div :style="{ height: ACTIVITY_PANEL_HEIGHT, overflowY: 'hidden' }">
+          <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
+            <li
+              v-for="(c, i) in stats.topContributors"
+              :key="c.bitbucketUuid"
+              class="flex items-center justify-between px-4 py-3"
+            >
+              <div class="flex items-center gap-3">
+                <span class="w-5 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
+                <RouterLink
+                  :to="{ name: 'user', params: { userId: c.userId } }"
+                  class="text-sm font-medium text-slate-900 hover:text-slate-600"
+                >
+                  {{ c.displayName }}
+                </RouterLink>
+              </div>
+              <div class="flex items-center gap-3">
+                <Sparkline :points="c.last30Days" :width="64" :height="16" class="text-slate-400" />
+                <span class="w-24 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
+              </div>
+            </li>
+          </ul>
+          <p v-else class="px-4 py-6 text-center text-sm text-slate-400">
+            No commits in the {{ windowLabel(stats.contributorsWindow).toLowerCase() }}.
+          </p>
+        </div>
       </div>
 
-      <div class="mb-3 flex flex-wrap gap-2 text-xs">
-        <label class="flex items-center gap-1">
-          <span class="text-slate-500">Project:</span>
-          <select
-            v-model="filterProject"
-            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-            aria-label="Filter by project"
-          >
-            <option :value="undefined">All</option>
-            <option v-for="p in projectsPanel" :key="p.projectKey" :value="p.projectKey">{{ p.projectKey }}</option>
-          </select>
-        </label>
-        <label class="flex items-center gap-1">
-          <span class="text-slate-500">Repository:</span>
-          <select
-            v-model="filterRepo"
-            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-            aria-label="Filter by repository"
-          >
-            <option :value="undefined">All</option>
-            <option v-for="r in stats.repositories" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
-          </select>
-        </label>
-        <label class="flex items-center gap-1">
-          <span class="text-slate-500">User:</span>
-          <select
-            v-model.number="filterActor"
-            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-            aria-label="Filter by user"
-          >
-            <option :value="undefined">All</option>
-            <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
-          </select>
-        </label>
+      <!-- Activity tab — same height cap so the surrounding layout doesn't
+           shift when switching tabs. v-show keeps the component mounted, so
+           any filter state / loaded pages stay live across tab toggles. -->
+      <div v-show="activeTab === 'activity'" role="tabpanel">
+        <ActivityFeed
+          :actor="filterActor"
+          :repo="filterRepo"
+          :project="filterProject"
+          :height="ACTIVITY_PANEL_HEIGHT"
+        />
       </div>
-
-      <ActivityFeed :actor="filterActor" :repo="filterRepo" :project="filterProject" />
     </section>
 
     <section class="mt-8">

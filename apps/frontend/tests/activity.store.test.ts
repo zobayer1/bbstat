@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { useActivityStore } from '../src/stores/activity';
+import { useActivityStore, MAX_ENTRIES_PER_FILTER } from '../src/stores/activity';
 import type { ActivityEntry } from '../src/api/client';
 
 vi.mock('../src/api/client', () => ({
@@ -107,6 +107,20 @@ describe('activity store', () => {
     expect(store.byKey[keyAll]).toHaveLength(1);
     expect(store.error[keyActor]).toBe('boom');
     expect(store.byKey[keyActor]).toBeUndefined();
+  });
+
+  it('loadMore is a no-op once entries hit MAX_ENTRIES_PER_FILTER', async () => {
+    const store = useActivityStore();
+    // Pre-seed the cache at the cap. loadMore should not call the API.
+    const fullPage: ActivityEntry[] = Array.from({ length: MAX_ENTRIES_PER_FILTER }, (_, i) =>
+      makeCommit({ sha: `sha-${i}` }),
+    );
+    store.byKey[store.keyFor({})] = fullPage;
+
+    await store.loadMore({});
+
+    expect(api.activity).not.toHaveBeenCalled();
+    expect(store.byKey[store.keyFor({})]).toHaveLength(MAX_ENTRIES_PER_FILTER);
   });
 
   it('clear wipes every key', async () => {

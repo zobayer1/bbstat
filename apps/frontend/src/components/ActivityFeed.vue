@@ -11,13 +11,22 @@
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
-import { useActivityStore, type ActivityFilters } from '@/stores/activity';
+import { MAX_ENTRIES_PER_FILTER, useActivityStore, type ActivityFilters } from '@/stores/activity';
 import type { ActivityEntry } from '@/api/client';
 
 const props = defineProps<{
   actor?: number;
   repo?: string;
   project?: string;
+  // Optional fixed CSS height (e.g., '24rem'). When set, the list scrolls
+  // inside the component at exactly this height — the container does NOT
+  // shrink to fit short content. Fixed (vs. max-height) so callers like
+  // tabbed dashboards can swap panels without surrounding components
+  // reflowing. The IntersectionObserver uses the scroll container as its
+  // root so paging still fires as the sentinel scrolls into the inner
+  // viewport. Omit (e.g., a future full-page activity view) for natural
+  // page-flow height.
+  height?: string;
 }>();
 
 const store = useActivityStore();
@@ -35,22 +44,33 @@ const entries = computed<ActivityEntry[]>(() => store.byKey[filterKey.value] ?? 
 const isLoading = computed(() => store.loading[filterKey.value] === true);
 const errMsg = computed(() => store.error[filterKey.value] ?? null);
 const isExhausted = computed(() => store.exhausted[filterKey.value] === true);
+// Front-end cap independent of server pagination: once the per-filter array
+// hits MAX_ENTRIES_PER_FILTER the IntersectionObserver stops firing
+// loadMore and the footer surfaces a "narrow your filter" hint instead of
+// the "No more activity" message.
+const isCapped = computed(() => entries.value.length >= MAX_ENTRIES_PER_FILTER);
 
 onMounted(() => void store.load(filters.value));
 watch(filterKey, () => void store.load(filters.value));
 
 // IntersectionObserver wiring. The sentinel below the list fires loadMore
-// when it becomes visible — works for any height list inside any scroll
-// container because `root: null` defaults to the viewport.
+// when it becomes visible. When `height` is set the list scrolls inside
+// `scrollContainer` — we hand that element to the observer's `root` so the
+// sentinel becomes "intersecting" relative to the inner viewport, not the
+// outer page. With no height `root: null` falls back to the page viewport.
 const sentinel = ref<HTMLElement | null>(null);
+const scrollContainer = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 
 onMounted(() => {
-  observer = new IntersectionObserver((obs) => {
-    if (obs.some((e) => e.isIntersecting) && !isLoading.value && !isExhausted.value) {
-      void store.loadMore(filters.value);
-    }
-  });
+  observer = new IntersectionObserver(
+    (obs) => {
+      if (obs.some((e) => e.isIntersecting) && !isLoading.value && !isExhausted.value && !isCapped.value) {
+        void store.loadMore(filters.value);
+      }
+    },
+    props.height !== undefined && scrollContainer.value !== null ? { root: scrollContainer.value } : undefined,
+  );
   if (sentinel.value !== null) observer.observe(sentinel.value);
 });
 
@@ -97,65 +117,73 @@ function formatTime(iso: string): string {
       Could not load activity: {{ errMsg }}
     </p>
 
-    <ul v-if="entries.length > 0" class="divide-y divide-slate-100">
-      <li v-for="entry in entries" :key="entryKey(entry)" class="flex items-start gap-3 px-4 py-3 text-sm">
-        <span
-          v-if="entry.kind === 'commit'"
-          class="mt-0.5 inline-block w-16 shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-700"
-        >
-          commit
-        </span>
-        <span
-          v-else
-          :class="prBadgeClass(entry.state)"
-          class="mt-0.5 inline-block w-16 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider"
-        >
-          {{ entry.state }}
-        </span>
+    <div ref="scrollContainer" :style="height !== undefined ? { height, overflowY: 'auto' } : {}">
+      <ul v-if="entries.length > 0" class="divide-y divide-slate-100">
+        <li v-for="entry in entries" :key="entryKey(entry)" class="flex items-start gap-3 px-4 py-3 text-sm">
+          <span
+            v-if="entry.kind === 'commit'"
+            class="mt-0.5 inline-block w-16 shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-700"
+          >
+            commit
+          </span>
+          <span
+            v-else
+            :class="prBadgeClass(entry.state)"
+            class="mt-0.5 inline-block w-16 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider"
+          >
+            {{ entry.state }}
+          </span>
 
-        <div class="min-w-0 flex-1">
-          <p class="truncate text-slate-900">
-            <RouterLink
-              :to="{
-                name: 'repository',
-                params: { workspace: entry.repository.workspace, slug: entry.repository.slug },
-              }"
-              class="font-medium hover:text-slate-600"
-            >
-              {{ entry.repository.slug }}
-            </RouterLink>
-            <span v-if="entry.kind === 'commit'" class="text-slate-700"> — {{ commitTitle(entry.message) }}</span>
-            <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
-          </p>
-          <p class="mt-0.5 text-xs text-slate-500">
-            <span v-if="entry.author">
-              <RouterLink :to="{ name: 'user', params: { userId: entry.author.userId } }" class="hover:text-slate-700">
-                {{ entry.author.displayName }}
+          <div class="min-w-0 flex-1">
+            <p class="truncate text-slate-900">
+              <RouterLink
+                :to="{
+                  name: 'repository',
+                  params: { workspace: entry.repository.workspace, slug: entry.repository.slug },
+                }"
+                class="font-medium hover:text-slate-600"
+              >
+                {{ entry.repository.slug }}
               </RouterLink>
-            </span>
-            <span v-else class="italic">anonymous</span>
-            ·
-            <span>{{ formatTime(entry.occurredAt) }}</span>
-            <span v-if="entry.kind === 'commit'"> · +{{ entry.additions }} −{{ entry.deletions }}</span>
-            <span v-else> · {{ entry.sourceBranch }} → {{ entry.destinationBranch }}</span>
-          </p>
-        </div>
-      </li>
-    </ul>
+              <span v-if="entry.kind === 'commit'" class="text-slate-700"> — {{ commitTitle(entry.message) }}</span>
+              <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
+            </p>
+            <p class="mt-0.5 text-xs text-slate-500">
+              <span v-if="entry.author">
+                <RouterLink
+                  :to="{ name: 'user', params: { userId: entry.author.userId } }"
+                  class="hover:text-slate-700"
+                >
+                  {{ entry.author.displayName }}
+                </RouterLink>
+              </span>
+              <span v-else class="italic">anonymous</span>
+              ·
+              <span>{{ formatTime(entry.occurredAt) }}</span>
+              <span v-if="entry.kind === 'commit'"> · +{{ entry.additions }} −{{ entry.deletions }}</span>
+              <span v-else> · {{ entry.sourceBranch }} → {{ entry.destinationBranch }}</span>
+            </p>
+          </div>
+        </li>
+      </ul>
 
-    <p v-else-if="!isLoading && errMsg === null" class="px-4 py-6 text-center text-sm text-slate-400">
-      No activity yet for this view.
-    </p>
+      <p v-else-if="!isLoading && errMsg === null" class="px-4 py-6 text-center text-sm text-slate-400">
+        No activity yet for this view.
+      </p>
 
-    <!-- Infinite-scroll sentinel + status row. Sentinel must exist in the DOM
-         even when entries are empty so the first scroll into view can fire. -->
-    <div ref="sentinel" class="h-px" />
-    <p v-if="isLoading" class="px-4 py-2 text-center text-xs text-slate-400">Loading…</p>
-    <p
-      v-else-if="isExhausted && entries.length > 0"
-      class="border-t border-slate-100 px-4 py-2 text-center text-xs text-slate-300"
-    >
-      No more activity.
-    </p>
+      <!-- Infinite-scroll sentinel + status row. Sentinel must exist in the DOM
+           even when entries are empty so the first scroll into view can fire. -->
+      <div ref="sentinel" class="h-px" />
+      <p v-if="isLoading" class="px-4 py-2 text-center text-xs text-slate-400">Loading…</p>
+      <p v-else-if="isCapped" class="border-t border-slate-100 px-4 py-2 text-center text-xs text-slate-500">
+        Showing newest {{ MAX_ENTRIES_PER_FILTER }} entries — apply a filter to see older activity.
+      </p>
+      <p
+        v-else-if="isExhausted && entries.length > 0"
+        class="border-t border-slate-100 px-4 py-2 text-center text-xs text-slate-300"
+      >
+        No more activity.
+      </p>
+    </div>
   </div>
 </template>
