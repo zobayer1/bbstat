@@ -22,6 +22,10 @@ const testConfig: AppConfig = {
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
   DIFF_STATS_MAX_PER_REPO_PER_TICK: 50,
   DIFF_STATS_BUDGET_THRESHOLD: 10,
+  SYNC_PRS_CRON: '*/30 * * * *',
+  PR_BACKFILL_MAX_PAGES: 5,
+  PR_SYNC_CONCURRENCY: 3,
+  PR_SYNC_BUDGET_THRESHOLD: 20,
 };
 
 describe('health routes', () => {

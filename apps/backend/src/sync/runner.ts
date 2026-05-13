@@ -17,6 +17,7 @@
 import { bootstrapTrackedRepositories, syncWorkspaceMembers } from './discovery.js';
 import { runCommitsTick } from './commits-tick.js';
 import { syncRepositoryCommits } from './commits.js';
+import { runPullRequestsTick } from './pr-tick.js';
 import { withRollupRecompute } from '../dashboard/rollup-hook.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import type { AppConfig } from '../config.js';
@@ -25,6 +26,9 @@ import type { CommitsTickOptions } from './commits-tick.js';
 import type { RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { BootstrapReposResult, RepoSeed, SyncMembersResult } from './discovery.js';
 import type { DiscoveryStore } from './discovery-store.js';
+import type { PrStore } from './pr-store.js';
+import type { PrTickOptions } from './pr-tick.js';
+import type { RepoPrSyncResult } from './pull-requests.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
 
@@ -50,6 +54,12 @@ export interface SyncRunnerDeps {
   userSummaryCache?: UserSummaryCache;
   // Defaults applied by runCommitsTick if absent.
   commitTickOptions?: CommitsTickOptions;
+  // Phase 4 T22: PR-ingest store. Required for `runPullRequestsSync`; if
+  // omitted, the PR sync paths simply aren't reachable. All runtime
+  // entrypoints (HTTPS API + cron host) wire it.
+  prStore: PrStore;
+  // Defaults applied by runPullRequestsTick if absent.
+  prTickOptions?: PrTickOptions;
 }
 
 interface BaseResult {
@@ -85,6 +95,23 @@ export interface CommitsSyncResult extends BaseResult {
   // Per-repo detail kept separate from the summary so log lines stay terse;
   // admins / debuggers can drill into the array via the response body.
   repoResults: RepoCommitSyncResult[];
+  errors: Array<{ repository: RepositoryHandle; error: string }>;
+  deferred: RepositoryHandle[];
+}
+
+export interface PrsSyncSummary {
+  attempted: number;
+  deferred: number;
+  errors: number;
+  totalPrsInserted: number;
+  totalPrsUpdated: number;
+  budgetRemainingAtEnd: number;
+  stoppedEarly: boolean;
+}
+
+export interface PrsSyncResult extends BaseResult {
+  prs: PrsSyncSummary;
+  repoResults: RepoPrSyncResult[];
   errors: Array<{ repository: RepositoryHandle; error: string }>;
   deferred: RepositoryHandle[];
 }
@@ -172,6 +199,49 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   };
 }
 
+export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<PrsSyncResult> {
+  const startedAt = new Date().toISOString();
+  const rows = await deps.store.listTrackedRepositories();
+  const handles: RepositoryHandle[] = rows.map((r) => ({
+    repositoryId: r.id,
+    workspace: r.workspace,
+    slug: r.slug,
+    fullName: r.fullName,
+    diffStatsEnabled: r.diffStatsEnabled,
+  }));
+  deps.logger.info?.({ trigger, workspace: deps.workspace, repoCount: handles.length }, 'PR sync start');
+
+  const tick = await runPullRequestsTick(
+    { client: deps.client, store: deps.prStore, logger: deps.logger },
+    handles,
+    deps.prTickOptions ?? {},
+  );
+
+  const totalPrsInserted = tick.attempted.reduce((acc, r) => acc + r.inserted, 0);
+  const totalPrsUpdated = tick.attempted.reduce((acc, r) => acc + r.updated, 0);
+  const summary: PrsSyncSummary = {
+    attempted: tick.attempted.length,
+    deferred: tick.deferred.length,
+    errors: tick.errors.length,
+    totalPrsInserted,
+    totalPrsUpdated,
+    budgetRemainingAtEnd: tick.budgetRemainingAtEnd,
+    stoppedEarly: tick.stoppedEarly,
+  };
+  const finishedAt = new Date().toISOString();
+  deps.logger.info?.({ trigger, ...summary, startedAt, finishedAt }, 'PR sync complete');
+
+  return {
+    trigger,
+    startedAt,
+    finishedAt,
+    prs: summary,
+    repoResults: tick.attempted,
+    errors: tick.errors,
+    deferred: tick.deferred,
+  };
+}
+
 // Build CommitsTickOptions from app config. Both runtime entry points (HTTPS
 // API and the cron host) share this so the same env vars apply everywhere.
 export function commitTickOptionsFromConfig(config: AppConfig): CommitsTickOptions {
@@ -185,5 +255,13 @@ export function commitTickOptionsFromConfig(config: AppConfig): CommitsTickOptio
       maxPerRepoPerTick: config.DIFF_STATS_MAX_PER_REPO_PER_TICK,
       budgetThreshold: config.DIFF_STATS_BUDGET_THRESHOLD,
     },
+  };
+}
+
+export function prTickOptionsFromConfig(config: AppConfig): PrTickOptions {
+  return {
+    firstRunMaxPages: config.PR_BACKFILL_MAX_PAGES,
+    concurrency: config.PR_SYNC_CONCURRENCY,
+    budgetLowThreshold: config.PR_SYNC_BUDGET_THRESHOLD,
   };
 }

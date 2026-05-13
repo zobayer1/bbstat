@@ -6,8 +6,16 @@ import { createDb } from '../db/client.js';
 import { BitbucketClient } from '../bitbucket/client.js';
 import { createDrizzleCommitStore } from './commit-store.js';
 import { createDrizzleDiscoveryStore } from './discovery-store.js';
+import { createDrizzlePrStore } from './pr-store.js';
 import { loadSeedTrackedRepos } from './discovery.js';
-import { commitTickOptionsFromConfig, runCommitsSync, runMembersSync, runReposSync } from './runner.js';
+import {
+  commitTickOptionsFromConfig,
+  prTickOptionsFromConfig,
+  runCommitsSync,
+  runMembersSync,
+  runPullRequestsSync,
+  runReposSync,
+} from './runner.js';
 import { createCache } from '../cache/redis.js';
 import { createDrizzleRollupStore } from '../dashboard/rollup-store.js';
 import { createRedisUserSummaryCache } from '../dashboard/user-summary-cache.js';
@@ -25,6 +33,7 @@ async function main(): Promise<void> {
   const db = createDb(config.DATABASE_URL);
   const store = createDrizzleDiscoveryStore(db);
   const commitStore = createDrizzleCommitStore(db);
+  const prStore = createDrizzlePrStore(db);
   const rollupStore = createDrizzleRollupStore(db);
   const redis = createCache(config.REDIS_URL);
   const userSummaryCache = createRedisUserSummaryCache(redis);
@@ -46,6 +55,7 @@ async function main(): Promise<void> {
     loadSeedTrackedRepos(seedFilePath, { required: seedRequired });
   const initialSeeds = loadSeeds();
   const commitTickOptions = commitTickOptionsFromConfig(config);
+  const prTickOptions = prTickOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
     client,
@@ -57,11 +67,14 @@ async function main(): Promise<void> {
     rollupStore,
     userSummaryCache,
     commitTickOptions,
+    prStore,
+    prTickOptions,
   };
 
-  // Three independent schedules. Members rarely change; repo metadata
-  // occasionally does; commits change constantly so they run on the tightest
-  // cadence. Each op is idempotent — overlapping manual triggers are safe.
+  // Four independent schedules. Members rarely change; repo metadata
+  // occasionally does; commits change constantly (tightest cadence); PRs
+  // mutate slower than commits (looser cadence). Each op is idempotent —
+  // overlapping manual triggers are safe.
   cron.schedule(config.SYNC_MEMBERS_CRON, () => {
     void runMembersSync(deps, 'cron').catch((err) => logger.error(err, 'members cron failed'));
   });
@@ -74,13 +87,19 @@ async function main(): Promise<void> {
     void runCommitsSync(deps, 'cron').catch((err) => logger.error(err, 'commits cron failed'));
   });
 
+  cron.schedule(config.SYNC_PRS_CRON, () => {
+    void runPullRequestsSync(deps, 'cron').catch((err) => logger.error(err, 'PRs cron failed'));
+  });
+
   logger.info(
     {
       membersCron: config.SYNC_MEMBERS_CRON,
       reposCron: config.SYNC_REPOS_CRON,
       commitsCron: config.SYNC_COMMITS_CRON,
+      prsCron: config.SYNC_PRS_CRON,
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
       commitTickOptions,
+      prTickOptions,
       seedCount: initialSeeds.length,
     },
     'Sync runner scheduled. Press Ctrl+C to exit.',

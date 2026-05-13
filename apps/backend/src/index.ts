@@ -7,8 +7,9 @@ import { BitbucketClient } from './bitbucket/client.js';
 import { createDb } from './db/client.js';
 import { createDrizzleCommitStore } from './sync/commit-store.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
+import { createDrizzlePrStore } from './sync/pr-store.js';
 import { loadSeedTrackedRepos } from './sync/discovery.js';
-import { commitTickOptionsFromConfig } from './sync/runner.js';
+import { commitTickOptionsFromConfig, prTickOptionsFromConfig } from './sync/runner.js';
 import { createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
   if (config.BITBUCKET_AUTH_EMAIL && config.BITBUCKET_AUTH_TOKEN && config.BITBUCKET_WORKSPACE) {
     const discoveryStore = createDrizzleDiscoveryStore(db);
     const commitStore = createDrizzleCommitStore(db);
+    const prStore = createDrizzlePrStore(db);
     const rollupStore = createDrizzleRollupStore(db);
     // Redis client is lazy-connect; first use is either the sync hook DEL
     // (rollup-hook.ts) or a GET from the user-summary route.
@@ -74,6 +76,8 @@ async function main(): Promise<void> {
       rollupStore,
       userSummaryCache,
       commitTickOptions: commitTickOptionsFromConfig(config),
+      prStore,
+      prTickOptions: prTickOptionsFromConfig(config),
     };
   }
 

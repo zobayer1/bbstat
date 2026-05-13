@@ -13,8 +13,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { syncRepositoryCommits } from '../sync/commits.js';
 import { addTrackedRepository } from '../sync/discovery.js';
-import { runCommitsSync, runDiscoverySync } from './../sync/runner.js';
+import { syncRepositoryPullRequests } from '../sync/pull-requests.js';
+import { runCommitsSync, runDiscoverySync, runPullRequestsSync } from './../sync/runner.js';
 import type { RepositoryHandle } from '../sync/commits.js';
+import type { PrSyncOptions } from '../sync/pull-requests.js';
 import type { SyncRunnerDeps } from '../sync/runner.js';
 
 export interface AdminRouteOptions {
@@ -33,6 +35,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
 
   app.post('/sync/commits', async () => {
     return runCommitsSync(opts.syncDeps, 'manual');
+  });
+
+  app.post('/sync/pullrequests', async () => {
+    return runPullRequestsSync(opts.syncDeps, 'manual');
   });
 
   // Force a fresh delta pull for a single tracked repo. Useful for backfills,
@@ -63,6 +69,41 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         },
         handle,
         opts.syncDeps.commitTickOptions ?? {},
+      );
+    },
+  );
+
+  app.post<{ Params: { workspace: string; slug: string } }>(
+    '/sync/repositories/:workspace/:slug/pullrequests',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) {
+        return reply.code(404).send({ error: 'not_tracked', fullName });
+      }
+      const handle: RepositoryHandle = {
+        repositoryId: row.id,
+        workspace: row.workspace,
+        slug: row.slug,
+        fullName: row.fullName,
+        diffStatsEnabled: row.diffStatsEnabled,
+      };
+      // The tick options carry concurrency/budget knobs that don't apply to
+      // a single-repo run; strip to just the per-repo subset.
+      const prRepoOpts: PrSyncOptions = {
+        ...(opts.syncDeps.prTickOptions?.firstRunMaxPages !== undefined
+          ? { firstRunMaxPages: opts.syncDeps.prTickOptions.firstRunMaxPages }
+          : {}),
+      };
+      return await syncRepositoryPullRequests(
+        {
+          client: opts.syncDeps.client,
+          store: opts.syncDeps.prStore,
+          logger: opts.syncDeps.logger,
+        },
+        handle,
+        prRepoOpts,
       );
     },
   );

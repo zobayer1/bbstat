@@ -57,6 +57,15 @@ const envSchema = z.object({
   // batch has already consumed budget.
   DIFF_STATS_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(50),
   DIFF_STATS_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
+
+  // Phase 4 T22: PR ingest. Runs on its own cron (default 30 min — PRs
+  // mutate slower than commits). Cold-mode cap is 5 pages × 100 = 500 PRs
+  // per repo on first sync; subsequent runs walk delta. Concurrency +
+  // budget threshold mirror the commit-tick knobs.
+  SYNC_PRS_CRON: z.string().default('*/30 * * * *'),
+  PR_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
+  PR_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
+  PR_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

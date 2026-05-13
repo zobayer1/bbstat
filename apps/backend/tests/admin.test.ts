@@ -4,6 +4,7 @@ import { createLogger } from '../src/lib/logger.js';
 import { BitbucketClient } from '../src/bitbucket/client.js';
 import type { AppConfig } from '../src/config.js';
 import type { CommitInsertInput, CommitStore, SyncStateRow, SyncSuccessUpdate } from '../src/sync/commit-store.js';
+import type { PrStore, PullRequestInsertInput } from '../src/sync/pr-store.js';
 import type {
   DiscoveryStore,
   RepositoryInsertInput,
@@ -31,6 +32,10 @@ const testConfig: AppConfig = {
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
   DIFF_STATS_MAX_PER_REPO_PER_TICK: 50,
   DIFF_STATS_BUDGET_THRESHOLD: 10,
+  SYNC_PRS_CRON: '*/30 * * * *',
+  PR_BACKFILL_MAX_PAGES: 5,
+  PR_SYNC_CONCURRENCY: 3,
+  PR_SYNC_BUDGET_THRESHOLD: 20,
 };
 
 // Discovery-flow admin tests don't exercise commit-sync. Provide a CommitStore
@@ -50,6 +55,73 @@ function noopCommitStore(): CommitStore {
     listPendingDiffStatCommits: fail,
     updateCommitDiffStats: fail,
   };
+}
+
+// Same idea for PrStore — discovery / commit-sync admin tests don't touch
+// PR ingest. Default to throwing so accidental calls fail loudly. The
+// dedicated PR admin tests override this with a working fake.
+function noopPrStore(): PrStore {
+  const fail = (): never => {
+    throw new Error('PrStore method called from non-PR admin test');
+  };
+  return {
+    resolveUserIdsByUuid: fail,
+    upsertPullRequests: fail,
+    getPrSyncState: fail,
+    markPrSyncSuccess: fail,
+  };
+}
+
+interface FakePrStoreState {
+  prsByKey: Map<string, PullRequestInsertInput>; // `${repoId}:${bbId}`
+  prStateByRepo: Map<number, { lastPrUpdatedAt: Date | null; lastPrId: number | null; prTotalSynced: number }>;
+}
+
+function createFakePrStore(): { store: PrStore; state: FakePrStoreState } {
+  const state: FakePrStoreState = {
+    prsByKey: new Map(),
+    prStateByRepo: new Map(),
+  };
+  const store: PrStore = {
+    async resolveUserIdsByUuid() {
+      return new Map();
+    },
+    async upsertPullRequests(input) {
+      let inserted = 0;
+      let updated = 0;
+      for (const pr of input) {
+        const key = `${pr.repositoryId}:${pr.bitbucketPrId}`;
+        if (state.prsByKey.has(key)) updated++;
+        else inserted++;
+        state.prsByKey.set(key, pr);
+      }
+      return { inserted, updated };
+    },
+    async getPrSyncState(repositoryId) {
+      const row = state.prStateByRepo.get(repositoryId);
+      if (row === undefined) return null;
+      return {
+        repositoryId,
+        lastPrUpdatedAt: row.lastPrUpdatedAt,
+        lastPrId: row.lastPrId,
+        prLastSyncedAt: null,
+        prTotalSynced: row.prTotalSynced,
+      };
+    },
+    async markPrSyncSuccess(repositoryId, update) {
+      const row = state.prStateByRepo.get(repositoryId) ?? {
+        lastPrUpdatedAt: null,
+        lastPrId: null,
+        prTotalSynced: 0,
+      };
+      state.prStateByRepo.set(repositoryId, {
+        lastPrUpdatedAt: update.newCursor?.updatedAt ?? row.lastPrUpdatedAt,
+        lastPrId: update.newCursor?.prId ?? row.lastPrId,
+        prTotalSynced: row.prTotalSynced + update.addedOrUpdated,
+      });
+    },
+  };
+  return { store, state };
 }
 
 interface FakeCommitStoreState {
@@ -199,6 +271,7 @@ function makeSyncDeps(
       workspace: 'tigerit',
       seeds: () => [],
       commitStore: noopCommitStore(),
+      prStore: noopPrStore(),
       ...overrides,
     },
     state,
@@ -612,6 +685,160 @@ describe('admin routes', () => {
         deferred: 0,
         errors: 0,
         totalCommitsInserted: 0,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PR-sync admin endpoints (Phase 4 T22). Parallel structure to the commit
+  // admin endpoints: per-repo + workspace-wide entrypoints, real PrStore fake
+  // + mocked BB /pullrequests responses.
+  // ---------------------------------------------------------------------------
+
+  describe('POST /api/admin/sync/repositories/:workspace/:slug/pullrequests', () => {
+    it('returns 404 when the repo is not in the tracked set', async () => {
+      const { store: prStore } = createFakePrStore();
+      const { deps } = makeSyncDeps(fetchMock, { prStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/sync/repositories/tigerit/never-tracked/pullrequests',
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/never-tracked' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('runs a cold PR sync and returns the per-repo result', async () => {
+      const { store: prStore, state: prState } = createFakePrStore();
+      const { deps } = makeSyncDeps(fetchMock, { prStore });
+      const { row: repo } = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
+      });
+      // Seed an empty PR sync_state row so getPrSyncState returns a cold row.
+      prState.prStateByRepo.set(repo.id, { lastPrUpdatedAt: null, lastPrId: null, prTotalSynced: 0 });
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          pagelen: 100,
+          values: [
+            {
+              id: 42,
+              title: 'feat: thing',
+              state: 'OPEN',
+              source: { branch: { name: 'feat' }, commit: { hash: 'src' } },
+              destination: { branch: { name: 'main' }, commit: { hash: 'dst' } },
+              author: { uuid: '{u1}' },
+              created_on: '2026-05-08T12:00:00+00:00',
+              updated_on: '2026-05-09T18:00:00+00:00',
+              closed_on: null,
+              comment_count: 0,
+              task_count: 0,
+            },
+          ],
+        }),
+      );
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/sync/repositories/tigerit/boing-server/pullrequests',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body).toMatchObject({
+        repositoryId: repo.id,
+        fullName: 'tigerit/boing-server',
+        mode: 'cold',
+        fetched: 1,
+        inserted: 1,
+        updated: 0,
+      });
+      expect(prState.prsByKey.size).toBe(1);
+    });
+  });
+
+  describe('POST /api/admin/sync/pullrequests', () => {
+    it('runs a workspace-wide tick across the tracked set', async () => {
+      const { store: prStore, state: prState } = createFakePrStore();
+      const { deps } = makeSyncDeps(fetchMock, { prStore });
+      const { row: repo1 } = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'a',
+        fullName: 'tigerit/a',
+        diffStatsEnabled: false,
+      });
+      const { row: repo2 } = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r2}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'b',
+        fullName: 'tigerit/b',
+        diffStatsEnabled: false,
+      });
+      for (const id of [repo1.id, repo2.id]) {
+        prState.prStateByRepo.set(id, { lastPrUpdatedAt: null, lastPrId: null, prTotalSynced: 0 });
+      }
+      // BB returns one PR per repo. Two paginated calls (one per repo).
+      const onePr = (id: number, slug: string): Record<string, unknown> => ({
+        id,
+        title: `feat: thing in ${slug}`,
+        state: 'OPEN',
+        source: { branch: { name: 'feat' }, commit: { hash: 'src' } },
+        destination: { branch: { name: 'main' }, commit: { hash: 'dst' } },
+        author: { uuid: '{u}' },
+        created_on: '2026-05-08T12:00:00+00:00',
+        updated_on: '2026-05-09T18:00:00+00:00',
+        closed_on: null,
+        comment_count: 0,
+        task_count: 0,
+      });
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ pagelen: 100, values: [onePr(1, 'a')] }))
+        .mockResolvedValueOnce(jsonResponse({ pagelen: 100, values: [onePr(2, 'b')] }));
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/sync/pullrequests' });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.trigger).toBe('manual');
+      expect(body.prs).toMatchObject({
+        attempted: 2,
+        deferred: 0,
+        errors: 0,
+        totalPrsInserted: 2,
+        totalPrsUpdated: 0,
+        stoppedEarly: false,
+      });
+      expect(body.repoResults).toHaveLength(2);
+      expect(prState.prsByKey.size).toBe(2);
+    });
+
+    it('returns an empty summary when no repos are tracked', async () => {
+      const { store: prStore } = createFakePrStore();
+      const { deps } = makeSyncDeps(fetchMock, { prStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/sync/pullrequests' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().prs).toMatchObject({
+        attempted: 0,
+        deferred: 0,
+        errors: 0,
+        totalPrsInserted: 0,
+        totalPrsUpdated: 0,
       });
       expect(fetchMock).not.toHaveBeenCalled();
     });
