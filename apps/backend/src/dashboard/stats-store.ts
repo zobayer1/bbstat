@@ -60,8 +60,9 @@ export interface UserSummary {
     additions30d: number;
     deletions30d: number;
   };
-  // Last 30 calendar days, oldest first. Days with zero commits are omitted —
-  // the frontend backfills the gaps to render a continuous sparkline.
+  // Last 365 calendar days, oldest first. Days with zero commits are omitted —
+  // the frontend backfills gaps when rendering (e.g. the contribution
+  // heatmap on the user detail page).
   dailyCommits: Array<{ date: string; commits: number }>;
   // Top 5 repos this user committed to in the last 30 days.
   topRepos: Array<{ workspace: string; slug: string; fullName: string; project: string | null; commits: number }>;
@@ -89,7 +90,8 @@ export interface ProjectStats {
 
 export interface RepoActivity {
   repository: { workspace: string; slug: string; fullName: string };
-  // Last 30 calendar days, oldest first. Zero-commit days omitted.
+  // Last 365 calendar days, oldest first. Zero-commit days omitted —
+  // the frontend backfills gaps when rendering the contribution heatmap.
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
   // All contributors active in the last 30 days, ordered by commit count desc.
   contributors: TopContributor[];
@@ -352,7 +354,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         db.execute<{ date: string; commits: number }>(sql`
           SELECT day::text AS date, sum(commit_count)::int AS commits
           FROM commit_daily
-          WHERE author_user_id = ${userId} AND day >= current_date - 29
+          WHERE author_user_id = ${userId} AND day >= current_date - 364
           GROUP BY day
           ORDER BY day
         `),
@@ -554,7 +556,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             sum(additions)::int AS additions,
             sum(deletions)::int AS deletions
           FROM commit_daily
-          WHERE repository_id = ${repo.id} AND day >= current_date - 29
+          WHERE repository_id = ${repo.id} AND day >= current_date - 364
           GROUP BY day
           ORDER BY day
         `),

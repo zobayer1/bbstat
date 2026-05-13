@@ -246,7 +246,7 @@ const pagedRepositories = computed(() => {
             <li
               v-for="(c, i) in stats.topContributors"
               :key="c.bitbucketUuid"
-              class="flex items-center justify-between px-4 py-3"
+              class="group flex items-center justify-between px-4 py-3"
             >
               <div class="flex items-center gap-3">
                 <span class="w-5 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
@@ -258,7 +258,12 @@ const pagedRepositories = computed(() => {
                 </RouterLink>
               </div>
               <div class="flex items-center gap-3">
-                <Sparkline :points="c.last30Days" :width="64" :height="16" class="text-slate-400" />
+                <Sparkline
+                  :points="c.last30Days"
+                  :width="128"
+                  :height="16"
+                  class="text-slate-400 transition-colors group-hover:text-blue-600"
+                />
                 <span class="w-24 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
               </div>
             </li>
