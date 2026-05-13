@@ -172,9 +172,12 @@ export const pullRequests = pgTable(
 // Sync bookkeeping
 // ---------------------------------------------------------------------------
 
-// One row per tracked repository. Holds the commit-pull cursor and the
-// outcome of the last sync attempt. Manual, cron, and webhook triggers all
-// converge on the same row — see runSync() in src/sync/runner.ts.
+// One row per tracked repository. Holds the commit-pull cursor + outcome of
+// the last commit-sync attempt (the `last_seen_sha` / `last_sync_*` columns)
+// and, from Phase 4 T22, the PR-pull cursor + counter. Commit and PR ingest
+// run on independent schedules and write disjoint columns, so they don't
+// stomp on each other. Manual, cron, and webhook triggers all converge on
+// the same row — see runSync() in src/sync/runner.ts.
 export const syncState = pgTable('sync_state', {
   repositoryId: integer('repository_id')
     .primaryKey()
@@ -185,6 +188,17 @@ export const syncState = pgTable('sync_state', {
   lastSyncStatus: syncStatusEnum('last_sync_status').notNull().default('idle'),
   lastSyncError: text('last_sync_error'),
   totalCommitsSynced: integer('total_commits_synced').notNull().default(0),
+  // Phase 4 T22: PR-sync cursor. PRs are walked newest-first by
+  // `updated_on`; the cursor stores the most-recent `updated_on` we've
+  // ingested and the BB-side numeric PR id for tie-break when multiple PRs
+  // share the same second. NULL on both = cold mode (no prior PR sync).
+  // `pr_last_synced_at` records when the PR sync last ran for this repo
+  // (purely observational — no status enum since PR errors land in the
+  // tick result + logs, not on the row).
+  lastPrUpdatedAt: timestamp('last_pr_updated_at', { withTimezone: true }),
+  lastPrId: integer('last_pr_id'),
+  prLastSyncedAt: timestamp('pr_last_synced_at', { withTimezone: true }),
+  prTotalSynced: integer('pr_total_synced').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

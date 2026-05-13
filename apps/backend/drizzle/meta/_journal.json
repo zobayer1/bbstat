@@ -29,6 +29,13 @@
       "when": 1778677804508,
       "tag": "0003_violet_starhawk",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1778680012467,
+      "tag": "0004_serious_karma",
+      "breakpoints": true
     }
   ]
 }
