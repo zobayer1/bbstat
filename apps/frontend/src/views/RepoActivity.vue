@@ -25,7 +25,7 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
-      <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">{{ fullName }}</h1>
+      <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">{{ slug }}</h1>
     </header>
 
     <p v-if="loading && !activity" class="text-sm text-slate-400">Loading…</p>

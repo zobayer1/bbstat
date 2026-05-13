@@ -99,7 +99,7 @@ const formatLastCommit = (iso: string | null): string => (iso === null ? '—' :
                     :to="{ name: 'repository', params: { workspace: r.workspace, slug: r.slug } }"
                     class="font-medium text-slate-900 hover:text-slate-600"
                   >
-                    {{ r.fullName }}
+                    {{ r.slug }}
                   </RouterLink>
                 </td>
                 <td class="px-4 py-2 text-right text-slate-900">{{ r.commits30d }}</td>
