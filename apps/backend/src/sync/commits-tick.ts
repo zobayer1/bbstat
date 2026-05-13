@@ -11,6 +11,7 @@
 // short-circuiting before runCommitsTick is even invoked.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
+import { BitbucketRateLimitError } from '../bitbucket/errors.js';
 import { syncRepositoryCommits } from './commits.js';
 import type { CommitSyncDeps, CommitSyncOptions, RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { CommitStore } from './commit-store.js';
@@ -40,10 +41,18 @@ export interface CommitsTickResult {
   attempted: RepoCommitSyncResult[];
   deferred: RepositoryHandle[];
   errors: Array<{ repository: RepositoryHandle; error: string }>;
-  // True iff the budget gate fired and we left repos in `deferred` rather
-  // than running through the whole list. Pure "ran out of repos" finishes
-  // are stoppedEarly=false even if `deferred` is empty.
+  // True iff something stopped the tick before draining `repos` — see
+  // `stopReason` for the cause. Pure "ran out of repos" finishes are
+  // stoppedEarly=false even if `deferred` is empty.
   stoppedEarly: boolean;
+  // Why the tick stopped. `null` = drained the queue cleanly. `'budget'` =
+  // the BB-call budget gate fired. `'rate-limited'` = the adaptive pacer
+  // hit its ceiling and a BB call still 429'd, exhausting the client
+  // retry budget; remaining repos roll over to the next cron tick. Their
+  // `last_synced_at` stays put (we never reached `markSyncSuccess`), so
+  // the next tick's `ORDER BY last_synced_at ASC NULLS FIRST` puts them
+  // at the head of the queue.
+  stopReason: 'budget' | 'rate-limited' | null;
   budgetRemainingAtEnd: number;
 }
 
@@ -65,6 +74,7 @@ export async function runCommitsTick(
   const attempted: RepoCommitSyncResult[] = [];
   const errors: CommitsTickResult['errors'] = [];
   let stoppedEarly = false;
+  let stopReason: 'budget' | 'rate-limited' | null = null;
 
   // Per-repo deps strip out the tick-only `syncOne` injection.
   const perRepoDeps: CommitSyncDeps = {
@@ -84,8 +94,12 @@ export async function runCommitsTick(
 
   const work = async (): Promise<void> => {
     while (queue.length > 0) {
+      // Tick-wide abort signal — any worker that hit
+      // BitbucketRateLimitError flipped stopReason; everyone else stops too.
+      if (stopReason === 'rate-limited') return;
       if (deps.client.getBudgetRemaining() < threshold) {
         stoppedEarly = true;
+        stopReason = 'budget';
         deps.logger?.warn?.(
           { remaining: deps.client.getBudgetRemaining(), threshold, deferred: queue.length },
           'commit tick: budget gate — deferring remaining repos',
@@ -98,6 +112,25 @@ export async function runCommitsTick(
         const result = await syncOne(perRepoDeps, repo, perRepoOpts);
         attempted.push(result);
       } catch (err) {
+        if (err instanceof BitbucketRateLimitError) {
+          // Adaptive pacing exhausted — BB still 429s at the cap. Put this
+          // repo back at the head of the queue (it didn't get processed),
+          // flag the tick-wide stop. Other workers will see it on their
+          // next iteration. Logged at warn, not error: this is expected
+          // backpressure that resolves on the next cron tick.
+          queue.unshift(repo);
+          stoppedEarly = true;
+          stopReason = 'rate-limited';
+          deps.logger?.warn?.(
+            {
+              repository: repo.fullName,
+              pacingMs: deps.client.getCurrentPacingMs(),
+              deferred: queue.length,
+            },
+            'commit tick: BB rate-limited at max pacing — yielding remaining queue to next tick',
+          );
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         errors.push({ repository: repo, error: message });
         deps.logger?.error?.(err, `commit tick: ${repo.fullName} failed`);
@@ -112,6 +145,7 @@ export async function runCommitsTick(
     deferred: queue,
     errors,
     stoppedEarly,
+    stopReason,
     budgetRemainingAtEnd: deps.client.getBudgetRemaining(),
   };
 }

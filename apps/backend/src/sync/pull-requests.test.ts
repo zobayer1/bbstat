@@ -165,8 +165,8 @@ describe('syncRepositoryPullRequests — cold mode', () => {
     expect(result.newCursor).toEqual({ updatedAt: '2026-05-09T18:00:00.000Z', prId: 1 });
   });
 
-  it('respects firstRunMaxPages as a row cap (pages × 100)', async () => {
-    const prs = Array.from({ length: 150 }, (_, i) =>
+  it('respects firstRunMaxPages as a row cap (pages × 50, BB caps PR pagelen)', async () => {
+    const prs = Array.from({ length: 100 }, (_, i) =>
       makePr({ id: 1000 - i, updated_on: new Date(Date.now() - i * 1000).toISOString() }),
     );
     fetchMock.mockImplementation(() => Promise.resolve(prsPage(prs)));
@@ -176,8 +176,8 @@ describe('syncRepositoryPullRequests — cold mode', () => {
     const result = await syncRepositoryPullRequests(deps, makeRepo(1), { firstRunMaxPages: 1 });
 
     expect(result.mode).toBe('cold');
-    expect(result.fetched).toBe(100);
-    expect(result.inserted).toBe(100);
+    expect(result.fetched).toBe(50);
+    expect(result.inserted).toBe(50);
     expect(result.hitPageCap).toBe(true);
   });
 

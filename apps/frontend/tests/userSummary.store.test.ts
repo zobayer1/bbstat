@@ -19,9 +19,12 @@ const sampleSummary: UserSummary = {
     deletions7d: 0,
     additions30d: 0,
     deletions30d: 0,
+    repositoriesAllTime: 4,
   },
   dailyCommits: [{ date: '2026-05-12', commits: 3 }],
-  topRepos: [{ workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', project: 'COMM', commits: 8 }],
+  topRepos: [
+    { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', project: 'COMM', commits: 8, syncStatus: 'ok' },
+  ],
 };
 
 describe('userSummary store', () => {

@@ -18,6 +18,7 @@ const sampleOverview = {
   projects: 1,
   totalCommits: 1234,
   commitsLast7Days: 87,
+  commitsLast30Days: 312,
 };
 const sampleContributors = [
   {
@@ -44,6 +45,7 @@ const sampleRepositories = [
     commits30d: 30,
     contributors30d: 4,
     lastCommitAt: '2026-05-12T00:00:00.000Z',
+    syncStatus: 'ok' as const,
   },
 ];
 

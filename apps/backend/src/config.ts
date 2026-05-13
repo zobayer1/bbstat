@@ -14,8 +14,23 @@ const envSchema = z.object({
   BITBUCKET_AUTH_TOKEN: z.string().optional(),
   // Soft cap on outbound BitBucket calls per rolling hour, enforced inside
   // BitbucketClient. BB Cloud's documented per-identity limit is ~1000/hr;
-  // 800 leaves a safety margin. See memory/bitbucket_rate_limit_headers.md.
-  BITBUCKET_HOURLY_CALL_BUDGET: z.coerce.number().int().positive().default(800),
+  // we run at the full cap by default since the gate is conservative (BB's
+  // rolling window is generous) and we'd rather use the headroom. See
+  // memory/bitbucket_rate_limit_headers.md.
+  BITBUCKET_HOURLY_CALL_BUDGET: z.coerce.number().int().positive().default(1000),
+  // Minimum wall-clock interval between successive BB calls from this
+  // client. BB's documented 1000/hr cap hides a sub-second burst limiter
+  // that 429s when we issue calls faster than ~2-3 per second. 400ms
+  // (≈ 2.5 calls/sec) keeps us comfortably under that without dragging out
+  // single-call admin endpoints. Set to 0 to disable in test envs.
+  BITBUCKET_MIN_CALL_INTERVAL_MS: z.coerce.number().int().nonnegative().default(400),
+  // Hard ceiling for adaptive pacing. Each observed 429 doubles the
+  // current interval (400 → 800 → 1600 → 3200 by default), capped here.
+  // When the cap is reached and 429s persist, the BB client's retry
+  // budget exhausts and `BitbucketRateLimitError` propagates — which the
+  // tick orchestrators (commits + deepen) treat as a stop signal,
+  // deferring remaining repos to the next cron tick.
+  BITBUCKET_MAX_CALL_INTERVAL_MS: z.coerce.number().int().nonnegative().default(3200),
 
   // Path to the curated tracked-repository seed file (YAML). Resolved against
   // the repo root if relative. If unset, defaults to `tracked-repos.yaml` at
@@ -28,7 +43,10 @@ const envSchema = z.object({
   // dev; lengthen them in production once we trust the runner.
   SYNC_MEMBERS_CRON: z.string().default('*/10 * * * *'),
   SYNC_REPOS_CRON: z.string().default('*/5 * * * *'),
-  SYNC_COMMITS_CRON: z.string().default('*/15 * * * *'),
+  // Commit cron also drives the piggybacked deepen-backfill step (see
+  // `DEEPEN_BUDGET_THRESHOLD` below). 5-minute cadence is comfortable
+  // under the hourly call budget for a curated tracked set of ~30 repos.
+  SYNC_COMMITS_CRON: z.string().default('*/5 * * * *'),
 
   // First-run cap on commit backfill per repo: stop after N pages of 100, or
   // at any commit older than COMMITS_BACKFILL_SINCE (whichever fires first).
@@ -58,14 +76,29 @@ const envSchema = z.object({
   DIFF_STATS_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(50),
   DIFF_STATS_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
 
-  // Phase 4 T22: PR ingest. Runs on its own cron (default 30 min — PRs
-  // mutate slower than commits). Cold-mode cap is 5 pages × 100 = 500 PRs
-  // per repo on first sync; subsequent runs walk delta. Concurrency +
-  // budget threshold mirror the commit-tick knobs.
-  SYNC_PRS_CRON: z.string().default('*/30 * * * *'),
+  // Phase 4 T22: PR ingest. Runs on its own cron (default hourly — PRs
+  // mutate slower than commits, and at 160-repo scale every PR tick is
+  // ~160 BB calls, so spending 30 min cadence on a low-PR-traffic
+  // workspace is wasteful). Cold-mode cap is 5 pages × 100 = 500 PRs per
+  // repo on first sync; subsequent runs walk delta.
+  SYNC_PRS_CRON: z.string().default('0 * * * *'),
   PR_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   PR_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
   PR_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
+
+  // Self-queueing deepen-backfill: piggybacks on the commit cron. After
+  // the normal delta tick finishes, if the BB-call budget still has at
+  // least DEEPEN_BUDGET_THRESHOLD headroom, the runner picks ONE repo
+  // whose `sync_state.deepen_complete` is still false and walks one
+  // bounded backfill page (DEEPEN_BACKFILL_MAX_PAGES × 100 commits)
+  // backwards from its oldest known commit. Once BB has nothing older
+  // for a repo, its `deepen_complete` flips true and it leaves the queue.
+  //
+  // Threshold is intentionally higher than the regular commit-tick gate
+  // (20) — deepen yields to delta sync. A reasonable default that still
+  // makes steady progress without crowding the budget.
+  DEEPEN_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
+  DEEPEN_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(100),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

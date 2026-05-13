@@ -12,6 +12,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { syncRepositoryCommits } from '../sync/commits.js';
+import { deepenOneRepo } from '../sync/deepen-backfill.js';
 import { addTrackedRepository } from '../sync/discovery.js';
 import { syncRepositoryPullRequests } from '../sync/pull-requests.js';
 import { runCommitsSync, runDiscoverySync, runPullRequestsSync } from './../sync/runner.js';
@@ -105,6 +106,51 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         handle,
         prRepoOpts,
       );
+    },
+  );
+
+  // Manual deepen trigger for one repo. Useful when an operator wants to
+  // force an immediate page of historical backfill without waiting for the
+  // commit cron to round-robin to that repo. Body / params are ignored
+  // beyond the URL — the deepen worker picks its own next page based on
+  // `commits.authored_at ASC` for the given repo.
+  app.post<{ Params: { workspace: string; slug: string } }>(
+    '/sync/repositories/:workspace/:slug/deepen',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) {
+        return reply.code(404).send({ error: 'not_tracked', fullName });
+      }
+      // Manual triggers don't bypass the budget gate — easier reasoning,
+      // no surprise burn. (`runDeepenTick` checks before each iteration;
+      // for one-shot manual runs the budget check lives inline here.)
+      const deepenOptions = opts.syncDeps.deepenOptions ?? { maxPages: 5, budgetThreshold: 100 };
+      if (opts.syncDeps.client.getBudgetRemaining() < deepenOptions.budgetThreshold) {
+        return reply.code(503).send({
+          error: 'budget_below_threshold',
+          fullName,
+          remaining: opts.syncDeps.client.getBudgetRemaining(),
+          threshold: deepenOptions.budgetThreshold,
+        });
+      }
+      const result = await deepenOneRepo(
+        {
+          client: opts.syncDeps.client,
+          store: opts.syncDeps.commitStore,
+          logger: opts.syncDeps.logger,
+          ...(opts.syncDeps.rollupStore ? { rollupStore: opts.syncDeps.rollupStore } : {}),
+          ...(opts.syncDeps.userSummaryCache ? { userSummaryCache: opts.syncDeps.userSummaryCache } : {}),
+        },
+        deepenOptions,
+        { repositoryId: row.id, workspace: row.workspace, slug: row.slug, fullName: row.fullName },
+      );
+      if (result === null) {
+        // explicitRepo path always returns a result; guard anyway.
+        return reply.code(503).send({ error: 'no_candidate', fullName });
+      }
+      return result;
     },
   );
 

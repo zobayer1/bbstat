@@ -108,6 +108,16 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
       state.diffStatsUpdates.push({ commitId, ...input });
       state.pendingDiffStatCommits.delete(commitId);
     },
+    async getOldestCommitSha() {
+      // Tests in this file don't exercise deepen-backfill — return null
+      // unless a future test sets `state.oldestShaOverride`.
+      return null;
+    },
+    async pickRepoForDeepening() {
+      return null;
+    },
+    async markDeepenAttempt() {},
+    async markDeepenComplete() {},
   };
 
   return { store, state };
@@ -498,6 +508,10 @@ describe('syncRepositoryCommits — diff-stats integration', () => {
         throw new Error('pickup blew up');
       },
       updateCommitDiffStats: async () => {},
+      getOldestCommitSha: async () => null,
+      pickRepoForDeepening: async () => null,
+      markDeepenAttempt: async () => {},
+      markDeepenComplete: async () => {},
     };
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store: brokenStore };
 

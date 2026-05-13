@@ -17,6 +17,7 @@
 import { bootstrapTrackedRepositories, syncWorkspaceMembers } from './discovery.js';
 import { runCommitsTick } from './commits-tick.js';
 import { syncRepositoryCommits } from './commits.js';
+import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
 import { runPullRequestsTick } from './pr-tick.js';
 import { withRollupRecompute } from '../dashboard/rollup-hook.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
@@ -60,6 +61,10 @@ export interface SyncRunnerDeps {
   prStore: PrStore;
   // Defaults applied by runPullRequestsTick if absent.
   prTickOptions?: PrTickOptions;
+  // Self-queueing deepen-backfill. When omitted (e.g., in tests that only
+  // care about delta sync), the piggyback step inside runCommitsSync is
+  // a no-op. All runtime entrypoints wire it.
+  deepenOptions?: { maxPages: number; budgetThreshold: number };
 }
 
 interface BaseResult {
@@ -97,6 +102,11 @@ export interface CommitsSyncResult extends BaseResult {
   repoResults: RepoCommitSyncResult[];
   errors: Array<{ repository: RepositoryHandle; error: string }>;
   deferred: RepositoryHandle[];
+  // Phase 4 follow-up: piggybacked deepen-backfill outcome. Null when the
+  // step is disabled (deepenOptions not wired). Otherwise contains per-repo
+  // results from this tick (zero or more) plus a stoppedReason indicating
+  // whether the budget gate fired or the queue drained.
+  deepen: DeepenTickResult | null;
 }
 
 export interface PrsSyncSummary {
@@ -185,13 +195,42 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     budgetRemainingAtEnd: tick.budgetRemainingAtEnd,
     stoppedEarly: tick.stoppedEarly,
   };
+
+  // Piggyback the deepen-backfill tick. Drains the queue until either the
+  // BB-call budget falls below DEEPEN_BUDGET_THRESHOLD (delta tick burned
+  // through the headroom) or every tracked repo is fully backfilled. Many
+  // repos per tick — at scale (~100+ tracked repos) this is what fills
+  // history in finite time. Errors here never abort the commit-sync
+  // result; the delta tick already succeeded.
+  let deepen: DeepenTickResult | null = null;
+  if (deps.deepenOptions !== undefined) {
+    try {
+      deepen = await runDeepenTick(
+        {
+          client: deps.client,
+          store: deps.commitStore,
+          logger: deps.logger,
+          ...(deps.rollupStore ? { rollupStore: deps.rollupStore } : {}),
+          ...(deps.userSummaryCache ? { userSummaryCache: deps.userSummaryCache } : {}),
+        },
+        deps.deepenOptions,
+      );
+    } catch (err) {
+      deps.logger.warn?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        'deepen-backfill: tick failed — delta tick still successful',
+      );
+    }
+  }
+
   const finishedAt = new Date().toISOString();
-  deps.logger.info?.({ trigger, ...summary, startedAt, finishedAt }, 'commit sync complete');
+  deps.logger.info?.({ trigger, ...summary, deepen, startedAt, finishedAt }, 'commit sync complete');
 
   return {
     trigger,
     startedAt,
     finishedAt,
+    deepen,
     commits: summary,
     repoResults: tick.attempted,
     errors: tick.errors,
@@ -263,5 +302,12 @@ export function prTickOptionsFromConfig(config: AppConfig): PrTickOptions {
     firstRunMaxPages: config.PR_BACKFILL_MAX_PAGES,
     concurrency: config.PR_SYNC_CONCURRENCY,
     budgetLowThreshold: config.PR_SYNC_BUDGET_THRESHOLD,
+  };
+}
+
+export function deepenOptionsFromConfig(config: AppConfig): { maxPages: number; budgetThreshold: number } {
+  return {
+    maxPages: config.DEEPEN_BACKFILL_MAX_PAGES,
+    budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
   };
 }

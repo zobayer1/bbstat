@@ -13,6 +13,8 @@ const testConfig: AppConfig = {
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
+  BITBUCKET_MIN_CALL_INTERVAL_MS: 0,
+  BITBUCKET_MAX_CALL_INTERVAL_MS: 0,
   SYNC_MEMBERS_CRON: '*/10 * * * *',
   SYNC_REPOS_CRON: '*/5 * * * *',
   SYNC_COMMITS_CRON: '*/15 * * * *',
@@ -26,6 +28,8 @@ const testConfig: AppConfig = {
   PR_BACKFILL_MAX_PAGES: 5,
   PR_SYNC_CONCURRENCY: 3,
   PR_SYNC_BUDGET_THRESHOLD: 20,
+  DEEPEN_BACKFILL_MAX_PAGES: 5,
+  DEEPEN_BUDGET_THRESHOLD: 100,
 };
 
 describe('health routes', () => {

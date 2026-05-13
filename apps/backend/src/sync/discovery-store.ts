@@ -5,7 +5,7 @@
 // The Drizzle-backed implementation at the bottom of this file is what gets
 // wired up in the runtime (sync runner, admin endpoints).
 
-import { eq } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { repositories, syncState, users } from '../db/schema.js';
 
@@ -167,6 +167,15 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
     },
 
     async listTrackedRepositories() {
+      // Fair round-robin for the commit tick: order by `sync_state.last_synced_at
+      // ASC NULLS FIRST` so repos that have never been synced (cold-mode
+      // candidates) and the least-recently-synced repos come first. Without
+      // this, Postgres returns rows in insertion order — under budget
+      // pressure the early-inserted top of the list always wins and the tail
+      // is perpetually deferred. Repos are added via discovery/admin and
+      // syncState is created in the same tx (`insertRepositoryWithSyncState`),
+      // so the LEFT JOIN is defensive — every row should match. Tiebreaker on
+      // `repositories.id` keeps the order deterministic for tests.
       return await db
         .select({
           id: repositories.id,
@@ -177,7 +186,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           fullName: repositories.fullName,
           diffStatsEnabled: repositories.diffStatsEnabled,
         })
-        .from(repositories);
+        .from(repositories)
+        .leftJoin(syncState, eq(syncState.repositoryId, repositories.id))
+        .orderBy(sql`${syncState.lastSyncedAt} ASC NULLS FIRST`, asc(repositories.id));
     },
   };
 }

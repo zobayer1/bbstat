@@ -4,6 +4,8 @@ import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
+import Sparkline from '@/components/Sparkline.vue';
+import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useRepoActivityStore } from '@/stores/repoActivity';
 
 const route = useRoute();
@@ -27,7 +29,10 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
-      <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">{{ slug }}</h1>
+      <h1 class="mt-1 flex items-center gap-2 text-3xl font-bold tracking-tight text-slate-900">
+        <span>{{ slug }}</span>
+        <SyncStateIcon v-if="activity" :status="activity.repository.syncStatus" />
+      </h1>
       <p v-if="activity" class="mt-1 text-sm text-slate-500">
         {{ commits365d }} commits · {{ activity.contributors.length }} contributors
       </p>
@@ -51,21 +56,29 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Contributors — last 30 days</h2>
         <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
           <ul v-if="activity.contributors.length > 0" class="divide-y divide-slate-100">
-            <li
-              v-for="(c, i) in activity.contributors"
-              :key="c.bitbucketUuid"
-              class="flex items-center justify-between px-4 py-3"
-            >
-              <div class="flex items-center gap-3">
-                <span class="w-5 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-                <RouterLink
-                  :to="{ name: 'user', params: { userId: c.userId } }"
-                  class="text-sm font-medium text-slate-900 hover:text-slate-600"
-                >
-                  {{ c.displayName }}
-                </RouterLink>
-              </div>
-              <span class="text-sm text-slate-500">{{ c.commits }} commits</span>
+            <li v-for="(c, i) in activity.contributors" :key="c.bitbucketUuid">
+              <RouterLink
+                :to="{ name: 'user', params: { userId: c.userId } }"
+                class="group flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
+              >
+                <div class="flex items-center gap-3">
+                  <span class="w-5 shrink-0 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
+                  <span class="text-sm font-medium text-slate-900">{{ c.displayName }}</span>
+                </div>
+                <div class="flex items-center gap-3">
+                  <!-- Sparkline scoped to this repo (last 30 days of commits
+                       this user landed here). Same hover treatment as the
+                       dashboard's top-contributors list — slate-400 →
+                       blue-600 on row hover. -->
+                  <Sparkline
+                    :points="c.last30Days ?? []"
+                    :width="128"
+                    :height="16"
+                    class="shrink-0 text-slate-400 transition-colors group-hover:text-blue-600"
+                  />
+                  <span class="w-24 shrink-0 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
+                </div>
+              </RouterLink>
             </li>
           </ul>
           <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No contributors in the last 30 days.</p>

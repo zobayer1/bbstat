@@ -100,6 +100,21 @@ Layer the "expensive" metrics in once cheap ones are stable.
 
 **Status:** Landed across `27528fe`..`96a6256` (11 commits). Operator notes — diff-stats opt-in via YAML, PR-sync cadence + cursor mechanics, `/api/activity` query params, every new env knob — live in [`docs/sync.md`](sync.md); the per-stream design rationale is preserved in [`docs/phase-4-plan.md`](phase-4-plan.md). Dashboard now has a tabbed Top Contributors / Recent Activity panel with per-user 30-day sparklines and project/repo/user filter dropdowns; the activity feed is mounted on user / project / repo detail pages too. Backend pipeline now ingests PR state on a 30-minute cron and (opt-in per repo) per-commit diff stats inside the commit tick.
 
+#### Phase 4 follow-ups — backpressure algorithm + dashboard polish ✅ Landed
+
+Post-Phase-4 ops work driven by running the sync at 160-repo scale and hitting BB Cloud's burst limiter.
+
+- **Self-queueing deepen-backfill** (`apps/backend/src/sync/deepen-backfill.ts`): every commit tick piggybacks a derived queue from `sync_state WHERE deepen_complete = false`, ordered by `deepen_last_run_at ASC NULLS FIRST`. Walks history backwards from each repo's oldest sha, marks `deepen_complete` when BB returns no more `next` URLs, drains until the budget runs out. Rolls up `commit_daily` + invalidates user-summary cache after every batch.
+- **Adaptive call pacing**: `BitbucketClient` now tracks `currentPacingMs` that doubles on every 429 (400 → 800 → 1600 → 3200) and decays after 20 clean responses. Sticky across ticks. Defends against BB's undocumented sub-second burst limiter.
+- **Tick-wide rate-limit abort**: when retries exhaust at the pacing ceiling, both commit-tick and deepen-tick catch `BitbucketRateLimitError`, unshift the failing repo back to the queue head, and yield to the next cron firing with `stopReason: 'rate-limited'`. Fairness across ticks via `last_synced_at ASC NULLS FIRST` ordering.
+- **Misc sync fixes**: PR endpoint pagelen 100→50 (BB's documented cap for `/pullrequests`), deepen-tick rotation-complete guard to prevent infinite loops when every candidate has `oldestSha = null`.
+- **Dashboard sync state**: per-repo `RepoSyncStatus` ('ok' / 'error' / 'never') derived from `sync_state.last_sync_status` and rendered as a tiny check / warning / dash icon next to every repo across the dashboard, project, user, and repo pages.
+- **Top contributors share bar**: 24px-tall blue-gradient bar showing each contributor's share of workspace commits in the active 7d/30d window. Vertical dividers, hover sheen animation, whole-row clickable link.
+- **Table improvements**: per-repo `contributors30d` column on the project detail page; First/Last buttons added to all paginated tables; project detail repos table paginated at size 10; sparkline + clickable row added to the repo detail page's contributors list.
+- **New stat cards**: dashboard "Commits last 30 days"; user detail "Repositories — all time" (distinct count).
+- **Project activity heatmap**: `CommitHeatmap` mounted on project detail pages with project-scoped `dailyCommits` aggregate.
+- **Algorithm doc** (`docs/sync.md`): new "Backpressure algorithm" section explaining the 4-layer rate-limit defense (self-counted budget, adaptive pacing, tick abort, fair round-robin) and a "Tuning playbook" mapping log symptoms to knobs.
+
 ### Phase 5 — Webhook trigger + admin UI (~3–4 days, stretch)
 
 Kill polling for hot repos; give operators visibility and self-service.

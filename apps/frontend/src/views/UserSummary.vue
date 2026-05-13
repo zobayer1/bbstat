@@ -4,6 +4,7 @@ import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
+import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useUserSummaryStore } from '@/stores/userSummary';
 
 const route = useRoute();
@@ -32,10 +33,11 @@ watch(userId, (next) => void store.fetch(next));
     <p v-if="error" class="mb-4 text-sm text-red-600">Could not load summary: {{ error }}</p>
 
     <template v-if="summary">
-      <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Commits — last 7 days" :value="summary.totals.commits7d" />
         <StatCard label="Commits — last 30 days" :value="summary.totals.commits30d" />
         <StatCard label="Commits — all time" :value="summary.totals.commitsAllTime" />
+        <StatCard label="Repositories — all time" :value="summary.totals.repositoriesAllTime ?? 0" />
       </section>
 
       <section class="mt-8">
@@ -49,6 +51,7 @@ watch(userId, (next) => void store.fetch(next));
           <table v-if="summary.topRepos.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
             <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
               <tr>
+                <th class="w-8 px-2 py-2 text-center font-medium"><span class="sr-only">Sync state</span></th>
                 <th class="px-4 py-2 text-left font-medium">Repository</th>
                 <th class="px-4 py-2 text-left font-medium">Project</th>
                 <th class="px-4 py-2 text-right font-medium">Commits</th>
@@ -56,6 +59,9 @@ watch(userId, (next) => void store.fetch(next));
             </thead>
             <tbody class="divide-y divide-slate-100">
               <tr v-for="r in summary.topRepos" :key="r.fullName">
+                <td class="px-2 py-2 text-center align-middle">
+                  <SyncStateIcon :status="r.syncStatus" />
+                </td>
                 <td class="px-4 py-2">
                   <RouterLink
                     :to="{ name: 'repository', params: { workspace: r.workspace, slug: r.slug } }"

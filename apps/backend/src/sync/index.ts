@@ -10,6 +10,7 @@ import { createDrizzlePrStore } from './pr-store.js';
 import { loadSeedTrackedRepos } from './discovery.js';
 import {
   commitTickOptionsFromConfig,
+  deepenOptionsFromConfig,
   prTickOptionsFromConfig,
   runCommitsSync,
   runMembersSync,
@@ -42,6 +43,8 @@ async function main(): Promise<void> {
     email: config.BITBUCKET_AUTH_EMAIL,
     token: config.BITBUCKET_AUTH_TOKEN,
     hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
+    minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,
+    maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,
     logger,
   });
   // Mirror the main backend entrypoint: seed path resolves against repo root
@@ -56,6 +59,7 @@ async function main(): Promise<void> {
   const initialSeeds = loadSeeds();
   const commitTickOptions = commitTickOptionsFromConfig(config);
   const prTickOptions = prTickOptionsFromConfig(config);
+  const deepenOptions = deepenOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
     client,
@@ -69,6 +73,7 @@ async function main(): Promise<void> {
     commitTickOptions,
     prStore,
     prTickOptions,
+    deepenOptions,
   };
 
   // Four independent schedules. Members rarely change; repo metadata
@@ -98,8 +103,11 @@ async function main(): Promise<void> {
       commitsCron: config.SYNC_COMMITS_CRON,
       prsCron: config.SYNC_PRS_CRON,
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
+      minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,
+      maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,
       commitTickOptions,
       prTickOptions,
+      deepenOptions,
       seedCount: initialSeeds.length,
     },
     'Sync runner scheduled. Press Ctrl+C to exit.',

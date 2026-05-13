@@ -361,6 +361,48 @@ describe('BitbucketClient', () => {
       expect(client.getBudgetRemaining()).toBe(100);
     });
 
+    it('paces successive calls when minCallIntervalMs is set (delays the second call until the gap is met)', async () => {
+      // Inject a fake clock so the pacer's `now() - lastCallAt` math is
+      // deterministic. The pacer's sleep is real wall-clock setTimeout, so
+      // we measure elapsed real time and assert it cleared the floor.
+      const clock = { t: 1_000_000_000 };
+      // Each call advances the fake clock by 50ms so we land *under* the
+      // 200ms pacing floor — the pacer should then sleep for the
+      // difference. Without pacing, both calls return instantly.
+      const now = (): number => {
+        const t = clock.t;
+        clock.t += 50;
+        return t;
+      };
+      fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ body: {} })));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, {
+        minCallIntervalMs: 200,
+        now,
+      });
+
+      const start = Date.now();
+      await client.get('/a');
+      await client.get('/b');
+      const elapsed = Date.now() - start;
+
+      // Pacer should sleep ~150ms (200 floor - 50ms advance) before the
+      // second call. Allow generous timer slack — CI clocks are noisy.
+      expect(elapsed).toBeGreaterThanOrEqual(100);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not pace the very first call (no prior call to gate against)', async () => {
+      fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ body: {} })));
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { minCallIntervalMs: 500 });
+
+      const start = Date.now();
+      await client.get('/first');
+      const elapsed = Date.now() - start;
+
+      // First call goes out immediately. Slack budget for slow CI.
+      expect(elapsed).toBeLessThan(200);
+    });
+
     it('clamps getBudgetRemaining at zero (never goes negative)', async () => {
       fetchMock.mockImplementation(() => Promise.resolve(mockResponse({ body: {} })));
       const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { hourlyCallBudget: 1 });

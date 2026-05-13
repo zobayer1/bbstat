@@ -46,8 +46,10 @@ describe('paginatePullRequests', () => {
     fetchMock = vi.fn();
   });
 
-  it('hits the right path with all four state filters + sort=-updated_on + pagelen=100', async () => {
-    fetchMock.mockResolvedValueOnce(mockResponse({ body: { pagelen: 100, values: [] } }));
+  it('hits the right path with all four state filters + sort=-updated_on + pagelen=50', async () => {
+    // BB Cloud caps /pullrequests pagelen at 50 (unlike /commits at 100);
+    // we override the client's 100 default explicitly here.
+    fetchMock.mockResolvedValueOnce(mockResponse({ body: { pagelen: 50, values: [] } }));
     const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
 
     const iter = paginatePullRequests(client, 'workspace-foo', 'repo-bar');
@@ -58,7 +60,7 @@ describe('paginatePullRequests', () => {
     expect(parsed.pathname).toBe('/2.0/repositories/workspace-foo/repo-bar/pullrequests');
     expect(parsed.searchParams.getAll('state').sort()).toEqual(['DECLINED', 'MERGED', 'OPEN', 'SUPERSEDED']);
     expect(parsed.searchParams.get('sort')).toBe('-updated_on');
-    expect(parsed.searchParams.get('pagelen')).toBe('100');
+    expect(parsed.searchParams.get('pagelen')).toBe('50');
   });
 
   it('requests the field-filter set and includes `next`', async () => {

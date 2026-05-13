@@ -8,7 +8,7 @@
 // (getSyncState, markSync{Running,Success,Failed}) own the sync_state row
 // lifecycle for a single repository.
 
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { commits, syncState, users } from '../db/schema.js';
 
@@ -80,6 +80,37 @@ export interface CommitStore {
   // stamp diff_stats_synced_at = now() so it's filtered out of the next
   // pickup. Idempotent — safe to call repeatedly with the same values.
   updateCommitDiffStats(commitId: number, input: { additions: number; deletions: number }): Promise<void>;
+
+  // Oldest known commit (by authored_at ASC) for the repo, used as the
+  // seed sha for deepen-backfill's `include=<sha>` walk. Null when no
+  // commits have been ingested yet (cold mode hasn't run).
+  getOldestCommitSha(repositoryId: number): Promise<string | null>;
+
+  // Deepen-backfill queue pick: ORDER BY deepen_last_run_at NULLS FIRST so
+  // never-attempted repos go first, then round-robin across the rest by
+  // staleness. Returns null when every tracked repo has deepen_complete = true.
+  pickRepoForDeepening(): Promise<DeepenCandidate | null>;
+
+  // Stamps deepen_last_run_at = now() without changing deepen_complete.
+  // Called even on no-op runs (e.g., budget gate fired mid-page) so the
+  // round-robin advances and we don't repeatedly hammer the same repo.
+  markDeepenAttempt(repositoryId: number): Promise<void>;
+
+  // Flips deepen_complete = true. Called once BB returns no `next` URL on
+  // the deepen pagination (we've reached the repo's first commit) or on
+  // an unrecoverable 404 against the seed sha (force-pushed history).
+  markDeepenComplete(repositoryId: number): Promise<void>;
+}
+
+export interface DeepenCandidate {
+  repositoryId: number;
+  workspace: string;
+  slug: string;
+  fullName: string;
+  // Seed sha for the deepen walk (oldest known commit). Null only when
+  // the repo has zero commits ingested — caller treats as
+  // "nothing to deepen yet; cold mode hasn't run".
+  oldestSha: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +215,68 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
           diffStatsSyncedAt: new Date(),
         })
         .where(eq(commits.id, commitId));
+    },
+
+    async getOldestCommitSha(repositoryId) {
+      const rows = await db
+        .select({ sha: commits.sha })
+        .from(commits)
+        .where(eq(commits.repositoryId, repositoryId))
+        .orderBy(asc(commits.authoredAt))
+        .limit(1);
+      return rows[0]?.sha ?? null;
+    },
+
+    async pickRepoForDeepening() {
+      // Single query that joins sync_state to repositories, filters to
+      // incomplete repos, orders by deepen_last_run_at NULLS FIRST (so
+      // brand-new entries jump the queue once, then round-robin by
+      // staleness), and pulls the oldest commit sha in the same shot via
+      // a correlated subquery. One DB roundtrip per tick.
+      const rows = await db.execute<{
+        repository_id: number;
+        workspace: string;
+        slug: string;
+        full_name: string;
+        oldest_sha: string | null;
+      }>(sql`
+        SELECT
+          s.repository_id,
+          r.workspace,
+          r.slug,
+          r.full_name,
+          (SELECT sha FROM commits WHERE repository_id = s.repository_id ORDER BY authored_at ASC LIMIT 1) AS oldest_sha
+        FROM sync_state s
+        JOIN repositories r ON r.id = s.repository_id
+        WHERE s.deepen_complete = false
+        ORDER BY s.deepen_last_run_at ASC NULLS FIRST
+        LIMIT 1
+      `);
+      const row = rows.rows[0];
+      if (row === undefined) return null;
+      return {
+        repositoryId: row.repository_id,
+        workspace: row.workspace,
+        slug: row.slug,
+        fullName: row.full_name,
+        oldestSha: row.oldest_sha,
+      };
+    },
+
+    async markDeepenAttempt(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ deepenLastRunAt: now, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async markDeepenComplete(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ deepenComplete: true, deepenLastRunAt: now, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
     },
   };
 }

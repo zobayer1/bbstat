@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { BitbucketClient } from '../bitbucket/client.js';
+import { BitbucketRateLimitError } from '../bitbucket/errors.js';
 import type { CommitSyncDeps, CommitSyncOptions, RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { CommitStore } from './commit-store.js';
 import { runCommitsTick } from './commits-tick.js';
@@ -32,6 +33,10 @@ function fakeStore(): CommitStore {
     markSyncFailed: fail,
     listPendingDiffStatCommits: fail,
     updateCommitDiffStats: fail,
+    getOldestCommitSha: fail,
+    pickRepoForDeepening: fail,
+    markDeepenAttempt: fail,
+    markDeepenComplete: fail,
   };
 }
 
@@ -261,7 +266,37 @@ describe('runCommitsTick', () => {
       deferred: [],
       errors: [],
       stoppedEarly: false,
+      stopReason: null,
       budgetRemainingAtEnd: 1000,
     });
+  });
+
+  it('aborts the tick on BitbucketRateLimitError and re-queues the failing repo at the head of `deferred`', async () => {
+    const repos = [makeRepo(1), makeRepo(2), makeRepo(3), makeRepo(4)];
+
+    const result = await runCommitsTick(
+      {
+        client: makeClientWithBudget({ budget: 1000 }),
+        store: fakeStore(),
+        syncOne: async (_d, r) => {
+          if (r.repositoryId === 2) {
+            throw new BitbucketRateLimitError('/repositories/tigerit/repo-2/commits', 1);
+          }
+          return makeOkResult(r);
+        },
+      },
+      repos,
+      // concurrency=1 so the test is deterministic — repo-2's throw stops the
+      // worker before it can pick up 3 or 4.
+      { concurrency: 1 },
+    );
+
+    expect(result.attempted.map((a) => a.repositoryId)).toEqual([1]);
+    // Repo-2 (the one that 429'd) is at the head of the deferred queue, so
+    // the next tick retries it before any later repos.
+    expect(result.deferred.map((r) => r.repositoryId)).toEqual([2, 3, 4]);
+    expect(result.errors).toEqual([]);
+    expect(result.stoppedEarly).toBe(true);
+    expect(result.stopReason).toBe('rate-limited');
   });
 });

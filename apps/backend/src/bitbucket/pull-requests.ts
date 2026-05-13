@@ -74,5 +74,13 @@ export function paginatePullRequests(
   const path =
     `/repositories/${workspace}/${slug}/pullrequests` +
     `?state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&sort=-updated_on`;
-  return client.paginate<BitbucketPullRequest>(path, { fields: PR_LIST_FIELDS });
+  // BB Cloud's /pullrequests endpoint caps `pagelen` at 50, unlike
+  // /commits (100). The shared `client.paginate()` default of 100 trips
+  // an "Invalid pagelen" 400 on this endpoint. Override explicitly here;
+  // BB's `next` URL preserves whatever we set, so all subsequent pages
+  // inherit the 50-row limit too.
+  return client.paginate<BitbucketPullRequest>(path, {
+    fields: PR_LIST_FIELDS,
+    query: { pagelen: 50 },
+  });
 }

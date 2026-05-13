@@ -9,7 +9,7 @@ import { createDrizzleCommitStore } from './sync/commit-store.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
 import { createDrizzlePrStore } from './sync/pr-store.js';
 import { loadSeedTrackedRepos } from './sync/discovery.js';
-import { commitTickOptionsFromConfig, prTickOptionsFromConfig } from './sync/runner.js';
+import { commitTickOptionsFromConfig, deepenOptionsFromConfig, prTickOptionsFromConfig } from './sync/runner.js';
 import { createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
@@ -53,6 +53,8 @@ async function main(): Promise<void> {
       email: config.BITBUCKET_AUTH_EMAIL,
       token: config.BITBUCKET_AUTH_TOKEN,
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
+      minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,
+      maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,
       logger,
     });
     // Seed file path: explicit env wins; otherwise default to
@@ -78,6 +80,7 @@ async function main(): Promise<void> {
       commitTickOptions: commitTickOptionsFromConfig(config),
       prStore,
       prTickOptions: prTickOptionsFromConfig(config),
+      deepenOptions: deepenOptionsFromConfig(config),
     };
   }
 

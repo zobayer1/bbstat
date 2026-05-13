@@ -199,6 +199,16 @@ export const syncState = pgTable('sync_state', {
   lastPrId: integer('last_pr_id'),
   prLastSyncedAt: timestamp('pr_last_synced_at', { withTimezone: true }),
   prTotalSynced: integer('pr_total_synced').notNull().default(0),
+  // Self-queueing deepen-backfill (Phase 4 follow-up). `deepen_complete`
+  // flips to true once we've walked the repo's history all the way back to
+  // its first commit (BB returns no `next` URL on the deepen pagination).
+  // Until then the per-tick deepen worker picks one repo at a time —
+  // ORDER BY deepen_last_run_at NULLS FIRST — and runs one bounded
+  // backfill page walking backwards from the oldest known commit. This is
+  // a derived queue: nothing to enqueue / dequeue, just SELECT from
+  // sync_state on each tick.
+  deepenComplete: boolean('deepen_complete').notNull().default(false),
+  deepenLastRunAt: timestamp('deepen_last_run_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

@@ -39,6 +39,10 @@ function makeStore(pending: PendingDiffStatCommit[] = []): { store: CommitStore;
       state.updates.push({ commitId, ...input });
       state.pending = state.pending.filter((c) => c.id !== commitId);
     },
+    getOldestCommitSha: unreachable,
+    pickRepoForDeepening: unreachable,
+    markDeepenAttempt: unreachable,
+    markDeepenComplete: unreachable,
   };
   return { store, state };
 }

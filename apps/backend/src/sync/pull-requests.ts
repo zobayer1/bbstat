@@ -151,7 +151,10 @@ async function pullPullRequests(
   opts: PrSyncOptions,
 ): Promise<PullResult> {
   const isCold = lastPrUpdatedAt === null;
-  const maxItems = opts.firstRunMaxPages !== undefined ? opts.firstRunMaxPages * 100 : undefined;
+  // BB Cloud caps `/pullrequests` pagelen at 50 (see paginatePullRequests).
+  // Cold-mode cap is `pages * 50 PRs` to keep the per-page count honest —
+  // operators get exactly `PR_BACKFILL_MAX_PAGES` BB pages on first sync.
+  const maxItems = opts.firstRunMaxPages !== undefined ? opts.firstRunMaxPages * 50 : undefined;
   const cursorMs = lastPrUpdatedAt?.getTime();
 
   const batch: BitbucketPullRequest[] = [];

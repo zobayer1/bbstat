@@ -13,6 +13,7 @@ const sample: ProjectStats = {
   project: 'COMM',
   totals: { commits7d: 250, commits30d: 850, contributorCount7d: 11, repositoryCount: 28 },
   weeklyCommits: [{ weekStart: '2026-05-04', commits: 70 }],
+  dailyCommits: [{ date: '2026-05-12', commits: 10 }],
   topContributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 42 }],
   repositories: [
     {
@@ -20,7 +21,9 @@ const sample: ProjectStats = {
       slug: 'r1',
       fullName: 'tigerit/r1',
       commits30d: 30,
+      contributors30d: 3,
       lastCommitAt: '2026-05-12T00:00:00.000Z',
+      syncStatus: 'ok',
     },
   ],
 };

@@ -22,6 +22,27 @@ export interface BitbucketClientOptions {
   // memory/bitbucket_rate_limit_headers.md. Default 800 leaves a 200-call
   // buffer below BB's documented ~1000/hr per-identity limit.
   hourlyCallBudget?: number;
+  // Minimum wall-clock interval between successive outbound calls from this
+  // client. BB Cloud's documented 1000/hr limit hides a finer-grained burst
+  // limiter that 429s well below the hourly count when calls go out faster
+  // than a few per second. Pacing here keeps us under that threshold without
+  // any client knowledge of what the threshold actually is. 0 = disabled
+  // (default in tests; production wires ~400ms via env). Applies to every
+  // attempt including retries — but retry-after / backoff sleeps naturally
+  // satisfy this gate, so no compounding penalty in the 429/5xx path.
+  minCallIntervalMs?: number;
+  // Hard ceiling on the adaptive pacing. Every observed 429 doubles the
+  // *current* pacing interval (min → 2× → 4× → ... → max). When the next
+  // retry would push past `maxCallIntervalMs`, the client stays at the cap
+  // and lets the retry budget exhaust normally — which surfaces as a
+  // `BitbucketRateLimitError` for the tick orchestrator to abort on.
+  // 0 disables adaptive bumping entirely (falls back to flat
+  // `minCallIntervalMs` pacing).
+  maxCallIntervalMs?: number;
+  // After this many consecutive non-429 responses, halve `currentPacingMs`
+  // back toward `minCallIntervalMs` (floor at the min). Lets the client
+  // recover automatically once BB's burst window has rotated. Default 20.
+  pacingDecaySuccesses?: number;
   // Injectable for tests; defaults to globalThis.fetch (Node 22 native).
   fetch?: typeof globalThis.fetch;
   // Injectable for tests of the call-ledger sliding window.
@@ -57,6 +78,9 @@ const DEFAULTS = {
   retryBaseDelayMs: 250,
   rateLimitWarnThreshold: 100,
   hourlyCallBudget: 800,
+  minCallIntervalMs: 0,
+  maxCallIntervalMs: 0,
+  pacingDecaySuccesses: 20,
 } as const;
 
 const HOUR_MS = 3_600_000;
@@ -69,6 +93,17 @@ export class BitbucketClient {
   private readonly retryBaseDelayMs: number;
   private readonly rateLimitWarnThreshold: number;
   private readonly hourlyCallBudget: number;
+  private readonly minCallIntervalMs: number;
+  private readonly maxCallIntervalMs: number;
+  private readonly pacingDecaySuccesses: number;
+  // Adaptive pacing state. `currentPacingMs` starts at `minCallIntervalMs`
+  // and doubles on every observed 429 (capped at `maxCallIntervalMs`).
+  // After `pacingDecaySuccesses` consecutive non-429 responses it halves
+  // back toward the floor. Sticky across ticks — the client instance lives
+  // for the process lifetime, so a 429 storm at minute 5 keeps us paced
+  // conservatively at minute 6 without re-discovering BB's burst limit.
+  private currentPacingMs: number;
+  private consecutiveNon429 = 0;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly now: () => number;
   private rateLimit: RateLimitState = { limit: null, remaining: null, resetAt: null };
@@ -76,6 +111,10 @@ export class BitbucketClient {
   // each network attempt costs one against the BB-side counter, even if it
   // 429'd or 5xx'd, so it must cost one against ours too.
   private callTimestamps: number[] = [];
+  // Wall-clock timestamp of the most recent fetch attempt (any outcome).
+  // Used by the inter-call pacer to throttle bursts under BB's hidden
+  // sub-second limiter. 0 = no prior call.
+  private lastCallAt = 0;
 
   constructor(opts: BitbucketClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
@@ -85,6 +124,10 @@ export class BitbucketClient {
     this.retryBaseDelayMs = opts.retryBaseDelayMs ?? DEFAULTS.retryBaseDelayMs;
     this.rateLimitWarnThreshold = opts.rateLimitWarnThreshold ?? DEFAULTS.rateLimitWarnThreshold;
     this.hourlyCallBudget = opts.hourlyCallBudget ?? DEFAULTS.hourlyCallBudget;
+    this.minCallIntervalMs = opts.minCallIntervalMs ?? DEFAULTS.minCallIntervalMs;
+    this.maxCallIntervalMs = opts.maxCallIntervalMs ?? DEFAULTS.maxCallIntervalMs;
+    this.pacingDecaySuccesses = opts.pacingDecaySuccesses ?? DEFAULTS.pacingDecaySuccesses;
+    this.currentPacingMs = this.minCallIntervalMs;
     this.fetchFn = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this.now = opts.now ?? Date.now;
   }
@@ -92,6 +135,11 @@ export class BitbucketClient {
   /** Snapshot of the most recent rate-limit headers we observed. */
   getRateLimit(): RateLimitState {
     return { ...this.rateLimit };
+  }
+
+  /** Current adaptive pacing in ms. Bumps on 429s, decays on clean streaks. */
+  getCurrentPacingMs(): number {
+    return this.currentPacingMs;
   }
 
   /** Outbound-fetch attempts made in the last rolling hour. */
@@ -174,6 +222,19 @@ export class BitbucketClient {
     // Loop until success or unrecoverable error. Bounded by `retries`.
     for (;;) {
       let res: Response;
+      // Pace successive calls. Retry-after / backoff sleeps in the catch
+      // branches below have already advanced wall-clock, so this gate is a
+      // no-op on retries — only the initial attempt and back-to-back happy-
+      // path calls actually wait here. `currentPacingMs` is adaptive: it
+      // doubles on each 429 (up to `maxCallIntervalMs`) and decays back
+      // toward the floor on streaks of clean responses.
+      if (this.currentPacingMs > 0 && this.lastCallAt > 0) {
+        const elapsed = this.now() - this.lastCallAt;
+        if (elapsed < this.currentPacingMs) {
+          await this.delay(this.currentPacingMs - elapsed);
+        }
+      }
+      this.lastCallAt = this.now();
       this.callTimestamps.push(this.now());
       try {
         res = await this.fetchFn(url, {
@@ -196,6 +257,23 @@ export class BitbucketClient {
 
       if (res.status === 429) {
         const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
+        this.consecutiveNon429 = 0;
+        // Bump adaptive pacing — sticky for subsequent calls. Capped at
+        // `maxCallIntervalMs`; once capped, additional 429s leave it at the
+        // ceiling and the retry budget exhausts as usual.
+        if (this.maxCallIntervalMs > 0 && this.currentPacingMs < this.maxCallIntervalMs) {
+          const next = Math.min(
+            Math.max(this.currentPacingMs * 2, this.minCallIntervalMs || this.maxCallIntervalMs),
+            this.maxCallIntervalMs,
+          );
+          if (next !== this.currentPacingMs) {
+            this.logger?.warn?.(
+              { path, previousPacingMs: this.currentPacingMs, newPacingMs: next, attempt },
+              'BitBucket 429 — increasing call pacing',
+            );
+            this.currentPacingMs = next;
+          }
+        }
         if (attempt < this.retries) {
           this.logger?.warn?.({ path, retryAfter, attempt }, 'BitBucket 429 — backing off');
           await this.delay(retryAfter * 1000);
@@ -203,6 +281,24 @@ export class BitbucketClient {
           continue;
         }
         throw new BitbucketRateLimitError(path, retryAfter);
+      }
+
+      // Non-429 from here on — count toward decay. We decay on any
+      // non-429 outcome (including handled 5xx that won't retry, and
+      // non-2xx 4xx) since the burst limiter only cares about 429s.
+      this.consecutiveNon429++;
+      if (
+        this.maxCallIntervalMs > 0 &&
+        this.currentPacingMs > this.minCallIntervalMs &&
+        this.consecutiveNon429 >= this.pacingDecaySuccesses
+      ) {
+        const next = Math.max(Math.floor(this.currentPacingMs / 2), this.minCallIntervalMs);
+        this.logger?.info?.(
+          { previousPacingMs: this.currentPacingMs, newPacingMs: next, after: this.consecutiveNon429 },
+          'BitBucket pacing decay — relaxing after clean streak',
+        );
+        this.currentPacingMs = next;
+        this.consecutiveNon429 = 0;
       }
 
       if (res.status >= 500 && res.status < 600) {

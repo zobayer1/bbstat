@@ -34,6 +34,8 @@ const testConfig: AppConfig = {
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
+  BITBUCKET_MIN_CALL_INTERVAL_MS: 0,
+  BITBUCKET_MAX_CALL_INTERVAL_MS: 0,
   SYNC_MEMBERS_CRON: '*/10 * * * *',
   SYNC_REPOS_CRON: '*/5 * * * *',
   SYNC_COMMITS_CRON: '*/15 * * * *',
@@ -47,6 +49,8 @@ const testConfig: AppConfig = {
   PR_BACKFILL_MAX_PAGES: 5,
   PR_SYNC_CONCURRENCY: 3,
   PR_SYNC_BUDGET_THRESHOLD: 20,
+  DEEPEN_BACKFILL_MAX_PAGES: 5,
+  DEEPEN_BUDGET_THRESHOLD: 100,
 };
 
 function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
@@ -78,6 +82,7 @@ describe('GET /api/stats/overview', () => {
       projects: 1,
       totalCommits: 1234,
       commitsLast7Days: 87,
+      commitsLast30Days: 312,
     };
     const statsStore = makeStatsStore({ getOverview: vi.fn().mockResolvedValue(overview) });
 
@@ -213,9 +218,12 @@ const sampleUserSummary: UserSummary = {
     deletions7d: 0,
     additions30d: 0,
     deletions30d: 0,
+    repositoriesAllTime: 4,
   },
   dailyCommits: [{ date: '2026-05-12', commits: 3 }],
-  topRepos: [{ workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', project: 'COMM', commits: 8 }],
+  topRepos: [
+    { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', project: 'COMM', commits: 8, syncStatus: 'ok' },
+  ],
 };
 
 describe('GET /api/stats/users/:userId/summary', () => {
@@ -308,6 +316,7 @@ describe('GET /api/stats/projects/:projectKey', () => {
       project: 'COMM',
       totals: { commits7d: 1, commits30d: 2, contributorCount7d: 3, repositoryCount: 4 },
       weeklyCommits: [{ weekStart: '2026-05-04', commits: 5 }],
+      dailyCommits: [{ date: '2026-05-12', commits: 2 }],
       topContributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 9 }],
       repositories: [
         {
@@ -315,7 +324,9 @@ describe('GET /api/stats/projects/:projectKey', () => {
           slug: 'r1',
           fullName: 'tigerit/r1',
           commits30d: 7,
+          contributors30d: 2,
           lastCommitAt: '2026-05-12T00:00:00.000Z',
+          syncStatus: 'ok',
         },
       ],
     };
@@ -351,9 +362,9 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
 
   it('returns the repo activity from the store', async () => {
     const activity: RepoActivity = {
-      repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+      repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', syncStatus: 'ok' },
       dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
-      contributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 4 }],
+      contributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 4, last30Days: [0, 1, 0, 3] }],
     };
     const getRepositoryActivity = vi.fn().mockResolvedValue(activity);
     const statsStore = makeStatsStore({ getRepositoryActivity });
@@ -401,6 +412,7 @@ describe('GET /api/stats/repositories', () => {
         commits30d: 30,
         contributors30d: 4,
         lastCommitAt: '2026-05-12T00:00:00.000Z',
+        syncStatus: 'ok' as const,
       },
       {
         workspace: 'tigerit',
@@ -410,6 +422,7 @@ describe('GET /api/stats/repositories', () => {
         commits30d: 0,
         contributors30d: 0,
         lastCommitAt: null,
+        syncStatus: 'never' as const,
       },
     ];
     const listTrackedRepositoriesWithStats = vi.fn().mockResolvedValue(repos);

@@ -25,6 +25,7 @@ export interface OverviewStats {
   projects: number;
   totalCommits: number;
   commitsLast7Days: number;
+  commitsLast30Days: number;
 }
 
 export interface LatestCommit {
@@ -65,9 +66,17 @@ export interface UserSummary {
     deletions7d: number;
     additions30d: number;
     deletions30d: number;
+    repositoriesAllTime: number;
   };
   dailyCommits: Array<{ date: string; commits: number }>;
-  topRepos: Array<{ workspace: string; slug: string; fullName: string; project: string | null; commits: number }>;
+  topRepos: Array<{
+    workspace: string;
+    slug: string;
+    fullName: string;
+    project: string | null;
+    commits: number;
+    syncStatus: RepoSyncStatus;
+  }>;
 }
 
 export interface ProjectStats {
@@ -79,20 +88,32 @@ export interface ProjectStats {
     repositoryCount: number;
   };
   weeklyCommits: Array<{ weekStart: string; commits: number }>;
+  dailyCommits: Array<{ date: string; commits: number }>;
   topContributors: TopContributor[];
   repositories: Array<{
     workspace: string;
     slug: string;
     fullName: string;
     commits30d: number;
+    contributors30d: number;
     lastCommitAt: string | null;
+    syncStatus: RepoSyncStatus;
   }>;
 }
 
+// 3-state sync health, derived server-side from sync_state.last_sync_status.
+// 'ok' covers both 'success' and in-flight 'running'; 'error' is a failed
+// most-recent attempt; 'never' is a tracked repo no sync has touched yet.
+export type RepoSyncStatus = 'ok' | 'error' | 'never';
+
 export interface RepoActivity {
-  repository: { workspace: string; slug: string; fullName: string };
+  repository: { workspace: string; slug: string; fullName: string; syncStatus: RepoSyncStatus };
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
-  contributors: TopContributor[];
+  // Sparkline `last30Days` is scoped to this repo (this user's commits in
+  // this repo, day-by-day over the trailing 30 days). Same shape as the
+  // dashboard's top-contributors list so the Sparkline component renders
+  // unchanged.
+  contributors: TopContributorWithSparkline[];
 }
 
 export interface TrackedRepositorySummary {
@@ -103,6 +124,7 @@ export interface TrackedRepositorySummary {
   commits30d: number;
   contributors30d: number;
   lastCommitAt: string | null;
+  syncStatus: RepoSyncStatus;
 }
 
 // Phase 4 T23 — unified activity feed payload. Discriminated by `kind`.
