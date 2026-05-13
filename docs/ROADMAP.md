@@ -87,7 +87,7 @@ Dashboard reads from pre-computed summaries, not raw aggregations on every page 
 
 **Status:** Landed across `3dacb15`..`d4fd42d` (14 commits). Operator notes — rollup mechanics, drift conditions, cache invalidation, all six dashboard endpoints, and the `make rebuild-rollups` repair script — live in [`docs/sync.md`](sync.md). Frontend now has user / project / repo detail pages all reachable from the dashboard, and the legacy `/overview` + `/top-contributors` endpoints read from `commit_daily` so latency stays flat as the commit log grows.
 
-### Phase 4 — Code-change volume + activity feed (~3–4 days)
+### Phase 4 — Code-change volume + activity feed (~3–4 days) ✅ Landed
 
 Layer the "expensive" metrics in once cheap ones are stable.
 
@@ -97,6 +97,8 @@ Layer the "expensive" metrics in once cheap ones are stable.
 - Dashboard: per-user sparklines, activity log component, filters by project/repo/user.
 
 **API budget:** ~50 active repos × ~10 new commits/day average ≈ 500 diff-stat calls/day = 21/hour. Comfortable.
+
+**Status:** Landed across `27528fe`..`96a6256` (11 commits). Operator notes — diff-stats opt-in via YAML, PR-sync cadence + cursor mechanics, `/api/activity` query params, every new env knob — live in [`docs/sync.md`](sync.md); the per-stream design rationale is preserved in [`docs/phase-4-plan.md`](phase-4-plan.md). Dashboard now has a tabbed Top Contributors / Recent Activity panel with per-user 30-day sparklines and project/repo/user filter dropdowns; the activity feed is mounted on user / project / repo detail pages too. Backend pipeline now ingests PR state on a 30-minute cron and (opt-in per repo) per-commit diff stats inside the commit tick.
 
 ### Phase 5 — Webhook trigger + admin UI (~3–4 days, stretch)
 

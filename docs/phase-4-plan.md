@@ -9,17 +9,19 @@ roadmap entry `✅ Landed`.
 
 ## Scope summary
 
-Four work streams, ordered:
+Four work streams, ordered. All landed; ranges below are the commits on
+`main` that produced the work.
 
-| ID  | Stream                       | Est.   | Status      |
-| --- | ---------------------------- | ------ | ----------- |
-| T21 | Diff stats per new commit    | ~1.5 d | Not started |
-| T22 | Pull-request ingest          | ~1.5 d | Not started |
-| T23 | `/api/activity` unified feed | ~0.5 d | Not started |
-| T24 | Frontend sparklines + feed   | ~1.5 d | Not started |
+| ID  | Stream                       | Est.   | Status                           |
+| --- | ---------------------------- | ------ | -------------------------------- |
+| T21 | Diff stats per new commit    | ~1.5 d | ✅ Landed (`27528fe`..`32844ac`) |
+| T22 | Pull-request ingest          | ~1.5 d | ✅ Landed (`2fd376c`..`74ce2b1`) |
+| T23 | `/api/activity` unified feed | ~0.5 d | ✅ Landed (`7f2f487`)            |
+| T24 | Frontend sparklines + feed   | ~1.5 d | ✅ Landed (`11bf1f6`..`96a6256`) |
 
-Total: 5 days of focused work, fitting the roadmap's 3–4 day budget with
-slack for the frontend polish.
+Phase wrap-up: `docs/ROADMAP.md` Phase 4 entry marked Landed; operator
+notes for the new sync surfaces and the `/api/activity` endpoint folded
+into [`sync.md`](sync.md).
 
 ## Decisions locked in (no need to revisit)
 
