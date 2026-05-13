@@ -81,13 +81,31 @@ export async function syncWorkspaceMembers(deps: DiscoveryDeps, workspace: strin
 export interface RepoSeed {
   workspace: string;
   slug: string;
+  // Phase 4 T21: per-repo opt-in for /diffstat/:sha ingest. Plain-string
+  // entries default to false. The object form `{ name: ws/slug, diffStats:
+  // true }` flips it on. Hot-reloaded — toggling the flag in YAML re-applies
+  // at the next runReposSync / runDiscoverySync tick.
+  diffStatsEnabled: boolean;
 }
 
-// Shape of the seed file: a top-level `repos:` list of "<workspace>/<slug>"
-// strings. Wrapping in a key (vs. a bare top-level list) leaves room to grow
-// the file with sibling sections later without a breaking format change.
+// One entry in the seed file's `repos:` list. Accepts either a plain
+// `<workspace>/<slug>` string (back-compat, diffStats=false) or an object
+// `{ name: <workspace>/<slug>, diffStats?: boolean }`. Anything else fails
+// the schema check and surfaces as a malformed-file error at parse time.
+const seedEntrySchema = z.union([
+  z.string(),
+  z.object({
+    name: z.string(),
+    diffStats: z.boolean().optional().default(false),
+  }),
+]);
+
+// Shape of the seed file: a top-level `repos:` list of either bare strings
+// or `{ name, diffStats? }` objects. Wrapping in a key (vs. a bare top-level
+// list) leaves room to grow the file with sibling sections later without a
+// breaking format change.
 const seedFileSchema = z.object({
-  repos: z.array(z.string()),
+  repos: z.array(seedEntrySchema),
 });
 
 // Parse the raw YAML text of a seed file into RepoSeed[]. Pure — no IO.
@@ -100,14 +118,15 @@ export function parseSeedRepoFile(text: string): RepoSeed[] {
     throw new Error(`Seed repo file is malformed: ${issues}`);
   }
   return parsed.data.repos
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+    .map((entry) => (typeof entry === 'string' ? { name: entry, diffStats: false } : entry))
+    .map((entry) => ({ name: entry.name.trim(), diffStats: entry.diffStats }))
+    .filter((entry) => entry.name.length > 0)
     .map((entry) => {
-      const parts = entry.split('/');
+      const parts = entry.name.split('/');
       if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        throw new Error(`Seed repo file entry must be "<workspace>/<slug>" — got "${entry}"`);
+        throw new Error(`Seed repo file entry must be "<workspace>/<slug>" — got "${entry.name}"`);
       }
-      return { workspace: parts[0], slug: parts[1] };
+      return { workspace: parts[0], slug: parts[1], diffStatsEnabled: entry.diffStats };
     });
 }
 
@@ -130,6 +149,15 @@ export interface AddTrackedRepoResult {
   status: 'inserted' | 'already-tracked' | 'not-found';
 }
 
+export interface AddTrackedRepoOptions {
+  // Phase 4 T21: per-repo opt-in for /diffstat/:sha ingest. Defaults to
+  // false. On insert, written to repositories.diff_stats_enabled. On
+  // already-tracked, this method does NOT update the stored flag — the
+  // bootstrap flow handles flip-flop reconciliation separately so the
+  // single-repo admin endpoint behavior stays explicit.
+  diffStatsEnabled?: boolean;
+}
+
 // Idempotent at two layers: the early `findRepositoryByFullName` short-circuit
 // avoids a BB call when the input string already matches a tracked row, and
 // the underlying insert uses ON CONFLICT on bitbucket_uuid so an alias of an
@@ -144,8 +172,10 @@ export async function addTrackedRepository(
   deps: DiscoveryDeps,
   workspace: string,
   slug: string,
+  opts: AddTrackedRepoOptions = {},
 ): Promise<AddTrackedRepoResult> {
   const inputFullName = `${workspace}/${slug}`;
+  const diffStatsEnabled = opts.diffStatsEnabled ?? false;
 
   const existing = await deps.store.findRepositoryByFullName(inputFullName);
   if (existing !== null) return { fullName: existing.fullName, status: 'already-tracked' };
@@ -169,10 +199,11 @@ export async function addTrackedRepository(
     project: repo.project?.key ?? null,
     slug: repo.slug,
     fullName: repo.full_name,
+    diffStatsEnabled,
   });
 
   if (inserted) {
-    deps.logger?.info?.({ fullName: row.fullName }, 'tracked-repo added');
+    deps.logger?.info?.({ fullName: row.fullName, diffStatsEnabled }, 'tracked-repo added');
     return { fullName: row.fullName, status: 'inserted' };
   }
   deps.logger?.info?.(
@@ -187,6 +218,11 @@ export interface BootstrapReposResult {
   inserted: number;
   alreadyTracked: number;
   notFound: string[];
+  // Phase 4 T21: count of already-tracked repos whose diff-stats opt-in
+  // diverged from the seed's value and was updated this run. Lets the
+  // operator see when a YAML toggle actually flipped a stored row vs.
+  // when it was already in sync.
+  diffStatsToggled: number;
   // Per-seed failures collected during the loop. A single bad seed never
   // aborts the run — every entry in `seeds` is attempted, and unexpected
   // throws land here with the offending repo's input full_name so the admin
@@ -204,6 +240,7 @@ export async function bootstrapTrackedRepositories(
     inserted: 0,
     alreadyTracked: 0,
     notFound: [],
+    diffStatsToggled: 0,
     errors: [],
   };
 
@@ -212,7 +249,25 @@ export async function bootstrapTrackedRepositories(
   for (const seed of seeds) {
     const inputFullName = `${seed.workspace}/${seed.slug}`;
     try {
-      const r = await addTrackedRepository(deps, seed.workspace, seed.slug);
+      // Reconcile the diff-stats flag for already-tracked repos in the same
+      // pass. `addTrackedRepository` doesn't touch the stored flag on the
+      // already-tracked path (that's only the YAML-driven flow's concern), so
+      // we look up the existing row here and UPDATE it if the YAML value
+      // diverges. Lookup-by-fullName matches the addTrackedRepository
+      // short-circuit, so the BB call cost is unchanged.
+      const existing = await deps.store.findRepositoryByFullName(inputFullName);
+      if (existing !== null && existing.diffStatsEnabled !== seed.diffStatsEnabled) {
+        await deps.store.updateRepositoryDiffStatsEnabled(existing.id, seed.diffStatsEnabled);
+        result.diffStatsToggled++;
+        deps.logger?.info?.(
+          { fullName: existing.fullName, diffStatsEnabled: seed.diffStatsEnabled },
+          'tracked-repo diff_stats_enabled updated from YAML',
+        );
+      }
+
+      const r = await addTrackedRepository(deps, seed.workspace, seed.slug, {
+        diffStatsEnabled: seed.diffStatsEnabled,
+      });
       if (r.status === 'inserted') result.inserted++;
       else if (r.status === 'already-tracked') result.alreadyTracked++;
       else result.notFound.push(r.fullName);

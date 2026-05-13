@@ -14,7 +14,7 @@ function makeCache(overrides: Partial<UserSummaryCache> = {}): UserSummaryCache 
 }
 
 function makeRepo(): RepositoryHandle {
-  return { repositoryId: 1, workspace: 'tigerit', slug: 'r', fullName: 'tigerit/r' };
+  return { repositoryId: 1, workspace: 'tigerit', slug: 'r', fullName: 'tigerit/r', diffStatsEnabled: false };
 }
 
 function makeRollupStore(overrides: Partial<RollupStore> = {}): RollupStore {

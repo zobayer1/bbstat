@@ -53,6 +53,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         workspace: row.workspace,
         slug: row.slug,
         fullName: row.fullName,
+        diffStatsEnabled: row.diffStatsEnabled,
       };
       return await syncRepositoryCommits(
         {

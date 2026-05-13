@@ -99,7 +99,7 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
 // ---------------------------------------------------------------------------
 
 function makeRepo(repositoryId: number, slug = 'boing-server'): RepositoryHandle {
-  return { repositoryId, workspace: 'tigerit', slug, fullName: `tigerit/${slug}` };
+  return { repositoryId, workspace: 'tigerit', slug, fullName: `tigerit/${slug}`, diffStatsEnabled: false };
 }
 
 function makeSyncStateRow(repositoryId: number, lastSeenSha: string | null = null): SyncStateRow {

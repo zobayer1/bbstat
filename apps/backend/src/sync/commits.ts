@@ -26,6 +26,11 @@ export interface RepositoryHandle {
   workspace: string;
   slug: string;
   fullName: string;
+  // Phase 4 T21: when true, the per-repo sync also fetches /diffstat/:sha
+  // for newly-inserted commits and any leftover pending ones (those with
+  // commits.diff_stats_synced_at IS NULL). When false, the diff-stats step
+  // is skipped entirely — no extra BB calls, no extra DB work.
+  diffStatsEnabled: boolean;
 }
 
 export interface CommitSyncOptions {

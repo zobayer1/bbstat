@@ -142,6 +142,14 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       state.syncStateRepoIds.add(id);
       return { row, inserted: true };
     },
+    async updateRepositoryDiffStatsEnabled(repositoryId, enabled) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.diffStatsEnabled = enabled;
+          return;
+        }
+      }
+    },
     async listTrackedRepositories() {
       return Array.from(state.repositories.values());
     },
@@ -228,7 +236,7 @@ describe('admin routes', () => {
           }),
         );
       const { deps, state } = makeSyncDeps(fetchMock, {
-        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server' }],
+        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false }],
       });
       appInstance = await buildApp({
         config: testConfig,
@@ -247,6 +255,7 @@ describe('admin routes', () => {
         inserted: 1,
         alreadyTracked: 0,
         notFound: [],
+        diffStatsToggled: 0,
         errors: [],
       });
       expect(state.users.size).toBe(2);
@@ -294,6 +303,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
       });
       appInstance = await buildApp({
         config: testConfig,
@@ -391,6 +401,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
       });
       commitState.syncStateByRepo.set(repo.id, {
         repositoryId: repo.id,
@@ -462,6 +473,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
       });
       commitState.syncStateByRepo.set(repo.id, {
         repositoryId: repo.id,
@@ -517,6 +529,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'a',
         fullName: 'tigerit/a',
+        diffStatsEnabled: false,
       });
       const { row: r2 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r2}',
@@ -524,6 +537,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'b',
         fullName: 'tigerit/b',
+        diffStatsEnabled: false,
       });
       for (const id of [r1.id, r2.id]) {
         commitState.syncStateByRepo.set(id, {

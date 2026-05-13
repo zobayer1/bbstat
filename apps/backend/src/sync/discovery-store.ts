@@ -30,6 +30,7 @@ export interface RepositoryRow {
   project: string | null;
   slug: string;
   fullName: string;
+  diffStatsEnabled: boolean;
 }
 
 export interface RepositoryInsertInput {
@@ -38,6 +39,10 @@ export interface RepositoryInsertInput {
   project: string | null;
   slug: string;
   fullName: string;
+  // Phase 4 T21: opt-in per-repo for /diffstat/:sha ingest. Defaults to
+  // false in `tracked-repos.yaml` (plain-string entries) — only the object
+  // form `{ name: ws/slug, diffStats: true }` flips it on.
+  diffStatsEnabled: boolean;
 }
 
 export interface InsertRepositoryResult {
@@ -57,6 +62,11 @@ export interface DiscoveryStore {
   // conflicts: if the bitbucket_uuid already exists, the existing row is
   // returned with `inserted: false` (caller treats as already-tracked).
   insertRepositoryWithSyncState(input: RepositoryInsertInput): Promise<InsertRepositoryResult>;
+  // Update the diff-stats opt-in for an existing tracked repo. Used by
+  // bootstrapTrackedRepositories when a YAML entry's `diffStats` value
+  // diverges from the stored row's `diff_stats_enabled` — toggling the
+  // YAML knob re-applies at the next discovery tick.
+  updateRepositoryDiffStatsEnabled(repositoryId: number, enabled: boolean): Promise<void>;
   // Enumerate the curated tracked set — every row in `repositories` is by
   // definition tracked (untracked repos are simply absent). Used by the
   // commit-sync cron / admin trigger to build the tick's repo list.
@@ -99,6 +109,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           project: repositories.project,
           slug: repositories.slug,
           fullName: repositories.fullName,
+          diffStatsEnabled: repositories.diffStatsEnabled,
         })
         .from(repositories)
         .where(eq(repositories.fullName, fullName))
@@ -119,6 +130,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             project: repositories.project,
             slug: repositories.slug,
             fullName: repositories.fullName,
+            diffStatsEnabled: repositories.diffStatsEnabled,
           });
         if (inserted.length > 0) {
           const row = inserted[0]!;
@@ -139,6 +151,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             project: repositories.project,
             slug: repositories.slug,
             fullName: repositories.fullName,
+            diffStatsEnabled: repositories.diffStatsEnabled,
           })
           .from(repositories)
           .where(eq(repositories.bitbucketUuid, input.bitbucketUuid))
@@ -147,6 +160,10 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         await tx.insert(syncState).values({ repositoryId: row.id }).onConflictDoNothing();
         return { row, inserted: false };
       });
+    },
+
+    async updateRepositoryDiffStatsEnabled(repositoryId, enabled) {
+      await db.update(repositories).set({ diffStatsEnabled: enabled }).where(eq(repositories.id, repositoryId));
     },
 
     async listTrackedRepositories() {
@@ -158,6 +175,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           project: repositories.project,
           slug: repositories.slug,
           fullName: repositories.fullName,
+          diffStatsEnabled: repositories.diffStatsEnabled,
         })
         .from(repositories);
     },

@@ -9,7 +9,13 @@ import { runCommitsTick } from './commits-tick.js';
 // stack (that lives in commits.test.ts).
 
 function makeRepo(id: number): RepositoryHandle {
-  return { repositoryId: id, workspace: 'tigerit', slug: `repo-${id}`, fullName: `tigerit/repo-${id}` };
+  return {
+    repositoryId: id,
+    workspace: 'tigerit',
+    slug: `repo-${id}`,
+    fullName: `tigerit/repo-${id}`,
+    diffStatsEnabled: false,
+  };
 }
 
 function fakeStore(): CommitStore {

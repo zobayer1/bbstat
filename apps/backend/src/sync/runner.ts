@@ -126,6 +126,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     workspace: r.workspace,
     slug: r.slug,
     fullName: r.fullName,
+    diffStatsEnabled: r.diffStatsEnabled,
   }));
   deps.logger.info?.({ trigger, workspace: deps.workspace, repoCount: handles.length }, 'commit sync start');
 

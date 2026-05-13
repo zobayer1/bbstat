@@ -6,12 +6,19 @@
 # Override the location with SEED_REPO_FILE_PATH in `.env` if needed; otherwise
 # the backend reads `tracked-repos.yaml` from the repo root by default.
 #
-# Each entry is a plain "<workspace>/<slug>" string. Missing file is treated
-# as "no seeds" when using the default path; explicit paths must exist.
+# Each entry is either:
+#   - a plain "<workspace>/<slug>" string, or
+#   - an object `{ name: <workspace>/<slug>, diffStats: true }` to opt into
+#     per-commit /diffstat/:sha ingest for that repo (Phase 4 T21). Defaults
+#     to diffStats=false. Toggle the flag in YAML and the next discovery sync
+#     re-applies it — no restart needed.
+#
+# Missing file is treated as "no seeds" when using the default path;
+# explicit paths must exist.
 
 repos:
   - tigerit/boing-server
   - tigerit/boing-relay
   - tigerit/boing-instances
-  # - tigerit/comm-adm
+  # - { name: tigerit/comm-adm, diffStats: true }
   # - tigerit/comm-video-chat
