@@ -23,6 +23,7 @@ export interface CommitInsertInput {
   authorUserId: number | null;
   sha: string;
   message: string;
+  isMerge: boolean;
   authoredAt: Date;
 }
 
@@ -76,10 +77,14 @@ export interface CommitStore {
   // total commit volume.
   listPendingDiffStatCommits(repositoryId: number, limit: number): Promise<PendingDiffStatCommit[]>;
 
-  // Phase 4 T21: persist BB-derived additions/deletions for one commit and
-  // stamp diff_stats_synced_at = now() so it's filtered out of the next
-  // pickup. Idempotent — safe to call repeatedly with the same values.
-  updateCommitDiffStats(commitId: number, input: { additions: number; deletions: number }): Promise<void>;
+  // Phase 4 T21: persist BB-derived additions / deletions / files_changed
+  // for one commit and stamp diff_stats_synced_at = now() so it's filtered
+  // out of the next pickup. Idempotent — safe to call repeatedly with the
+  // same values.
+  updateCommitDiffStats(
+    commitId: number,
+    input: { additions: number; deletions: number; filesChanged: number },
+  ): Promise<void>;
 
   // Oldest known commit (by authored_at ASC) for the repo, used as the
   // seed sha for deepen-backfill's `include=<sha>` walk. Null when no
@@ -212,6 +217,7 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .set({
           additions: input.additions,
           deletions: input.deletions,
+          filesChanged: input.filesChanged,
           diffStatsSyncedAt: new Date(),
         })
         .where(eq(commits.id, commitId));

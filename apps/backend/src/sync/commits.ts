@@ -115,6 +115,10 @@ export async function syncRepositoryCommits(
       authorUserId: c.author.user ? (userIdByUuid.get(c.author.user.uuid) ?? null) : null,
       sha: c.hash,
       message: c.message,
+      // BB returns one entry in `parents` for a normal commit, two+ for a
+      // merge. Captured at insert time so downstream aggregates can
+      // default-exclude merges without an extra fetch.
+      isMerge: c.parents.length > 1,
       authoredAt: new Date(c.date),
     }));
     const { inserted } = await deps.store.insertCommits(inserts);

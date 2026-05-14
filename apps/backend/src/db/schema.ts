@@ -55,12 +55,22 @@ export const repositories = pgTable('repositories', {
 // `diff_stats_synced_at` is the Phase 4 resumability marker for per-commit
 // diff-stat ingest. NULL = "diff stats not fetched yet" (the only state at
 // insertion time). Set to now() once /diffstat/:sha lands and additions /
-// deletions are persisted. The partial index commits_pending_diff_stats_idx
-// makes the pickup query (`WHERE repository_id = $1 AND diff_stats_synced_at
-// IS NULL`) cheap regardless of how large `commits` grows.
+// deletions / files_changed are persisted. The partial index
+// commits_pending_diff_stats_idx makes the pickup query (`WHERE
+// repository_id = $1 AND diff_stats_synced_at IS NULL`) cheap regardless of
+// how large `commits` grows.
 //
-// Repos with `repositories.diff_stats_enabled = false` simply never have the
-// fetch happen — their rows stay at additions=0, deletions=0, NULL.
+// `is_merge` mirrors BB's `parents.length > 1` and is populated at
+// insert time. User-facing addition/deletion/files aggregates default-
+// exclude merges (a single merge inflates per-file stats by the full
+// branch delta, dwarfing real authorship). The flag is captured for every
+// commit regardless of diff-stat opt-in.
+//
+// `files_changed` is the count of file entries in /diffstat/:sha. Filled
+// alongside additions/deletions when the diff-stats step lands. Repos
+// with `repositories.diff_stats_enabled = false` simply never have the
+// fetch happen — their rows stay at additions=0, deletions=0,
+// files_changed=0, diff_stats_synced_at=NULL.
 export const commits = pgTable(
   'commits',
   {
@@ -71,8 +81,10 @@ export const commits = pgTable(
     authorUserId: integer('author_user_id').references(() => users.id, { onDelete: 'set null' }),
     sha: text('sha').notNull(),
     message: text('message').notNull(),
+    isMerge: boolean('is_merge').notNull().default(false),
     additions: integer('additions').notNull().default(0),
     deletions: integer('deletions').notNull().default(0),
+    filesChanged: integer('files_changed').notNull().default(0),
     diffStatsSyncedAt: timestamp('diff_stats_synced_at', { withTimezone: true }),
     authoredAt: timestamp('authored_at', { withTimezone: true }).notNull(),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),

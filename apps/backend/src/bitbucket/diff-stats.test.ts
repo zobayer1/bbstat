@@ -73,17 +73,21 @@ describe('getCommitDiffStat', () => {
 
     const result = await getCommitDiffStat(client, 'ws', 'repo', 'sha-multi');
 
-    expect(result).toEqual({ additions: 15, deletions: 9 });
+    expect(result).toEqual({ additions: 15, deletions: 9, filesChanged: 3 });
   });
 
   it('returns zero for an empty diffstat (e.g., merge commit with no file changes)', async () => {
     fetchMock.mockResolvedValueOnce(mockResponse({ body: { pagelen: 100, values: [] } }));
     const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
 
-    expect(await getCommitDiffStat(client, 'ws', 'repo', 'sha-empty')).toEqual({ additions: 0, deletions: 0 });
+    expect(await getCommitDiffStat(client, 'ws', 'repo', 'sha-empty')).toEqual({
+      additions: 0,
+      deletions: 0,
+      filesChanged: 0,
+    });
   });
 
-  it('treats null lines_added / lines_removed as zero (binary files)', async () => {
+  it('treats null lines_added / lines_removed as zero (binary files), but still counts the file', async () => {
     fetchMock.mockResolvedValueOnce(
       mockResponse({
         body: {
@@ -97,7 +101,11 @@ describe('getCommitDiffStat', () => {
     );
     const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
 
-    expect(await getCommitDiffStat(client, 'ws', 'repo', 'sha-binary')).toEqual({ additions: 3, deletions: 1 });
+    expect(await getCommitDiffStat(client, 'ws', 'repo', 'sha-binary')).toEqual({
+      additions: 3,
+      deletions: 1,
+      filesChanged: 2,
+    });
   });
 
   it('follows `next` and sums across pages', async () => {
@@ -116,7 +124,7 @@ describe('getCommitDiffStat', () => {
 
     const result = await getCommitDiffStat(client, 'ws', 'repo', 'sha-large');
 
-    expect(result).toEqual({ additions: 150, deletions: 15 });
+    expect(result).toEqual({ additions: 150, deletions: 15, filesChanged: 2 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

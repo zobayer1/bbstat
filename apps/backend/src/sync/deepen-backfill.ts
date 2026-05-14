@@ -333,6 +333,7 @@ function buildInsertInput(repositoryId: number, commit: BitbucketCommit): Deepen
     authorUserId: null, // resolved in the batch step below
     sha: commit.hash,
     message: commit.message,
+    isMerge: commit.parents.length > 1,
     authoredAt: new Date(commit.date),
     ...(commit.author.user !== undefined ? { bitbucketUuid: commit.author.user.uuid } : {}),
   };

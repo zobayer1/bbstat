@@ -17,7 +17,7 @@ function makeRepo(over: Partial<RepositoryHandle> = {}): RepositoryHandle {
 
 interface FakeState {
   pending: PendingDiffStatCommit[];
-  updates: Array<{ commitId: number; additions: number; deletions: number }>;
+  updates: Array<{ commitId: number; additions: number; deletions: number; filesChanged: number }>;
 }
 
 function makeStore(pending: PendingDiffStatCommit[] = []): { store: CommitStore; state: FakeState } {
@@ -131,8 +131,8 @@ describe('syncRepositoryDiffStats', () => {
     // Range covers both days.
     expect(result.diffStatsRange).toEqual({ sinceDay: '2026-05-03', untilDay: '2026-05-05' });
     expect(state.updates).toEqual([
-      { commitId: 1, additions: 5, deletions: 1 },
-      { commitId: 2, additions: 10, deletions: 3 },
+      { commitId: 1, additions: 5, deletions: 1, filesChanged: 1 },
+      { commitId: 2, additions: 10, deletions: 3, filesChanged: 1 },
     ]);
   });
 
@@ -157,7 +157,7 @@ describe('syncRepositoryDiffStats', () => {
 
     expect(result.updated).toBe(1);
     expect(result.hitBudgetGate).toBe(true);
-    expect(state.updates).toEqual([{ commitId: 1, additions: 1, deletions: 0 }]);
+    expect(state.updates).toEqual([{ commitId: 1, additions: 1, deletions: 0, filesChanged: 1 }]);
     // Two commits stayed pending in the store — they'll be retried next tick.
     expect(state.pending.map((c) => c.id)).toEqual([2, 3]);
   });

@@ -25,7 +25,7 @@ interface FakeCommitStoreState {
   // Phase 4 T21: pending-diff-stat commits keyed by id; populated by tests
   // that want to exercise the diff-stats path.
   pendingDiffStatCommits: Map<number, PendingDiffStatCommit>;
-  diffStatsUpdates: Array<{ commitId: number; additions: number; deletions: number }>;
+  diffStatsUpdates: Array<{ commitId: number; additions: number; deletions: number; filesChanged: number }>;
 }
 
 function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Array<[string, number]> }): {
@@ -145,13 +145,17 @@ function makeSyncStateRow(repositoryId: number, lastSeenSha: string | null = nul
 
 function makeCommit(
   hash: string,
-  opts: { date?: string; user?: { uuid: string; display_name?: string } } = {},
+  opts: {
+    date?: string;
+    user?: { uuid: string; display_name?: string };
+    parents?: Array<{ hash: string }>;
+  } = {},
 ): BitbucketCommit {
   return {
     hash,
     message: `commit ${hash}`,
     date: opts.date ?? '2026-05-01T00:00:00+00:00',
-    parents: [],
+    parents: opts.parents ?? [],
     author: {
       raw: 'Author <author@example.com>',
       ...(opts.user ? { user: opts.user } : {}),
@@ -309,6 +313,25 @@ describe('syncRepositoryCommits — cold mode', () => {
     expect(state.commits.get('1:sha-unknown')?.authorUserId).toBeNull();
     expect(state.commits.get('1:sha-anon')?.authorUserId).toBeNull();
   });
+
+  it('captures isMerge from BB parents.length > 1', async () => {
+    const commits = [
+      makeCommit('sha-normal', { parents: [{ hash: 'p1' }] }),
+      makeCommit('sha-merge', { parents: [{ hash: 'p1' }, { hash: 'p2' }] }),
+      makeCommit('sha-initial', { parents: [] }),
+    ];
+    fetchMock.mockResolvedValueOnce(commitsPage(commits));
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1)] });
+
+    await syncRepositoryCommits(
+      { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+      makeRepo(1),
+    );
+
+    expect(state.commits.get('1:sha-normal')?.isMerge).toBe(false);
+    expect(state.commits.get('1:sha-merge')?.isMerge).toBe(true);
+    expect(state.commits.get('1:sha-initial')?.isMerge).toBe(false);
+  });
 });
 
 describe('syncRepositoryCommits — delta mode', () => {
@@ -449,7 +472,7 @@ describe('syncRepositoryCommits — diff-stats integration', () => {
     expect(result.diffStatsUpdated).toBe(1);
     expect(result.diffStatsFailed).toBe(0);
     expect(result.diffStatsRange).toEqual({ sinceDay: '2026-05-04', untilDay: '2026-05-04' });
-    expect(state.diffStatsUpdates).toEqual([{ commitId: 99, additions: 12, deletions: 3 }]);
+    expect(state.diffStatsUpdates).toEqual([{ commitId: 99, additions: 12, deletions: 3, filesChanged: 1 }]);
   });
 
   it('skips the diff-stats step on opt-out repos even when opts.diffStats is supplied', async () => {
