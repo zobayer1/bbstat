@@ -66,15 +66,29 @@ const envSchema = z.object({
   COMMIT_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
   COMMIT_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 
-  // Phase 4 T21: per-repo diff-stat ingest (1 BB call per new commit, opt-in
-  // via tracked-repos.yaml). MAX_PER_REPO_PER_TICK bounds worst-case
-  // per-tick work so a backlog of pending commits drains over multiple
-  // ticks. BUDGET_THRESHOLD is the headroom under
-  // BITBUCKET_HOURLY_CALL_BUDGET that the inner loop respects — lower than
-  // the commit-tick threshold because diff-stats runs after the commit
-  // batch has already consumed budget.
-  DIFF_STATS_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(50),
+  // Phase 4 T21: per-repo diff-stat ingest (1 BB call per file-page of a
+  // commit's /diffstat). Opt-in via tracked-repos.yaml. Two parallel
+  // paths share the inner walker:
+  //
+  //   * Inline-eager (forward) — runs inside the per-repo commit sync
+  //     against the commits *just inserted* on this tick. BUDGET_THRESHOLD
+  //     is the headroom below the hourly cap before the loop bails.
+  //     Lower than the commit-tick threshold because this runs after the
+  //     commit batch has already consumed budget.
+  //
+  //   * Backfill (backward) — runs as its own tick after deepen, drains
+  //     pending commits across all opted-in repos. MAX_PER_REPO_PER_TICK
+  //     caps per-repo work so one large backlog can't monopolize the
+  //     tick. CONCURRENCY=1 by default (serial repo walk): the inner
+  //     loop's pacing already paces BB calls, and this tick is the last
+  //     consumer of the hourly budget so parallelism mostly steals from
+  //     the buffer. BUDGET_THRESHOLD is the safety margin against running
+  //     to zero — slightly above the commit-tick threshold so we never
+  //     starve the next cron tick's commit ingest.
   DIFF_STATS_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
+  DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(50),
+  DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
+  DIFF_STATS_BACKFILL_CONCURRENCY: z.coerce.number().int().positive().default(1),
 
   // Phase 4 T22: PR ingest. Runs on its own cron (default hourly — PRs
   // mutate slower than commits, and at 160-repo scale every PR tick is

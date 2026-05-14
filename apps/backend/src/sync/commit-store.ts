@@ -29,6 +29,17 @@ export interface CommitInsertInput {
 
 export interface CommitInsertResult {
   inserted: number;
+  // Rows that actually won the ON CONFLICT race (i.e. landed in the table
+  // on this call). Consumed by the inline-eager diff-stats path so the
+  // per-repo commit sync can fetch /diffstat for just-inserted shas
+  // without going back to the DB. Empty when `inserted === 0`.
+  insertedRows: InsertedCommitRow[];
+}
+
+export interface InsertedCommitRow {
+  id: number;
+  sha: string;
+  authoredAt: Date;
 }
 
 export interface SyncStateRow {
@@ -134,13 +145,13 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async insertCommits(input) {
-      if (input.length === 0) return { inserted: 0 };
+      if (input.length === 0) return { inserted: 0, insertedRows: [] };
       const result = await db
         .insert(commits)
         .values(input)
         .onConflictDoNothing({ target: [commits.repositoryId, commits.sha] })
-        .returning({ id: commits.id });
-      return { inserted: result.length };
+        .returning({ id: commits.id, sha: commits.sha, authoredAt: commits.authoredAt });
+      return { inserted: result.length, insertedRows: result };
     },
 
     async getSyncState(repositoryId) {

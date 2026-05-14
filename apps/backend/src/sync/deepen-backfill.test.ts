@@ -46,17 +46,19 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
       return new Map();
     },
     async insertCommits(input): Promise<CommitInsertResult> {
-      const before = state.inserts.length;
+      const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
       // Dedupe on (repo, sha) so we can simulate ON CONFLICT DO NOTHING.
       const existingKeys = new Set(state.inserts.map((i) => `${i.repositoryId}:${i.sha}`));
+      let nextId = state.inserts.length + 1;
       for (const c of input) {
         const key = `${c.repositoryId}:${c.sha}`;
         if (!existingKeys.has(key)) {
           state.inserts.push(c);
           existingKeys.add(key);
+          insertedRows.push({ id: nextId++, sha: c.sha, authoredAt: c.authoredAt });
         }
       }
-      return { inserted: state.inserts.length - before };
+      return { inserted: insertedRows.length, insertedRows };
     },
     async getSyncState(repositoryId) {
       return state.syncStateByRepo.get(repositoryId) ?? null;

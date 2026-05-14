@@ -19,8 +19,8 @@
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
-import type { CommitInsertInput, CommitStore } from './commit-store.js';
-import { syncRepositoryDiffStats, type DiffStatsSyncOptions, type DiffStatsSyncResult } from './diff-stats.js';
+import type { CommitInsertInput, CommitStore, PendingDiffStatCommit } from './commit-store.js';
+import { fetchDiffStatsForCommits, type DiffStatsSyncResult } from './diff-stats.js';
 
 export interface RepositoryHandle {
   repositoryId: number;
@@ -46,9 +46,12 @@ export interface CommitSyncOptions {
   include?: string;
   // Phase 4 T21: opt-in per-commit diff-stat ingest. When omitted, the
   // diff-stats step is skipped entirely (legacy callers, tests that don't
-  // care). When present, the step runs for repos with `diffStatsEnabled` —
-  // opt-out repos still short-circuit cheaply inside `syncRepositoryDiffStats`.
-  diffStats?: DiffStatsSyncOptions;
+  // care). When present, only the *inline-eager* path runs here: we walk
+  // the commits just inserted in this run and fetch /diffstat for each.
+  // Older pending commits (`diff_stats_synced_at IS NULL` from past runs)
+  // are NOT picked up inline — that's the backfill tick's job. Opt-out
+  // repos still short-circuit cheaply inside `fetchDiffStatsForCommits`.
+  diffStats?: { budgetThreshold: number };
 }
 
 export type SyncMode = 'cold' | 'delta' | 'no-state';
@@ -121,34 +124,47 @@ export async function syncRepositoryCommits(
       isMerge: c.parents.length > 1,
       authoredAt: new Date(c.date),
     }));
-    const { inserted } = await deps.store.insertCommits(inserts);
+    const { inserted, insertedRows } = await deps.store.insertCommits(inserts);
 
     await deps.store.markSyncSuccess(repo.repositoryId, {
       lastSeenSha: newCursor,
       commitsAdded: inserted,
     });
 
-    // Phase 4 T21 — opt-in per-commit diff-stat ingest. Runs after
-    // markSyncSuccess so commits + cursor are durable first; a failure here
-    // doesn't poison the commit-sync result (the cursor advanced, commits
-    // landed, and pending diff stats stay NULL → retried next tick).
+    // Phase 4 T21 — inline-eager diff-stat ingest for the commits we just
+    // inserted. Runs after markSyncSuccess so commits + cursor are durable
+    // first; a failure here doesn't poison the commit-sync result (the
+    // cursor advanced, the commits landed, and pending diff stats stay
+    // NULL → retried via the backfill tick).
+    //
+    // Older pending commits are intentionally *not* walked here — those
+    // are the backfill tick's responsibility, which runs after deepen with
+    // a lower priority. Splitting forward (eager) from backward (trickle)
+    // keeps new commits' stats fresh without letting a long backlog
+    // crowd the commit-tick budget.
     let diffStatsResult: DiffStatsSyncResult = {
       updated: 0,
       failed: 0,
       hitBudgetGate: false,
       diffStatsRange: null,
     };
-    if (repo.diffStatsEnabled && opts.diffStats) {
+    if (repo.diffStatsEnabled && opts.diffStats && insertedRows.length > 0) {
+      const justInserted: PendingDiffStatCommit[] = insertedRows.map((r) => ({
+        id: r.id,
+        sha: r.sha,
+        authoredAt: r.authoredAt,
+      }));
       try {
-        diffStatsResult = await syncRepositoryDiffStats(
+        diffStatsResult = await fetchDiffStatsForCommits(
           { client: deps.client, store: deps.store, ...(deps.logger ? { logger: deps.logger } : {}) },
           repo,
+          justInserted,
           opts.diffStats,
         );
       } catch (err) {
         deps.logger?.warn?.(
           { ...repo, err: err instanceof Error ? err.message : String(err) },
-          'diff-stats step failed — commits already landed, will retry next tick',
+          'diff-stats step failed — commits already landed, will retry via backfill tick',
         );
       }
     }

@@ -18,6 +18,7 @@ import { bootstrapTrackedRepositories, syncWorkspaceMembers } from './discovery.
 import { runCommitsTick } from './commits-tick.js';
 import { syncRepositoryCommits } from './commits.js';
 import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
+import { runDiffStatsBackfillTick, type DiffStatsBackfillTickResult } from './diff-stats-tick.js';
 import { runPullRequestsTick } from './pr-tick.js';
 import { withRollupRecompute } from '../dashboard/rollup-hook.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
@@ -25,6 +26,7 @@ import type { AppConfig } from '../config.js';
 import type { CommitStore } from './commit-store.js';
 import type { CommitsTickOptions } from './commits-tick.js';
 import type { RepoCommitSyncResult, RepositoryHandle } from './commits.js';
+import type { DiffStatsBackfillTickOptions } from './diff-stats-tick.js';
 import type { BootstrapReposResult, RepoSeed, SyncMembersResult } from './discovery.js';
 import type { DiscoveryStore } from './discovery-store.js';
 import type { PrStore } from './pr-store.js';
@@ -65,6 +67,11 @@ export interface SyncRunnerDeps {
   // care about delta sync), the piggyback step inside runCommitsSync is
   // a no-op. All runtime entrypoints wire it.
   deepenOptions?: { maxPages: number; budgetThreshold: number };
+  // Diff-stats backfill tick that runs after deepen. When omitted, the
+  // backfill step is skipped — inline-eager forward fetch inside the
+  // commit sync still runs, but pending commits from past ticks won't
+  // be picked up.
+  diffStatsBackfillOptions?: DiffStatsBackfillTickOptions;
 }
 
 interface BaseResult {
@@ -107,6 +114,9 @@ export interface CommitsSyncResult extends BaseResult {
   // results from this tick (zero or more) plus a stoppedReason indicating
   // whether the budget gate fired or the queue drained.
   deepen: DeepenTickResult | null;
+  // Phase 5 prep: diff-stats backfill tick that runs after deepen. Null
+  // when the step is disabled (diffStatsBackfillOptions not wired).
+  diffStatsBackfill: DiffStatsBackfillTickResult | null;
 }
 
 export interface PrsSyncSummary {
@@ -223,14 +233,44 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
+  // Diff-stats backfill tick — runs after deepen so it consumes whatever
+  // budget is left over. Inline-eager fetch inside the commit sync
+  // already covers stats for commits that landed in this tick; this step
+  // catches up on (a) pending commits whose inline fetch transiently
+  // failed and (b) one-time historical backlog after enabling
+  // diffStatsEnabled on a repo with already-ingested history. Errors
+  // here never abort the commit-sync result.
+  let diffStatsBackfill: DiffStatsBackfillTickResult | null = null;
+  if (deps.diffStatsBackfillOptions !== undefined) {
+    try {
+      diffStatsBackfill = await runDiffStatsBackfillTick(
+        {
+          client: deps.client,
+          store: deps.commitStore,
+          logger: deps.logger,
+          ...(deps.rollupStore ? { rollupStore: deps.rollupStore } : {}),
+          ...(deps.userSummaryCache ? { userSummaryCache: deps.userSummaryCache } : {}),
+        },
+        handles,
+        deps.diffStatsBackfillOptions,
+      );
+    } catch (err) {
+      deps.logger.warn?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        'diff-stats backfill: tick failed — delta + deepen still successful',
+      );
+    }
+  }
+
   const finishedAt = new Date().toISOString();
-  deps.logger.info?.({ trigger, ...summary, deepen, startedAt, finishedAt }, 'commit sync complete');
+  deps.logger.info?.({ trigger, ...summary, deepen, diffStatsBackfill, startedAt, finishedAt }, 'commit sync complete');
 
   return {
     trigger,
     startedAt,
     finishedAt,
     deepen,
+    diffStatsBackfill,
     commits: summary,
     repoResults: tick.attempted,
     errors: tick.errors,
@@ -290,10 +330,10 @@ export function commitTickOptionsFromConfig(config: AppConfig): CommitsTickOptio
     ...(since !== undefined ? { firstRunSince: since } : {}),
     concurrency: config.COMMIT_SYNC_CONCURRENCY,
     budgetLowThreshold: config.COMMIT_SYNC_BUDGET_THRESHOLD,
-    diffStats: {
-      maxPerRepoPerTick: config.DIFF_STATS_MAX_PER_REPO_PER_TICK,
-      budgetThreshold: config.DIFF_STATS_BUDGET_THRESHOLD,
-    },
+    // Inline-eager only needs the budget threshold; per-repo cap doesn't
+    // apply here because the input list is bounded by however many
+    // commits the delta tick just inserted.
+    diffStats: { budgetThreshold: config.DIFF_STATS_BUDGET_THRESHOLD },
   };
 }
 
@@ -309,5 +349,13 @@ export function deepenOptionsFromConfig(config: AppConfig): { maxPages: number; 
   return {
     maxPages: config.DEEPEN_BACKFILL_MAX_PAGES,
     budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
+  };
+}
+
+export function diffStatsBackfillOptionsFromConfig(config: AppConfig): DiffStatsBackfillTickOptions {
+  return {
+    maxPerRepoPerTick: config.DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK,
+    budgetThreshold: config.DIFF_STATS_BACKFILL_BUDGET_THRESHOLD,
+    concurrency: config.DIFF_STATS_BACKFILL_CONCURRENCY,
   };
 }

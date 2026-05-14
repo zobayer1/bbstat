@@ -17,13 +17,19 @@ import { syncRepositoryCommits, type RepositoryHandle } from './commits.js';
 
 interface FakeCommitStoreState {
   commits: Map<string, CommitInsertInput>; // by `${repoId}:${sha}`
+  // Synthesized serial id per inserted commit (mirrors Drizzle's
+  // SERIAL primary key). Returned to callers in `insertCommits` so
+  // the inline-eager diff-stats path can walk just-inserted rows.
+  idBySha: Map<string, number>;
+  idSeq: number;
   syncStateByRepo: Map<number, SyncStateRow>;
   usersByUuid: Map<string, number>;
   markRunningCalls: number[]; // repositoryId, in order
   markSuccessCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
   markFailedCalls: Array<{ repositoryId: number; error: string }>;
-  // Phase 4 T21: pending-diff-stat commits keyed by id; populated by tests
-  // that want to exercise the diff-stats path.
+  // Phase 4 T21: pending-diff-stat commits keyed by id. Used by the
+  // *backfill* path; inline-eager no longer reads from here (kept so
+  // tests can assert inline-eager *doesn't* pick these up).
   pendingDiffStatCommits: Map<number, PendingDiffStatCommit>;
   diffStatsUpdates: Array<{ commitId: number; additions: number; deletions: number; filesChanged: number }>;
 }
@@ -34,6 +40,8 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
 } {
   const state: FakeCommitStoreState = {
     commits: new Map(),
+    idBySha: new Map(),
+    idSeq: 0,
     syncStateByRepo: new Map(),
     usersByUuid: new Map(),
     markRunningCalls: [],
@@ -55,15 +63,17 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
       return map;
     },
     async insertCommits(input) {
-      let inserted = 0;
+      const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
       for (const c of input) {
         const key = `${c.repositoryId}:${c.sha}`;
         if (!state.commits.has(key)) {
           state.commits.set(key, c);
-          inserted++;
+          const id = ++state.idSeq;
+          state.idBySha.set(key, id);
+          insertedRows.push({ id, sha: c.sha, authoredAt: c.authoredAt });
         }
       }
-      return { inserted };
+      return { inserted: insertedRows.length, insertedRows };
     },
     async getSyncState(repositoryId) {
       return state.syncStateByRepo.get(repositoryId) ?? null;
@@ -438,7 +448,7 @@ describe('syncRepositoryCommits — idempotency + failure', () => {
   });
 });
 
-describe('syncRepositoryCommits — diff-stats integration', () => {
+describe('syncRepositoryCommits — inline-eager diff-stats', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   beforeEach(() => {
     fetchMock = vi.fn();
@@ -448,47 +458,65 @@ describe('syncRepositoryCommits — diff-stats integration', () => {
     return { ...makeRepo(1), diffStatsEnabled: true };
   }
 
-  it('runs the diff-stats step on opt-in repos when opts.diffStats is supplied', async () => {
-    // First call: empty commits page (delta with cursor). Second call:
-    // /diffstat/sha-pending — returns a single file with +12 / -3.
+  it('fetches /diffstat for commits just inserted in this run', async () => {
+    // BB delta returns one new commit; the inline-eager step then
+    // fetches /diffstat for that sha.
     fetchMock
-      .mockImplementationOnce(() => Promise.resolve(commitsPage([])))
+      .mockImplementationOnce(() =>
+        Promise.resolve(commitsPage([makeCommit('sha-new', { date: '2026-05-04T12:00:00+00:00' })])),
+      )
       .mockImplementationOnce(() =>
         Promise.resolve(jsonResponse({ pagelen: 100, values: [{ lines_added: 12, lines_removed: 3 }] })),
       );
     const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
-    // Pre-seed one pending commit; the diff-stats worker will pick it up.
-    state.pendingDiffStatCommits.set(99, {
-      id: 99,
-      sha: 'sha-pending',
-      authoredAt: new Date('2026-05-04T12:00:00Z'),
-    });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {
-      diffStats: { maxPerRepoPerTick: 50, budgetThreshold: 10 },
+      diffStats: { budgetThreshold: 10 },
     });
 
+    expect(result.inserted).toBe(1);
     expect(result.diffStatsUpdated).toBe(1);
     expect(result.diffStatsFailed).toBe(0);
     expect(result.diffStatsRange).toEqual({ sinceDay: '2026-05-04', untilDay: '2026-05-04' });
-    expect(state.diffStatsUpdates).toEqual([{ commitId: 99, additions: 12, deletions: 3, filesChanged: 1 }]);
+    // commitId is the synthesized id from the fake store's idSeq.
+    const expectedId = state.idBySha.get('1:sha-new')!;
+    expect(state.diffStatsUpdates).toEqual([{ commitId: expectedId, additions: 12, deletions: 3, filesChanged: 1 }]);
   });
 
-  it('skips the diff-stats step on opt-out repos even when opts.diffStats is supplied', async () => {
+  it('does NOT pick up older pending commits (those are the backfill tick’s job)', async () => {
+    // BB delta returns nothing new; pre-seeded pending commits from a
+    // past run should be ignored by inline-eager.
     fetchMock.mockImplementationOnce(() => Promise.resolve(commitsPage([])));
     const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
     state.pendingDiffStatCommits.set(99, {
       id: 99,
-      sha: 'sha-pending',
-      authoredAt: new Date('2026-05-04T12:00:00Z'),
+      sha: 'sha-stale-pending',
+      authoredAt: new Date('2026-04-15T00:00:00Z'),
     });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {
+      diffStats: { budgetThreshold: 10 },
+    });
+
+    expect(result.diffStatsUpdated).toBe(0);
+    expect(state.diffStatsUpdates).toHaveLength(0);
+    // Only the commits-list call was made; no /diffstat fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the diff-stats step on opt-out repos even when opts.diffStats is supplied', async () => {
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(commitsPage([makeCommit('sha-new', { date: '2026-05-04T12:00:00+00:00' })])),
+    );
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await syncRepositoryCommits(
       deps,
       makeRepo(1), // diffStatsEnabled defaults to false
-      { diffStats: { maxPerRepoPerTick: 50, budgetThreshold: 10 } },
+      { diffStats: { budgetThreshold: 10 } },
     );
 
     expect(result.diffStatsUpdated).toBe(0);
@@ -499,13 +527,10 @@ describe('syncRepositoryCommits — diff-stats integration', () => {
   });
 
   it('skips the diff-stats step when opts.diffStats is omitted, even on opt-in repos', async () => {
-    fetchMock.mockImplementationOnce(() => Promise.resolve(commitsPage([])));
-    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
-    state.pendingDiffStatCommits.set(99, {
-      id: 99,
-      sha: 'sha-pending',
-      authoredAt: new Date('2026-05-04T12:00:00Z'),
-    });
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(commitsPage([makeCommit('sha-new', { date: '2026-05-04T12:00:00+00:00' })])),
+    );
+    const { store } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {});
@@ -514,37 +539,27 @@ describe('syncRepositoryCommits — diff-stats integration', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('does not poison the commit-sync result when diff-stats throws unexpectedly', async () => {
-    fetchMock.mockImplementationOnce(() => Promise.resolve(commitsPage([])));
-    const { state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
-    // Override the store to make the pickup query throw.
-    const brokenStore: CommitStore = {
-      resolveUserIdsByUuid: async () => new Map(),
-      insertCommits: async () => ({ inserted: 0 }),
-      getSyncState: async () => state.syncStateByRepo.get(1) ?? null,
-      markSyncRunning: async () => {},
-      markSyncSuccess: async (id, update) => {
-        state.markSuccessCalls.push({ repositoryId: id, update });
-      },
-      markSyncFailed: async () => {},
-      listPendingDiffStatCommits: async () => {
-        throw new Error('pickup blew up');
-      },
-      updateCommitDiffStats: async () => {},
-      getOldestCommitSha: async () => null,
-      pickRepoForDeepening: async () => null,
-      markDeepenAttempt: async () => {},
-      markDeepenComplete: async () => {},
-    };
-    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store: brokenStore };
+  it('does not poison the commit-sync result when diff-stats fetch throws', async () => {
+    // Insert succeeds, but /diffstat returns 500.
+    fetchMock
+      .mockImplementationOnce(() =>
+        Promise.resolve(commitsPage([makeCommit('sha-new', { date: '2026-05-04T12:00:00+00:00' })])),
+      )
+      .mockImplementation(() => Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500)));
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await syncRepositoryCommits(deps, repoWithDiffStats(), {
-      diffStats: { maxPerRepoPerTick: 50, budgetThreshold: 10 },
+      diffStats: { budgetThreshold: 10 },
     });
 
-    // The commit-sync portion still succeeded.
+    // Commit-sync portion still succeeded — the commit is in the table,
+    // markSyncSuccess fired. The per-commit fetch failed and the row
+    // stays pending; the backfill tick will retry.
     expect(state.markSuccessCalls).toHaveLength(1);
+    expect(result.inserted).toBe(1);
     expect(result.diffStatsUpdated).toBe(0);
+    expect(result.diffStatsFailed).toBe(1);
     expect(result.diffStatsRange).toBeNull();
   });
 });

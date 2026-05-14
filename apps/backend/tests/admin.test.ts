@@ -32,8 +32,10 @@ const testConfig: AppConfig = {
   COMMITS_BACKFILL_SINCE: '',
   COMMIT_SYNC_CONCURRENCY: 3,
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
-  DIFF_STATS_MAX_PER_REPO_PER_TICK: 50,
   DIFF_STATS_BUDGET_THRESHOLD: 10,
+  DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK: 50,
+  DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: 20,
+  DIFF_STATS_BACKFILL_CONCURRENCY: 1,
   SYNC_PRS_CRON: '*/30 * * * *',
   PR_BACKFILL_MAX_PAGES: 5,
   PR_SYNC_CONCURRENCY: 3,
@@ -149,15 +151,16 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
       return new Map(); // no users seeded — every commit lands as anonymous
     },
     async insertCommits(input) {
-      let inserted = 0;
+      const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
+      let nextId = state.commits.size + 1;
       for (const c of input) {
         const key = `${c.repositoryId}:${c.sha}`;
         if (!state.commits.has(key)) {
           state.commits.set(key, c);
-          inserted++;
+          insertedRows.push({ id: nextId++, sha: c.sha, authoredAt: c.authoredAt });
         }
       }
-      return { inserted };
+      return { inserted: insertedRows.length, insertedRows };
     },
     async getSyncState(repositoryId) {
       return state.syncStateByRepo.get(repositoryId) ?? null;

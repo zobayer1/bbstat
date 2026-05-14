@@ -11,6 +11,7 @@ import { loadSeedTrackedRepos } from './discovery.js';
 import {
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
+  diffStatsBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
   runCommitsSync,
   runMembersSync,
@@ -60,6 +61,7 @@ async function main(): Promise<void> {
   const commitTickOptions = commitTickOptionsFromConfig(config);
   const prTickOptions = prTickOptionsFromConfig(config);
   const deepenOptions = deepenOptionsFromConfig(config);
+  const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
     client,
@@ -74,6 +76,7 @@ async function main(): Promise<void> {
     prStore,
     prTickOptions,
     deepenOptions,
+    diffStatsBackfillOptions,
   };
 
   // Four independent schedules. Members rarely change; repo metadata
@@ -108,6 +111,7 @@ async function main(): Promise<void> {
       commitTickOptions,
       prTickOptions,
       deepenOptions,
+      diffStatsBackfillOptions,
       seedCount: initialSeeds.length,
     },
     'Sync runner scheduled. Press Ctrl+C to exit.',

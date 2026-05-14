@@ -9,7 +9,12 @@ import { createDrizzleCommitStore } from './sync/commit-store.js';
 import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
 import { createDrizzlePrStore } from './sync/pr-store.js';
 import { loadSeedTrackedRepos } from './sync/discovery.js';
-import { commitTickOptionsFromConfig, deepenOptionsFromConfig, prTickOptionsFromConfig } from './sync/runner.js';
+import {
+  commitTickOptionsFromConfig,
+  deepenOptionsFromConfig,
+  diffStatsBackfillOptionsFromConfig,
+  prTickOptionsFromConfig,
+} from './sync/runner.js';
 import { createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
@@ -81,6 +86,7 @@ async function main(): Promise<void> {
       prStore,
       prTickOptions: prTickOptionsFromConfig(config),
       deepenOptions: deepenOptionsFromConfig(config),
+      diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
     };
   }
 

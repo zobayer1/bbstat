@@ -1,22 +1,31 @@
-// Per-repo diff-stat ingest. Picks up to opts.maxPerRepoPerTick commits whose
-// diff stats haven't been fetched yet (commits.diff_stats_synced_at IS NULL)
-// and walks them newest-first, fetching /diffstat/:sha and persisting the
-// totals. Stops scheduling new commits when the BB call-budget drops below
-// opts.budgetThreshold — remaining commits roll over to the next tick.
+// Per-commit diff-stat ingest — fetches /diffstat/:sha and persists
+// additions / deletions / files_changed onto each commit row. Two call
+// paths share the inner walker:
 //
-// Resumability lives on the column itself: a successful fetch+UPDATE stamps
-// diff_stats_synced_at = now(), so the next tick's pickup query skips it. A
-// transient failure (HTTP 5xx, network blip) leaves the row NULL → it gets
-// retried on the next tick. A persistent 4xx on a single commit will waste
-// one BB call per tick until investigated, but won't block others since the
-// loop continues past per-commit errors.
+//   1. Inline-eager (forward path) — invoked by `syncRepositoryCommits`
+//      right after `insertCommits` returns the newly-landed rows. We feed
+//      those rows directly into `fetchDiffStatsForCommits`, so brand-new
+//      commits get their stats with minimal lag and without a DB pickup.
 //
-// Pure short-circuit when `repo.diffStatsEnabled === false` — no DB read, no
-// BB call. Cheap to call unconditionally from the per-repo commit sync.
+//   2. Backfill (backward path) — invoked by `runDiffStatsBackfillTick`
+//      after the deepen tick, lower priority than commit-list ingest.
+//      `syncRepositoryDiffStats` pulls pending commits from the DB
+//      (`commits.diff_stats_synced_at IS NULL`, newest-authored first)
+//      and feeds them to the same inner walker.
+//
+// Resumability lives on `diff_stats_synced_at`: a successful fetch +
+// UPDATE stamps now(), so the next pickup query skips it. A transient
+// failure (HTTP 5xx, network blip) leaves the row NULL → retried next
+// tick. A persistent 4xx on a single commit will waste one BB call per
+// tick until investigated, but won't block others since the loop
+// continues past per-commit errors.
+//
+// Pure short-circuit when `repo.diffStatsEnabled === false` — no DB
+// read, no BB call. Cheap to call unconditionally.
 
 import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
-import type { CommitStore } from './commit-store.js';
+import type { CommitStore, PendingDiffStatCommit } from './commit-store.js';
 import type { RepositoryHandle } from './commits.js';
 
 export interface DiffStatsSyncOptions {
@@ -56,6 +65,24 @@ const EMPTY: DiffStatsSyncResult = {
   diffStatsRange: null,
 };
 
+// Inline-eager forward path. Fetches diff stats for an explicit list of
+// commits (typically the ones just inserted by `syncRepositoryCommits`)
+// — no DB pickup, no `maxPerRepoPerTick` cap (caller decides how many
+// rows to pass in). Budget gate still applies so a fat batch can't blow
+// the hourly cap.
+export async function fetchDiffStatsForCommits(
+  deps: DiffStatsSyncDeps,
+  repo: RepositoryHandle,
+  commits: PendingDiffStatCommit[],
+  opts: { budgetThreshold: number },
+): Promise<DiffStatsSyncResult> {
+  if (!repo.diffStatsEnabled || commits.length === 0) return EMPTY;
+  return walkAndPersist(deps, repo, commits, opts.budgetThreshold);
+}
+
+// Backfill / backward path. Pulls up to `maxPerRepoPerTick` pending
+// commits (`diff_stats_synced_at IS NULL`) newest-first from the store
+// and feeds them to the same walker. Used by `runDiffStatsBackfillTick`.
 export async function syncRepositoryDiffStats(
   deps: DiffStatsSyncDeps,
   repo: RepositoryHandle,
@@ -66,22 +93,31 @@ export async function syncRepositoryDiffStats(
   const pending = await deps.store.listPendingDiffStatCommits(repo.repositoryId, opts.maxPerRepoPerTick);
   if (pending.length === 0) return EMPTY;
 
+  return walkAndPersist(deps, repo, pending, opts.budgetThreshold);
+}
+
+async function walkAndPersist(
+  deps: DiffStatsSyncDeps,
+  repo: RepositoryHandle,
+  commits: PendingDiffStatCommit[],
+  budgetThreshold: number,
+): Promise<DiffStatsSyncResult> {
   let updated = 0;
   let failed = 0;
   let hitBudgetGate = false;
   let sinceDay: string | null = null;
   let untilDay: string | null = null;
 
-  for (const commit of pending) {
-    if (deps.client.getBudgetRemaining() < opts.budgetThreshold) {
+  for (const commit of commits) {
+    if (deps.client.getBudgetRemaining() < budgetThreshold) {
       hitBudgetGate = true;
       deps.logger?.warn?.(
         {
           repositoryId: repo.repositoryId,
           fullName: repo.fullName,
           remaining: deps.client.getBudgetRemaining(),
-          threshold: opts.budgetThreshold,
-          deferred: pending.length - updated - failed,
+          threshold: budgetThreshold,
+          deferred: commits.length - updated - failed,
         },
         'diff-stats sync: budget gate — deferring remaining commits',
       );
