@@ -145,6 +145,13 @@ function formatTime(iso: string): string {
               >
                 {{ entry.repository.slug }}
               </RouterLink>
+              <span
+                v-if="entry.kind === 'commit' && entry.isMerge"
+                class="ml-1.5 inline-block rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-violet-700"
+                title="Merge commit — additions / deletions cover the merged branch's full delta, not authorship volume"
+              >
+                merge
+              </span>
               <span v-if="entry.kind === 'commit'" class="text-slate-700"> — {{ commitTitle(entry.message) }}</span>
               <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
             </p>

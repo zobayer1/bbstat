@@ -8,10 +8,27 @@
 #
 # Each entry is either:
 #   - a plain "<workspace>/<slug>" string, or
-#   - an object `{ name: <workspace>/<slug>, diffStats: true }` to opt into
-#     per-commit /diffstat/:sha ingest for that repo (Phase 4 T21). Defaults
-#     to diffStats=false. Toggle the flag in YAML and the next discovery sync
-#     re-applies it — no restart needed.
+#   - an object `{ name: <workspace>/<slug>, diffStats?: boolean, archived?: boolean }`
+#     for explicit per-flag seeding.
+#
+# Per-flag seeding values:
+#   diffStats   — opt into per-commit /diffstat/:sha ingest (Phase 4 T21).
+#                 Defaults to false.
+#   archived    — pre-mark the repo as archived on first insert. Sync workers
+#                 skip archived repos but their historical data is preserved.
+#                 Defaults to false. (Typically you flip this at runtime via
+#                 POST /repositories/:ws/:slug/archive — this is just for
+#                 seeding a repo as already-archived on first import.)
+#
+# IMPORTANT — YAML is **seed-only**: edits to this file only affect rows
+# that don't yet exist in the DB. Once a repo is in `repositories`, the DB
+# is canonical for its `diff_stats_enabled` / `archived` flags — operators
+# flip them via admin endpoints (POST /repositories/:ws/:slug/archive,
+# /unarchive) or direct SQL, and those changes survive every subsequent
+# discovery sync. Editing the YAML for an existing repo is a no-op for
+# those flags. The YAML's role for existing repos is just "is it in the
+# seed list at all" (informational; removing it from YAML does NOT
+# untrack the repo — use the archive endpoint).
 #
 # Missing file is treated as "no seeds" when using the default path;
 # explicit paths must exist.
@@ -21,4 +38,5 @@ repos:
   - tigerit/boing-relay
   - tigerit/boing-instances
   # - { name: tigerit/comm-adm, diffStats: true }
+  # - { name: tigerit/legacy-thing, archived: true }
   # - tigerit/comm-video-chat

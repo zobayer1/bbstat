@@ -64,8 +64,16 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
         }
       }
     },
+    async updateRepositoryArchived(repositoryId, archived) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.archived = archived;
+          return;
+        }
+      }
+    },
     async listTrackedRepositories() {
-      return Array.from(state.repositories.values());
+      return Array.from(state.repositories.values()).filter((r) => !r.archived);
     },
   };
 
@@ -104,26 +112,27 @@ repos:
   - tigerit/boing-relay
 `;
     expect(parseSeedRepoFile(text)).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false },
-      { workspace: 'tigerit', slug: 'boing-relay', diffStatsEnabled: false },
+      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'boing-relay', diffStatsEnabled: false, archived: false },
     ]);
   });
 
-  it('parses the object form { name, diffStats } and mixes it with plain strings', () => {
+  it('parses the object form { name, diffStats, archived } and mixes it with plain strings', () => {
     const text = `
 repos:
   - tigerit/boing-server
   - { name: tigerit/boing-relay, diffStats: true }
   - name: tigerit/comm-adm
     diffStats: false
+    archived: true
   - name: tigerit/no-explicit-flag
 `;
     expect(parseSeedRepoFile(text)).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false },
-      { workspace: 'tigerit', slug: 'boing-relay', diffStatsEnabled: true },
-      { workspace: 'tigerit', slug: 'comm-adm', diffStatsEnabled: false },
-      // diffStats omitted on the object form defaults to false.
-      { workspace: 'tigerit', slug: 'no-explicit-flag', diffStatsEnabled: false },
+      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'boing-relay', diffStatsEnabled: true, archived: false },
+      { workspace: 'tigerit', slug: 'comm-adm', diffStatsEnabled: false, archived: true },
+      // Both flags omitted on the object form default to false.
+      { workspace: 'tigerit', slug: 'no-explicit-flag', diffStatsEnabled: false, archived: false },
     ]);
   });
 
@@ -169,7 +178,7 @@ describe('loadSeedTrackedRepos', () => {
     const path = join(dir, 'seeds.yaml');
     writeFileSync(path, 'repos:\n  - tigerit/boing-server\n');
     expect(loadSeedTrackedRepos(path, { required: false })).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false },
+      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
     ]);
   });
 });
@@ -277,6 +286,7 @@ describe('addTrackedRepository', () => {
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
       diffStatsEnabled: false,
+      archived: false,
     });
   });
 
@@ -289,6 +299,7 @@ describe('addTrackedRepository', () => {
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
       diffStatsEnabled: false,
+      archived: false,
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
@@ -341,6 +352,7 @@ describe('addTrackedRepository', () => {
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
       diffStatsEnabled: false,
+      archived: false,
     });
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
@@ -378,6 +390,7 @@ describe('bootstrapTrackedRepositories', () => {
       slug: 'b',
       fullName: 'tigerit/b',
       diffStatsEnabled: false,
+      archived: false,
     });
 
     fetchMock
@@ -394,9 +407,9 @@ describe('bootstrapTrackedRepositories', () => {
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'a', diffStatsEnabled: false },
-      { workspace: 'tigerit', slug: 'b', diffStatsEnabled: false },
-      { workspace: 'tigerit', slug: 'c', diffStatsEnabled: false },
+      { workspace: 'tigerit', slug: 'a', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'b', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'c', diffStatsEnabled: false, archived: false },
     ]);
 
     expect(result).toEqual({
@@ -404,7 +417,6 @@ describe('bootstrapTrackedRepositories', () => {
       inserted: 1,
       alreadyTracked: 1,
       notFound: ['tigerit/c'],
-      diffStatsToggled: 0,
       errors: [],
     });
     // 2 HTTP calls total — `b` was a cache hit and made none.
@@ -422,7 +434,6 @@ describe('bootstrapTrackedRepositories', () => {
       inserted: 0,
       alreadyTracked: 0,
       notFound: [],
-      diffStatsToggled: 0,
       errors: [],
     });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -442,8 +453,8 @@ describe('bootstrapTrackedRepositories', () => {
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'a', diffStatsEnabled: false },
-      { workspace: 'tigerit', slug: 'b', diffStatsEnabled: false },
+      { workspace: 'tigerit', slug: 'a', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'b', diffStatsEnabled: false, archived: false },
     ]);
 
     expect(result.requested).toBe(2);
@@ -457,32 +468,10 @@ describe('bootstrapTrackedRepositories', () => {
     expect(state.repositories.has('tigerit/b')).toBe(true);
   });
 
-  it('flips diff_stats_enabled on already-tracked rows when the YAML value diverges', async () => {
-    const { store } = createFakeStore();
-    // Pre-existing row at diffStatsEnabled=false; YAML says true.
-    await store.insertRepositoryWithSyncState({
-      bitbucketUuid: '{r1}',
-      workspace: 'tigerit',
-      project: 'BOING',
-      slug: 'boing-server',
-      fullName: 'tigerit/boing-server',
-      diffStatsEnabled: false,
-    });
-    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
-
-    const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: true },
-    ]);
-
-    expect(result.diffStatsToggled).toBe(1);
-    expect(result.alreadyTracked).toBe(1);
-    const row = await store.findRepositoryByFullName('tigerit/boing-server');
-    expect(row?.diffStatsEnabled).toBe(true);
-    // Reconciliation must NOT make an HTTP call — the repo was already tracked.
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('does not toggle diff_stats_enabled when the YAML value matches', async () => {
+  it('does NOT reconcile per-repo flags from YAML on existing rows (DB is canonical)', async () => {
+    // Pre-existing row reflects operator intent: diff_stats_enabled flipped
+    // on, repo archived after a rename. The seed YAML happens to disagree
+    // on both — bootstrap should leave the DB untouched.
     const { store } = createFakeStore();
     await store.insertRepositoryWithSyncState({
       bitbucketUuid: '{r1}',
@@ -491,13 +480,44 @@ describe('bootstrapTrackedRepositories', () => {
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
       diffStatsEnabled: true,
+      archived: true,
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: true },
+      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
     ]);
 
-    expect(result.diffStatsToggled).toBe(0);
+    expect(result.alreadyTracked).toBe(1);
+    const row = await store.findRepositoryByFullName('tigerit/boing-server');
+    // DB values preserved — YAML did not write through.
+    expect(row?.diffStatsEnabled).toBe(true);
+    expect(row?.archived).toBe(true);
+    // No HTTP call either — already-tracked short-circuits before BB lookup.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('seeds per-repo flags from YAML on first insert', async () => {
+    // Brand-new repo: YAML's diffStats / archived values become the
+    // initial column values.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        uuid: '{r-new}',
+        slug: 'fresh',
+        full_name: 'tigerit/fresh',
+        workspace: { slug: 'tigerit' },
+        project: { key: 'BOING' },
+      }),
+    );
+    const { store } = createFakeStore();
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    await bootstrapTrackedRepositories(deps, [
+      { workspace: 'tigerit', slug: 'fresh', diffStatsEnabled: true, archived: true },
+    ]);
+
+    const row = await store.findRepositoryByFullName('tigerit/fresh');
+    expect(row?.diffStatsEnabled).toBe(true);
+    expect(row?.archived).toBe(true);
   });
 });

@@ -11,6 +11,7 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { paginateCommits } from '../bitbucket/commits.js';
 import { syncRepositoryCommits } from '../sync/commits.js';
 import { deepenOneRepo } from '../sync/deepen-backfill.js';
 import { addTrackedRepository } from '../sync/discovery.js';
@@ -164,4 +165,73 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     if (result.status === 'inserted') return reply.code(201).send(result);
     return reply.code(200).send(result);
   });
+
+  // Soft-retire a tracked repo. Historical data stays (commits,
+  // sync_state, etc.); the row is excluded from `listTrackedRepositories`
+  // so commit / deepen / diff-stats ticks skip it. Idempotent — POSTing
+  // archive on an already-archived repo still returns 200 with the row.
+  app.post<{ Params: { workspace: string; slug: string } }>(
+    '/repositories/:workspace/:slug/archive',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) return reply.code(404).send({ error: 'not_tracked', fullName });
+      if (!row.archived) await opts.syncDeps.store.updateRepositoryArchived(row.id, true);
+      return reply.code(200).send({ fullName: row.fullName, archived: true });
+    },
+  );
+
+  // Reverse of archive. Idempotent — POSTing unarchive on an already-
+  // active repo still returns 200.
+  app.post<{ Params: { workspace: string; slug: string } }>(
+    '/repositories/:workspace/:slug/unarchive',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) return reply.code(404).send({ error: 'not_tracked', fullName });
+      if (row.archived) await opts.syncDeps.store.updateRepositoryArchived(row.id, false);
+      return reply.code(200).send({ fullName: row.fullName, archived: false });
+    },
+  );
+
+  // One-shot retroactive backfill of `is_merge` on already-ingested
+  // commits. The column was added in migration 0006 with DEFAULT false,
+  // so rows that pre-date the migration are stuck at false even if BB
+  // reports them as merges. This endpoint walks /commits paginated for
+  // the given repo, reads `parents.length > 1` per row, and bulk-UPDATEs
+  // is_merge by sha. Doesn't touch any other column — additions /
+  // deletions / files_changed / authored_at / message stay untouched.
+  // Idempotent.
+  //
+  // Cost: ~1 BB call per 100 commits in the repo's history (e.g., 38
+  // calls for a 3,700-commit repo). Operator-triggered; not on any
+  // cron, not visible from the UI. New commits ingested after the
+  // migration are flagged correctly at insert time so this is strictly
+  // a historical-cleanup tool.
+  app.post<{ Params: { workspace: string; slug: string } }>(
+    '/repositories/:workspace/:slug/backfill/is_merge',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) return reply.code(404).send({ error: 'not_tracked', fullName });
+
+      const entries: Array<{ sha: string; isMerge: boolean }> = [];
+      let pages = 0;
+      for await (const commit of paginateCommits(opts.syncDeps.client, row.workspace, row.slug)) {
+        entries.push({ sha: commit.hash, isMerge: commit.parents.length > 1 });
+        // Pagination is internal to paginateCommits; we track pages by
+        // dividing the entry count for the log line, since the iterator
+        // doesn't surface page boundaries.
+        if (entries.length % 100 === 0) pages = Math.ceil(entries.length / 100);
+      }
+      pages = Math.ceil(entries.length / 100);
+
+      const { updated } = await opts.syncDeps.commitStore.updateIsMergeBatch(row.id, entries);
+      opts.syncDeps.logger?.info?.({ fullName, walked: entries.length, pages, updated }, 'is_merge backfill complete');
+      return reply.code(200).send({ fullName, walked: entries.length, pages, updated });
+    },
+  );
 };

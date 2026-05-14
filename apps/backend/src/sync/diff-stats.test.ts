@@ -43,6 +43,7 @@ function makeStore(pending: PendingDiffStatCommit[] = []): { store: CommitStore;
     pickRepoForDeepening: unreachable,
     markDeepenAttempt: unreachable,
     markDeepenComplete: unreachable,
+    updateIsMergeBatch: unreachable,
   };
   return { store, state };
 }

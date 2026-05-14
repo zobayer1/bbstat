@@ -33,14 +33,27 @@ export const users = pgTable('users', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-// `repositories` represents the curated *tracked* set — only repos in this
-// table are ingested by sync workers. Untracked repos in the workspace are
-// simply absent. See docs/ROADMAP.md "Curated list growth".
+// `repositories` represents the curated *tracked* set — rows here that
+// are not archived are what sync workers walk. `tracked-repos.yaml` is a
+// **seed file**, not a live config source: it controls which repos get
+// inserted on first discovery, and seeds the initial values of
+// per-repo flags (`diff_stats_enabled`, `archived`). Once a row exists,
+// the DB is canonical — admin endpoints / scripts / ad-hoc SQL update
+// the flags, and subsequent discovery syncs do NOT overwrite them from
+// YAML. See docs/ROADMAP.md "Curated list growth".
 //
-// `diff_stats_enabled` is the Phase 4 opt-in for fetching per-commit additions
-// / deletions via /diffstat/:sha. Authoritative source for the flag is the
-// `repositories` row; `tracked-repos.yaml` writes through it on every
-// discovery sync so toggling the YAML knob re-applies at the next tick.
+// `diff_stats_enabled` — Phase 4 opt-in for fetching per-commit
+// additions / deletions / files_changed via /diffstat/:sha. Seeded from
+// `{ name, diffStats: true }` in YAML; flipped at runtime via direct
+// SQL (no admin endpoint for this flag yet).
+//
+// `archived` — Phase 4 follow-up. Soft-retire flag for repos that
+// should keep their historical data but stop appearing in sync work.
+// `listTrackedRepositories()` filters `archived = false`. Seeded from
+// `{ name, archived: true }` in YAML on initial insert; flipped at
+// runtime via POST /repositories/:ws/:slug/archive (or unarchive). No
+// cascade — commits / sync_state stay intact so the data is still
+// available for dashboards and historical queries.
 export const repositories = pgTable('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
@@ -49,6 +62,7 @@ export const repositories = pgTable('repositories', {
   slug: text('slug').notNull(),
   fullName: text('full_name').notNull(),
   diffStatsEnabled: boolean('diff_stats_enabled').notNull().default(false),
+  archived: boolean('archived').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

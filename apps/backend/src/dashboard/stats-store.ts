@@ -136,6 +136,12 @@ export interface ActivityCommit {
   message: string;
   additions: number;
   deletions: number;
+  // True when the underlying commit has more than one parent. Surfaced
+  // here so the dashboard can flag merges (their additions/deletions
+  // include the entire merged-branch delta and shouldn't be read as
+  // authorship volume). Future per-user 30d aggregates over adds/dels
+  // will default-exclude rows where `is_merge = true`.
+  isMerge: boolean;
   repository: ActivityRepository;
   author: ActivityAuthor | null;
   // commits.authored_at, ISO 8601.
@@ -732,6 +738,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         message: string | null;
         additions: number | null;
         deletions: number | null;
+        is_merge: boolean | null;
         pr_id: number | null;
         title: string | null;
         state: string | null;
@@ -753,6 +760,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             c.message AS message,
             c.additions AS additions,
             c.deletions AS deletions,
+            c.is_merge AS is_merge,
             NULL::int AS pr_id,
             NULL::text AS title,
             NULL::text AS state,
@@ -783,6 +791,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             NULL::text AS message,
             NULL::int AS additions,
             NULL::int AS deletions,
+            NULL::boolean AS is_merge,
             pr.bitbucket_pr_id AS pr_id,
             pr.title AS title,
             pr.state::text AS state,
@@ -829,6 +838,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             message: r.message!,
             additions: r.additions!,
             deletions: r.deletions!,
+            isMerge: r.is_merge ?? false,
             repository,
             author,
             occurredAt,

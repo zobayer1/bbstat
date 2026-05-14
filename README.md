@@ -15,6 +15,7 @@ A dashboard-style web application for reviewing developer contributions across a
 | Database               | PostgreSQL 17 (system of record), Drizzle ORM                                                          |
 | Server-side cache      | Redis 7 — _scoped to user-summary rollups only_                                                        |
 | Background sync        | node-cron + shared `runSync()` for manual / cron / webhook triggers (see [docs/sync.md](docs/sync.md)) |
+| Admin endpoints        | `/api/admin/*` for sync triggers + curated-repo management (see [docs/admin.md](docs/admin.md))        |
 | Reverse proxy / TLS    | Traefik (planned), self-signed CA for local dev (`etc/tls/`)                                           |
 | Container runtime      | Docker CE (Postgres + Redis via `docker-compose.yml`)                                                  |
 | Tests / lint / format  | Vitest, ESLint flat config, Prettier                                                                   |

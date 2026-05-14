@@ -80,6 +80,9 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     async markDeepenComplete(repositoryId) {
       state.markedComplete.push(repositoryId);
     },
+    async updateIsMergeBatch(_repositoryId, entries) {
+      return { updated: entries.length };
+    },
   };
   return { store, state };
 }

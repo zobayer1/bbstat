@@ -116,6 +116,18 @@ export interface CommitStore {
   // the deepen pagination (we've reached the repo's first commit) or on
   // an unrecoverable 404 against the seed sha (force-pushed history).
   markDeepenComplete(repositoryId: number): Promise<void>;
+
+  // One-shot retroactive backfill of the `is_merge` column on already-
+  // ingested commits. Used by the admin backfill endpoint after walking
+  // BB's /commits and reading each commit's `parents.length`. Bulk
+  // UPDATE keyed by sha — rows whose sha isn't found are silently
+  // skipped (the caller's list may include not-yet-ingested commits if
+  // BB returned a page past our deepen boundary). Returns rows actually
+  // updated. Idempotent — re-running with the same input is a no-op.
+  updateIsMergeBatch(
+    repositoryId: number,
+    entries: Array<{ sha: string; isMerge: boolean }>,
+  ): Promise<{ updated: number }>;
 }
 
 export interface DeepenCandidate {
@@ -294,6 +306,31 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .update(syncState)
         .set({ deepenComplete: true, deepenLastRunAt: now, updatedAt: now })
         .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async updateIsMergeBatch(repositoryId, entries) {
+      if (entries.length === 0) return { updated: 0 };
+      // Single UPDATE ... FROM (VALUES ...) — one round-trip for any
+      // batch size. Drizzle's `sql` template lets us inline the
+      // tuples while still parameterizing every value. Explicit casts
+      // on each parameter are required: pg-node sends parameters
+      // untyped, and Postgres infers VALUES column types from the
+      // first row — without the casts, booleans arrive as text and
+      // the `commits.is_merge = data.is_merge` comparison fails with
+      // "operator does not exist: boolean = text".
+      const tuples = sql.join(
+        entries.map((e) => sql`(${e.sha}::text, ${e.isMerge}::boolean)`),
+        sql`, `,
+      );
+      const result = await db.execute(sql`
+        UPDATE commits
+        SET is_merge = data.is_merge
+        FROM (VALUES ${tuples}) AS data(sha, is_merge)
+        WHERE commits.repository_id = ${repositoryId}
+          AND commits.sha = data.sha
+          AND commits.is_merge IS DISTINCT FROM data.is_merge
+      `);
+      return { updated: result.rowCount ?? 0 };
     },
   };
 }

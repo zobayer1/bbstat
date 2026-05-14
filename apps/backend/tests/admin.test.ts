@@ -64,6 +64,7 @@ function noopCommitStore(): CommitStore {
     pickRepoForDeepening: fail,
     markDeepenAttempt: fail,
     markDeepenComplete: fail,
+    updateIsMergeBatch: fail,
   };
 }
 
@@ -138,6 +139,7 @@ interface FakeCommitStoreState {
   commits: Map<string, CommitInsertInput>;
   syncStateByRepo: Map<number, SyncStateRow>;
   successCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
+  isMergeBackfillCalls: Array<{ repositoryId: number; entries: Array<{ sha: string; isMerge: boolean }> }>;
 }
 
 function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreState } {
@@ -145,6 +147,7 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
     commits: new Map(),
     syncStateByRepo: new Map(),
     successCalls: [],
+    isMergeBackfillCalls: [],
   };
   const store: CommitStore = {
     async resolveUserIdsByUuid() {
@@ -209,6 +212,10 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
     },
     async markDeepenAttempt() {},
     async markDeepenComplete() {},
+    async updateIsMergeBatch(repositoryId, entries) {
+      state.isMergeBackfillCalls.push({ repositoryId, entries });
+      return { updated: entries.length };
+    },
   };
   return { store, state };
 }
@@ -256,8 +263,16 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
         }
       }
     },
+    async updateRepositoryArchived(repositoryId, archived) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.archived = archived;
+          return;
+        }
+      }
+    },
     async listTrackedRepositories() {
-      return Array.from(state.repositories.values());
+      return Array.from(state.repositories.values()).filter((r) => !r.archived);
     },
   };
   return { store, state };
@@ -343,7 +358,7 @@ describe('admin routes', () => {
           }),
         );
       const { deps, state } = makeSyncDeps(fetchMock, {
-        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false }],
+        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false }],
       });
       appInstance = await buildApp({
         config: testConfig,
@@ -362,7 +377,6 @@ describe('admin routes', () => {
         inserted: 1,
         alreadyTracked: 0,
         notFound: [],
-        diffStatsToggled: 0,
         errors: [],
       });
       expect(state.users.size).toBe(2);
@@ -411,6 +425,7 @@ describe('admin routes', () => {
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
         diffStatsEnabled: false,
+        archived: false,
       });
       appInstance = await buildApp({
         config: testConfig,
@@ -476,6 +491,110 @@ describe('admin routes', () => {
     });
   });
 
+  describe('POST /api/admin/repositories/:workspace/:slug/archive', () => {
+    it('flips archived=true and returns 200 on first archive', async () => {
+      const { deps, state } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/archive',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/boing-server', archived: true });
+      const row = await deps.store.findRepositoryByFullName('tigerit/boing-server');
+      expect(row?.archived).toBe(true);
+      // Archived rows drop out of listTrackedRepositories.
+      const tracked = await deps.store.listTrackedRepositories();
+      expect(tracked).toEqual([]);
+      expect(state.repositories.size).toBe(1); // row still exists
+    });
+
+    it('is idempotent — POST archive on already-archived returns 200', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
+        archived: true,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/archive',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/boing-server', archived: true });
+    });
+
+    it('returns 404 when the repo is not tracked', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/ghost/archive',
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/ghost' });
+    });
+  });
+
+  describe('POST /api/admin/repositories/:workspace/:slug/unarchive', () => {
+    it('flips archived=false and returns 200', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
+        archived: true,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/unarchive',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/boing-server', archived: false });
+      // Back in the tracked list.
+      const tracked = await deps.store.listTrackedRepositories();
+      expect(tracked.map((r) => r.fullName)).toEqual(['tigerit/boing-server']);
+    });
+
+    it('returns 404 when the repo is not tracked', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/ghost/unarchive',
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Commit-sync admin endpoints — these exercise the real CommitStore fake +
   // mocked BB /commits responses so the tests cover the full route → runner →
@@ -509,6 +628,7 @@ describe('admin routes', () => {
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
         diffStatsEnabled: false,
+        archived: false,
       });
       commitState.syncStateByRepo.set(repo.id, {
         repositoryId: repo.id,
@@ -581,6 +701,7 @@ describe('admin routes', () => {
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
         diffStatsEnabled: false,
+        archived: false,
       });
       commitState.syncStateByRepo.set(repo.id, {
         repositoryId: repo.id,
@@ -637,6 +758,7 @@ describe('admin routes', () => {
         slug: 'a',
         fullName: 'tigerit/a',
         diffStatsEnabled: false,
+        archived: false,
       });
       const { row: r2 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r2}',
@@ -645,6 +767,7 @@ describe('admin routes', () => {
         slug: 'b',
         fullName: 'tigerit/b',
         diffStatsEnabled: false,
+        archived: false,
       });
       for (const id of [r1.id, r2.id]) {
         commitState.syncStateByRepo.set(id, {
@@ -743,6 +866,7 @@ describe('admin routes', () => {
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
         diffStatsEnabled: false,
+        archived: false,
       });
       // Seed an empty PR sync_state row so getPrSyncState returns a cold row.
       prState.prStateByRepo.set(repo.id, { lastPrUpdatedAt: null, lastPrId: null, prTotalSynced: 0 });
@@ -798,6 +922,7 @@ describe('admin routes', () => {
         slug: 'a',
         fullName: 'tigerit/a',
         diffStatsEnabled: false,
+        archived: false,
       });
       const { row: repo2 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r2}',
@@ -806,6 +931,7 @@ describe('admin routes', () => {
         slug: 'b',
         fullName: 'tigerit/b',
         diffStatsEnabled: false,
+        archived: false,
       });
       for (const id of [repo1.id, repo2.id]) {
         prState.prStateByRepo.set(id, { lastPrUpdatedAt: null, lastPrId: null, prTotalSynced: 0 });
@@ -897,6 +1023,7 @@ describe('admin routes', () => {
         slug: 'fresh',
         fullName: 'tigerit/fresh',
         diffStatsEnabled: false,
+        archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
 
@@ -912,6 +1039,75 @@ describe('admin routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ fullName: 'tigerit/fresh', fetched: 0 });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /api/admin/repositories/:workspace/:slug/backfill/is_merge', () => {
+    it('walks /commits, maps parents.length > 1 to isMerge, and bulk-UPDATEs', async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          pagelen: 100,
+          values: [
+            {
+              hash: 'sha-a',
+              message: 'feat',
+              date: '2026-05-04T00:00:00Z',
+              parents: [{ hash: 'p1' }],
+              author: { raw: 'a' },
+            },
+            {
+              hash: 'sha-merge',
+              message: 'merge',
+              date: '2026-05-03T00:00:00Z',
+              parents: [{ hash: 'p1' }, { hash: 'p2' }],
+              author: { raw: 'a' },
+            },
+            { hash: 'sha-init', message: 'init', date: '2026-05-01T00:00:00Z', parents: [], author: { raw: 'a' } },
+          ],
+        }),
+      );
+      const { store: commitStore, state: commitState } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'r1',
+        fullName: 'tigerit/r1',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/r1/backfill/is_merge',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/r1', walked: 3, pages: 1, updated: 3 });
+
+      // The fake captures the bulk call — assert the sha → isMerge mapping.
+      expect(commitState.isMergeBackfillCalls).toHaveLength(1);
+      expect(commitState.isMergeBackfillCalls[0]?.entries).toEqual([
+        { sha: 'sha-a', isMerge: false },
+        { sha: 'sha-merge', isMerge: true },
+        { sha: 'sha-init', isMerge: false }, // initial commit (zero parents) is not a merge
+      ]);
+    });
+
+    it('returns 404 when the repo is not tracked', async () => {
+      const { store: commitStore } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/never-tracked/backfill/is_merge',
+      });
+
+      expect(res.statusCode).toBe(404);
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });

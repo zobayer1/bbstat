@@ -128,6 +128,9 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     },
     async markDeepenAttempt() {},
     async markDeepenComplete() {},
+    async updateIsMergeBatch(_repositoryId, entries) {
+      return { updated: entries.length };
+    },
   };
 
   return { store, state };

@@ -31,6 +31,7 @@ export interface RepositoryRow {
   slug: string;
   fullName: string;
   diffStatsEnabled: boolean;
+  archived: boolean;
 }
 
 export interface RepositoryInsertInput {
@@ -41,8 +42,14 @@ export interface RepositoryInsertInput {
   fullName: string;
   // Phase 4 T21: opt-in per-repo for /diffstat/:sha ingest. Defaults to
   // false in `tracked-repos.yaml` (plain-string entries) — only the object
-  // form `{ name: ws/slug, diffStats: true }` flips it on.
+  // form `{ name: ws/slug, diffStats: true }` flips it on. Seed-only: once
+  // the row exists, subsequent discovery syncs don't reconcile from YAML.
   diffStatsEnabled: boolean;
+  // Phase 4 follow-up: soft-retire flag. Defaults to false. Seed-only at
+  // insert time (`{ name, archived: true }` lets an operator pre-archive a
+  // newly-seeded repo). Flipped at runtime via the admin archive /
+  // unarchive endpoints, never reconciled from YAML.
+  archived: boolean;
 }
 
 export interface InsertRepositoryResult {
@@ -56,6 +63,10 @@ export interface InsertRepositoryResult {
 
 export interface DiscoveryStore {
   upsertUser(input: UserUpsertInput): Promise<UserUpsertResult>;
+  // Returns the row regardless of archived state — callers that care
+  // (admin endpoints unarchiving, manual lookup) must inspect `archived`
+  // explicitly. The commit / deepen / diff-stats tick paths use
+  // `listTrackedRepositories()` instead, which filters archived rows out.
   findRepositoryByFullName(fullName: string): Promise<RepositoryRow | null>;
   // Atomic for our purposes: inserts the repository row and the matching
   // sync_state row in the same transaction. Idempotent against UUID
@@ -63,13 +74,16 @@ export interface DiscoveryStore {
   // returned with `inserted: false` (caller treats as already-tracked).
   insertRepositoryWithSyncState(input: RepositoryInsertInput): Promise<InsertRepositoryResult>;
   // Update the diff-stats opt-in for an existing tracked repo. Used by
-  // bootstrapTrackedRepositories when a YAML entry's `diffStats` value
-  // diverges from the stored row's `diff_stats_enabled` — toggling the
-  // YAML knob re-applies at the next discovery tick.
+  // admin / scripts / manual SQL; NOT called during YAML reconciliation
+  // (YAML is seed-only — see schema.ts comments on `repositories`).
   updateRepositoryDiffStatsEnabled(repositoryId: number, enabled: boolean): Promise<void>;
-  // Enumerate the curated tracked set — every row in `repositories` is by
-  // definition tracked (untracked repos are simply absent). Used by the
-  // commit-sync cron / admin trigger to build the tick's repo list.
+  // Update the archived flag for an existing tracked repo. Used by the
+  // admin archive / unarchive endpoints.
+  updateRepositoryArchived(repositoryId: number, archived: boolean): Promise<void>;
+  // Enumerate the curated tracked set — every non-archived row in
+  // `repositories` is by definition tracked (untracked repos are simply
+  // absent; archived rows keep their data but are skipped by sync). Used
+  // by the commit-sync cron / admin trigger to build the tick's repo list.
   listTrackedRepositories(): Promise<RepositoryRow[]>;
 }
 
@@ -110,6 +124,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           slug: repositories.slug,
           fullName: repositories.fullName,
           diffStatsEnabled: repositories.diffStatsEnabled,
+          archived: repositories.archived,
         })
         .from(repositories)
         .where(eq(repositories.fullName, fullName))
@@ -131,6 +146,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             slug: repositories.slug,
             fullName: repositories.fullName,
             diffStatsEnabled: repositories.diffStatsEnabled,
+            archived: repositories.archived,
           });
         if (inserted.length > 0) {
           const row = inserted[0]!;
@@ -152,6 +168,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             slug: repositories.slug,
             fullName: repositories.fullName,
             diffStatsEnabled: repositories.diffStatsEnabled,
+            archived: repositories.archived,
           })
           .from(repositories)
           .where(eq(repositories.bitbucketUuid, input.bitbucketUuid))
@@ -166,16 +183,26 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
       await db.update(repositories).set({ diffStatsEnabled: enabled }).where(eq(repositories.id, repositoryId));
     },
 
+    async updateRepositoryArchived(repositoryId, archived) {
+      await db.update(repositories).set({ archived }).where(eq(repositories.id, repositoryId));
+    },
+
     async listTrackedRepositories() {
-      // Fair round-robin for the commit tick: order by `sync_state.last_synced_at
-      // ASC NULLS FIRST` so repos that have never been synced (cold-mode
-      // candidates) and the least-recently-synced repos come first. Without
-      // this, Postgres returns rows in insertion order — under budget
-      // pressure the early-inserted top of the list always wins and the tail
-      // is perpetually deferred. Repos are added via discovery/admin and
-      // syncState is created in the same tx (`insertRepositoryWithSyncState`),
-      // so the LEFT JOIN is defensive — every row should match. Tiebreaker on
-      // `repositories.id` keeps the order deterministic for tests.
+      // Filters archived rows so the commit / deepen / diff-stats ticks
+      // never see them — historical data stays in commits / sync_state /
+      // etc., but no BB calls are made. Operators flip the flag via the
+      // archive / unarchive admin endpoints.
+      //
+      // Fair round-robin for the commit tick: order by
+      // `sync_state.last_synced_at ASC NULLS FIRST` so repos that have
+      // never been synced (cold-mode candidates) and the least-recently-
+      // synced repos come first. Without this, Postgres returns rows in
+      // insertion order — under budget pressure the early-inserted top of
+      // the list always wins and the tail is perpetually deferred. Repos
+      // are added via discovery/admin and syncState is created in the
+      // same tx (`insertRepositoryWithSyncState`), so the LEFT JOIN is
+      // defensive — every row should match. Tiebreaker on `repositories.id`
+      // keeps the order deterministic for tests.
       return await db
         .select({
           id: repositories.id,
@@ -185,9 +212,11 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           slug: repositories.slug,
           fullName: repositories.fullName,
           diffStatsEnabled: repositories.diffStatsEnabled,
+          archived: repositories.archived,
         })
         .from(repositories)
         .leftJoin(syncState, eq(syncState.repositoryId, repositories.id))
+        .where(eq(repositories.archived, false))
         .orderBy(sql`${syncState.lastSyncedAt} ASC NULLS FIRST`, asc(repositories.id));
     },
   };

@@ -457,6 +457,7 @@ const sampleActivity: ActivityEntry[] = [
     message: 'feat: thing',
     additions: 12,
     deletions: 3,
+    isMerge: false,
     repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
     author: null,
     occurredAt: '2026-05-12T14:00:00.000Z',

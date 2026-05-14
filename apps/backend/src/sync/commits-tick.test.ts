@@ -37,6 +37,7 @@ function fakeStore(): CommitStore {
     pickRepoForDeepening: fail,
     markDeepenAttempt: fail,
     markDeepenComplete: fail,
+    updateIsMergeBatch: fail,
   };
 }
 
