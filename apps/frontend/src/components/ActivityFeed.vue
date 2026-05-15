@@ -12,7 +12,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import { MAX_ENTRIES_PER_FILTER, useActivityStore, type ActivityFilters } from '@/stores/activity';
-import type { ActivityEntry } from '@/api/client';
+import type { ActivityCommit, ActivityEntry } from '@/api/client';
+import CommitDetailModal from './CommitDetailModal.vue';
 
 const props = defineProps<{
   actor?: number;
@@ -109,6 +110,43 @@ function prBadgeClass(state: 'OPEN' | 'MERGED' | 'DECLINED' | 'SUPERSEDED'): str
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString();
 }
+
+// Commit detail modal — clicking a commit's title / sha opens a centered
+// dialog with the full message, stats, and prev/next navigation through
+// commits in the currently-loaded feed. PR entries are deliberately
+// out of scope; they have their own BB URL conventions and a different
+// detail shape.
+const commitEntries = computed<ActivityCommit[]>(() =>
+  entries.value.filter((e): e is ActivityCommit => e.kind === 'commit'),
+);
+const selectedSha = ref<string | null>(null);
+const selectedCommit = computed<ActivityCommit | null>(() => {
+  if (selectedSha.value === null) return null;
+  return commitEntries.value.find((c) => c.sha === selectedSha.value) ?? null;
+});
+const selectedIndex = computed<number>(() => {
+  if (selectedSha.value === null) return -1;
+  return commitEntries.value.findIndex((c) => c.sha === selectedSha.value);
+});
+const canPrev = computed(() => selectedIndex.value > 0);
+const canNext = computed(() => selectedIndex.value >= 0 && selectedIndex.value < commitEntries.value.length - 1);
+
+function openCommit(sha: string): void {
+  selectedSha.value = sha;
+}
+function closeModal(): void {
+  selectedSha.value = null;
+}
+function prevCommit(): void {
+  if (!canPrev.value) return;
+  const next = commitEntries.value[selectedIndex.value - 1];
+  if (next !== undefined) selectedSha.value = next.sha;
+}
+function nextCommit(): void {
+  if (!canNext.value) return;
+  const next = commitEntries.value[selectedIndex.value + 1];
+  if (next !== undefined) selectedSha.value = next.sha;
+}
 </script>
 
 <template>
@@ -154,8 +192,15 @@ function formatTime(iso: string): string {
                 {{ entry.repository.slug }}
               </RouterLink>
               <span v-if="entry.kind === 'commit'" class="text-slate-700">
-                — <span class="font-mono text-xs text-slate-500">{{ entry.sha.slice(0, 7) }}</span>
-                {{ commitTitle(entry.message) }}
+                —
+                <button
+                  type="button"
+                  class="cursor-pointer text-left hover:underline"
+                  @click="openCommit(entry.sha)"
+                >
+                  <span class="font-mono text-xs text-slate-500">{{ entry.sha.slice(0, 7) }}</span>
+                  <span class="font-medium text-slate-800">{{ commitTitle(entry.message) }}</span>
+                </button>
               </span>
               <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
             </p>
@@ -201,5 +246,15 @@ function formatTime(iso: string): string {
         No more activity.
       </p>
     </div>
+
+    <CommitDetailModal
+      v-if="selectedCommit !== null"
+      :commit="selectedCommit"
+      :can-prev="canPrev"
+      :can-next="canNext"
+      @close="closeModal"
+      @prev="prevCommit"
+      @next="nextCommit"
+    />
   </div>
 </template>

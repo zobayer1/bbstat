@@ -129,4 +129,67 @@ describe('ActivityFeed', () => {
     // the raw state token.
     expect(w.text()).toContain('MERGED');
   });
+
+  describe('commit detail modal', () => {
+    const commitA: ActivityEntry = { ...commit, sha: 'sha-a-1234567', message: 'first\nbody-a' };
+    const commitB: ActivityEntry = { ...commit, sha: 'sha-b-1234567', message: 'second' };
+    const commitC: ActivityEntry = { ...commit, sha: 'sha-c-1234567', message: 'third\nbody-c' };
+
+    it('opens with the full message + BB link when a commit row is clicked', async () => {
+      vi.mocked(api.activity).mockResolvedValueOnce([commitA]);
+
+      const w = await mountFeed();
+      await w.find('button').trigger('click');
+
+      // Full message (subject + body), not just the truncated first line.
+      expect(w.text()).toContain('first');
+      expect(w.text()).toContain('body-a');
+      // External BB link with the full sha.
+      const link = w.find('a[href^="https://bitbucket.org/"]');
+      expect(link.exists()).toBe(true);
+      expect(link.attributes('href')).toContain('sha-a-1234567');
+      expect(link.attributes('target')).toBe('_blank');
+    });
+
+    it('prev/next walks through commit-kind entries; PR rows are skipped', async () => {
+      vi.mocked(api.activity).mockResolvedValueOnce([commitA, pr, commitB, commitC]);
+
+      const w = await mountFeed();
+      // The commit-row buttons are the only buttons in the rendered list
+      // (PRs use a span). Click the first one — commitA.
+      const triggers = w.findAll('button').filter((b) => b.text().includes('first'));
+      expect(triggers).toHaveLength(1);
+      await triggers[0]!.trigger('click');
+      expect(w.text()).toContain('body-a');
+
+      // Hit Next → commitB (PR is skipped).
+      const nextBtn = w.findAll('button').find((b) => b.text().includes('Next'));
+      expect(nextBtn?.attributes('disabled')).toBeUndefined();
+      await nextBtn!.trigger('click');
+      expect(w.text()).toContain('second');
+
+      // Hit Next → commitC.
+      const nextBtn2 = w.findAll('button').find((b) => b.text().includes('Next'));
+      await nextBtn2!.trigger('click');
+      expect(w.text()).toContain('body-c');
+
+      // At the last commit, Next is disabled.
+      const finalNext = w.findAll('button').find((b) => b.text().includes('Next'));
+      expect(finalNext?.attributes('disabled')).toBeDefined();
+    });
+
+    it('Esc keypress closes the modal', async () => {
+      vi.mocked(api.activity).mockResolvedValueOnce([commitA]);
+
+      const w = await mountFeed();
+      await w.find('button').trigger('click');
+      expect(w.text()).toContain('body-a');
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await flushPromises();
+
+      // After close, the modal-only content is gone.
+      expect(w.text()).not.toContain('body-a');
+    });
+  });
 });
