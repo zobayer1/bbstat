@@ -38,6 +38,10 @@ function unreachableStore(): CommitStore {
     markDeepenAttempt: fail,
     markDeepenComplete: fail,
     updateIsMergeBatch: fail,
+    pickRepoForIsMergeBackfill: fail,
+    markIsMergeBackfillAttempt: fail,
+    advanceIsMergeBackfillCursor: fail,
+    markIsMergeBackfillComplete: fail,
   };
 }
 

@@ -104,6 +104,19 @@ const envSchema = z.object({
   DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
   DIFF_STATS_BACKFILL_CONCURRENCY: z.coerce.number().int().positive().default(1),
 
+  // Retroactive is_merge backfill tick. Drains the pre-V1_7 backlog of
+  // `commits.is_merge = false` rows that should have been true (the
+  // migration set the default to false on every already-ingested row).
+  // Runs after deepen and before diff-stats backfill, sharing the same
+  // hourly call budget. MAX_PAGES caps per-repo per-tick work the same
+  // way deepen does. BUDGET_THRESHOLD sits between deepen's (100) and
+  // diff-stats backfill's (20): is-merge gets first crack at the
+  // leftover budget after deepen, but yields to deepen which is the
+  // higher priority (extending unknown history > correcting known
+  // rows).
+  IS_MERGE_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
+  IS_MERGE_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(50),
+
   // Phase 4 T22: PR ingest. Runs on its own cron (default hourly — PRs
   // mutate slower than commits, and at 160-repo scale every PR tick is
   // ~160 BB calls, so spending 30 min cadence on a low-PR-traffic

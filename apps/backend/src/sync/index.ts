@@ -13,6 +13,7 @@ import {
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
   diffStatsBackfillOptionsFromConfig,
+  isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
   runCommitsSync,
   runMembersSync,
@@ -62,6 +63,7 @@ async function main(): Promise<void> {
   const commitTickOptions = commitTickOptionsFromConfig(config);
   const prTickOptions = prTickOptionsFromConfig(config);
   const deepenOptions = deepenOptionsFromConfig(config);
+  const isMergeBackfillOptions = isMergeBackfillOptionsFromConfig(config);
   const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
   const backoffOptions = backoffOptionsFromConfig(config);
 
@@ -78,6 +80,7 @@ async function main(): Promise<void> {
     prStore,
     prTickOptions,
     deepenOptions,
+    isMergeBackfillOptions,
     diffStatsBackfillOptions,
     backoffOptions,
   };
@@ -114,6 +117,7 @@ async function main(): Promise<void> {
       commitTickOptions,
       prTickOptions,
       deepenOptions,
+      isMergeBackfillOptions,
       diffStatsBackfillOptions,
       backoffOptions,
       seedCount: initialSeeds.length,

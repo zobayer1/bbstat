@@ -274,12 +274,12 @@ All four converge on `runSync()`-style functions in
 `apps/backend/src/sync/runner.ts` and share the same dedupe / idempotency /
 store contracts:
 
-| Function              | Cron default   | What it does                                                                                                                          |
-| --------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `runMembersSync`      | `*/10 * * * *` | Workspace members → `users`                                                                                                           |
-| `runReposSync`        | `*/5 * * * *`  | Curated tracked-repo bootstrap → `repositories` (initial seed only)                                                                   |
-| `runCommitsSync`      | `*/5 * * * *`  | Per-repo commit delta pull (with inline-eager /diffstat for new commits) → deepen-backfill tick → diff-stats backfill tick. See below |
-| `runPullRequestsSync` | `0 * * * *`    | Per-repo PR delta pull across all four BB states                                                                                      |
+| Function              | Cron default   | What it does                                                                                                                                                   |
+| --------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runMembersSync`      | `*/10 * * * *` | Workspace members → `users`                                                                                                                                    |
+| `runReposSync`        | `*/5 * * * *`  | Curated tracked-repo bootstrap → `repositories` (initial seed only)                                                                                            |
+| `runCommitsSync`      | `*/5 * * * *`  | Per-repo commit delta pull (with inline-eager /diffstat for new commits) → deepen-backfill tick → is_merge backfill tick → diff-stats backfill tick. See below |
+| `runPullRequestsSync` | `0 * * * *`    | Per-repo PR delta pull across all four BB states                                                                                                               |
 
 `make dev-sync` runs the cron host. The HTTPS API (`make dev-backend`) does
 **not** schedule any cron — they're deliberately separate processes, so
@@ -540,6 +540,55 @@ levers are:
 The deepen tick is fully self-balancing: tune any of those knobs and
 throughput adjusts without code changes.
 
+## Retroactive is_merge backfill
+
+`commits.is_merge` was added in migration V1_7 with `DEFAULT false`, so
+every row inserted before that migration is stuck at false regardless
+of BB's actual `parents.length`. New commits land with the correct
+value (both the forward sync in `commits.ts` and the deepen walk in
+`deepen-backfill.ts` read `parents.length > 1` at insert time), so the
+backfill exists purely to drain the pre-V1_7 backlog. Once drained,
+the tick is a single `SELECT` per cron that returns `queue-empty` and
+exits.
+
+Drain state lives on `sync_state`:
+
+- `is_merge_backfill_complete BOOLEAN` — true once we've verified
+  every commit BB has for the repo. Filters the repo out of the
+  candidate query.
+- `is_merge_backfill_cursor_sha TEXT` — oldest sha verified so far.
+  NULL = start from newest (no `include` filter); set = resume from
+  `include=<cursorSha>` on the next walk, skipping the seed sha
+  itself (we verified it last tick).
+- `is_merge_last_run_at TIMESTAMPTZ` — round-robin rotation, same
+  pattern as `deepen_last_run_at`.
+
+Per tick, per repo: pick (round-robin) → walk up to
+`IS_MERGE_BACKFILL_MAX_PAGES × 100` commits → bulk-`UPDATE` via
+`updateIsMergeBatch` (which uses `IS DISTINCT FROM` to no-op rows
+already correct) → either flip the flag (paginator exhausted) or
+advance the cursor (page cap fired). Failure handling mirrors
+deepen-backfill: 404 on cursor sha → mark complete with `seedMissing`
+(force-pushed history, give up); `BitbucketRateLimitError` → tick-wide
+stop, repo stays incomplete for the next cron; transient error →
+empty result + log, round-robin moves on.
+
+The tick slots **between deepen and diff-stats backfill** in
+`runCommitsSync`: per-commit merge correctness gates every
+merge-excluding aggregate, so it has priority over filling in
+additions/deletions on additional repos. `IS_MERGE_BACKFILL_BUDGET_THRESHOLD`
+(default 50) sits between deepen's (100) and diff-stats backfill's (20)
+— is-merge gets first crack at the leftover budget after deepen, but
+yields to deepen which is the higher priority (extending unknown
+history beats correcting known rows). The diff-stats auto-opt-in
+extra-checks that `isMergeBackfill.stoppedReason === 'queue-empty'`
+before promoting another repo.
+
+For one-shot operator use, the admin endpoint
+`POST /repositories/:ws/:slug/backfill/is_merge` still walks the
+entire repo in a single request without the cursor — useful for
+forcing a specific repo's verification ahead of the natural rotation.
+
 ## Diff-stat ingest (opt-in, Phase 4)
 
 Per-commit `additions` / `deletions` / `files_changed` aren't populated
@@ -634,7 +683,7 @@ range.
 
 ## Tick execution order
 
-The five tick-level orchestrators inside `runCommitsSync` execute in a
+The tick-level orchestrators inside `runCommitsSync` execute in a
 deterministic order, all sharing the same hourly BB-call budget. The
 shape below shows one cron firing end-to-end — useful when reading a
 log line back-to-front:
@@ -673,6 +722,17 @@ runCommitsSync()
 │      inserts older commits (diff_stats_synced_at = NULL),
 │      stamps deepen_complete = true if reached root
 │
+├─ runIsMergeBackfillTick()                     ← drains the pre-V1_7
+│   is_merge backlog. Iterates incomplete repos
+│   (is_merge_backfill_complete=false, round-robin
+│   on is_merge_last_run_at). Per repo:
+│   ├─ if budget < IS_MERGE_BACKFILL_BUDGET_THRESHOLD: return
+│   ├─ walk /commits — newest-first if cursor=NULL,
+│   │  else include=<cursorSha> (skip seed sha)
+│   ├─ updateIsMergeBatch(repo, [{sha, isMerge}, …])
+│   └─ paginator exhausted → mark complete
+│      page cap fired → advance cursor to oldest walked sha
+│
 └─ runDiffStatsBackfillTick(handles)            ← FULL opted-in list,
                                                   ignores Layer 5 backoff
    for each opted-in repo, concurrent ≤ DIFF_STATS_BACKFILL_CONCURRENCY:
@@ -692,17 +752,24 @@ A few invariants worth naming:
   runs at the end of the cron, those just-inserted rows are already
   stamped and won't appear in the pickup. The backfill is strictly the
   catch-up path for historical and retry work.
-- **Three independent budget gates, one ledger.** `COMMIT_SYNC_BUDGET_THRESHOLD`
-  (default 20), `DEEPEN_BUDGET_THRESHOLD` (default 100), and
+- **Four independent budget gates, one ledger.** `COMMIT_SYNC_BUDGET_THRESHOLD`
+  (default 20), `DEEPEN_BUDGET_THRESHOLD` (default 100),
+  `IS_MERGE_BACKFILL_BUDGET_THRESHOLD` (default 50), and
   `DIFF_STATS_BACKFILL_BUDGET_THRESHOLD` (default 20) each yield at a
   different point. Higher thresholds = more reserved headroom = lower
   priority. Deepen yields first (high threshold) so an aggressive
-  commit-sync tick doesn't starve forward freshness; diff-stats
-  backfill runs last and uses whatever slack survives.
-- **Layer 5 only affects forward delta sync.** Deepen has its own queue
-  (`pickRepoForDeepening`); diff-stats backfill iterates the unfiltered
-  opted-in list. A repo backed off for delta sync still gets historical
-  deepen + diff-stats backfill on every tick.
+  commit-sync tick doesn't starve forward freshness; is-merge gets the
+  next crack at leftover budget; diff-stats backfill runs last and
+  uses whatever slack survives.
+- **Layer 5 only affects forward delta sync.** Deepen, is-merge
+  backfill, and diff-stats backfill each iterate their own queue; a
+  repo backed off for delta sync still gets historical work on every
+  tick.
+- **Auto-opt-in is gated on two drains.** The diff-stats self-paced
+  rollout fires only when the diff-stats backfill drains cleanly AND
+  the is-merge backfill reports `queue-empty`. Opting another repo
+  into diff-stats while is_merge correctness is still in flight
+  would let merge-inflated rows leak into per-day aggregates.
 - **Idempotent at every step.** Re-running a tick (manual + cron racing,
   or a retry after a partial failure) converges: insertCommits dedupes
   on `(repository_id, sha)`, diff-stat fetches no-op on rows already

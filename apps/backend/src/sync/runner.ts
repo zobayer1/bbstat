@@ -20,6 +20,11 @@ import { runCommitsTick } from './commits-tick.js';
 import { syncRepositoryCommits } from './commits.js';
 import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
 import { runDiffStatsBackfillTick, type DiffStatsBackfillTickResult } from './diff-stats-tick.js';
+import {
+  runIsMergeBackfillTick,
+  type IsMergeBackfillOptions,
+  type IsMergeBackfillTickResult,
+} from './is-merge-tick.js';
 import { runPullRequestsTick } from './pr-tick.js';
 import { withRollupRecompute } from '../dashboard/rollup-hook.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
@@ -68,6 +73,11 @@ export interface SyncRunnerDeps {
   // care about delta sync), the piggyback step inside runCommitsSync is
   // a no-op. All runtime entrypoints wire it.
   deepenOptions?: { maxPages: number; budgetThreshold: number };
+  // Retroactive is_merge backfill that runs between deepen and diff-stats
+  // backfill. When omitted, the step is skipped — pre-V1_7 commits keep
+  // their stale `is_merge = false` value until an operator runs the
+  // admin endpoint. All runtime entrypoints wire this in production.
+  isMergeBackfillOptions?: IsMergeBackfillOptions;
   // Diff-stats backfill tick that runs after deepen. When omitted, the
   // backfill step is skipped — inline-eager forward fetch inside the
   // commit sync still runs, but pending commits from past ticks won't
@@ -121,6 +131,12 @@ export interface CommitsSyncResult extends BaseResult {
   // results from this tick (zero or more) plus a stoppedReason indicating
   // whether the budget gate fired or the queue drained.
   deepen: DeepenTickResult | null;
+  // Retroactive is_merge backfill outcome. Null when the step is
+  // disabled (isMergeBackfillOptions not wired). When present and
+  // `stoppedReason === 'queue-empty'`, every tracked repo's
+  // is_merge backfill is complete — the diff-stats auto-opt-in gate
+  // additionally requires this signal to be true.
+  isMergeBackfill: IsMergeBackfillTickResult | null;
   // Phase 5 prep: diff-stats backfill tick that runs after deepen. Null
   // when the step is disabled (diffStatsBackfillOptions not wired).
   diffStatsBackfill: DiffStatsBackfillTickResult | null;
@@ -277,6 +293,31 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
+  // Retroactive is_merge backfill — runs between deepen and diff-stats
+  // backfill so per-commit merge correctness lands before any
+  // merge-excluding aggregate consumes the row. Drains the pre-V1_7
+  // backlog of stuck-false is_merge values; once every repo's flag
+  // converges this tick is a single SELECT and exits with 'queue-empty'.
+  // Errors here never abort the commit-sync result.
+  let isMergeBackfill: IsMergeBackfillTickResult | null = null;
+  if (deps.isMergeBackfillOptions !== undefined) {
+    try {
+      isMergeBackfill = await runIsMergeBackfillTick(
+        {
+          client: deps.client,
+          store: deps.commitStore,
+          logger: deps.logger,
+        },
+        deps.isMergeBackfillOptions,
+      );
+    } catch (err) {
+      deps.logger.warn?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        'is-merge backfill: tick failed — delta + deepen still successful',
+      );
+    }
+  }
+
   // Diff-stats backfill tick — runs after deepen so it consumes whatever
   // budget is left over. Inline-eager fetch inside the commit sync
   // already covers stats for commits that landed in this tick; this step
@@ -306,16 +347,18 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Self-paced diff-stats rollout. Fires only when the backfill tick
-  // ran AND drained the queue cleanly — every opted-in repo was walked
-  // (no budget / rate-limit cutoff), every walked repo had zero pending
-  // work, and no per-repo errors occurred. The natural drain time of
-  // the newly-opted-in repo's history paces the rollout: a busy repo
+  // Self-paced diff-stats rollout. Fires only when the diff-stats
+  // backfill drained cleanly AND the retroactive is_merge backfill
+  // also reports queue-empty. Both gates matter: opting another repo
+  // into diff-stats while is_merge correctness is still in flight
+  // would let merge-inflated rows leak into the per-day aggregates
+  // before they get corrected. The natural drain time of the
+  // newly-opted-in repo's history paces the rollout: a busy repo
   // with thousands of pending commits blocks the next auto-opt for
   // many ticks; an empty repo opts in immediately and the rollout
   // proceeds one repo per cron tick until the pool exhausts.
   //
-  // The four-condition gate is load-bearing — an earlier revision
+  // The diff-stats gate is intentionally strict — an earlier revision
   // checked totals reduced over `attempted[]`, but the orchestrator
   // (a) suppresses fully-drained repos from `attempted[]` (zero-update
   // entries are noise) and (b) parks budget-/rate-limit-gated repos
@@ -330,7 +373,9 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     diffStatsBackfill.stopReason === null &&
     diffStatsBackfill.deferred.length === 0 &&
     diffStatsBackfill.attempted.length === 0 &&
-    diffStatsBackfill.errors.length === 0
+    diffStatsBackfill.errors.length === 0 &&
+    isMergeBackfill !== null &&
+    isMergeBackfill.stoppedReason === 'queue-empty'
   ) {
     try {
       const candidate = await deps.store.findNextDiffStatsCandidate();
@@ -349,7 +394,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
 
   const finishedAt = new Date().toISOString();
   deps.logger.info?.(
-    { trigger, ...summary, deepen, diffStatsBackfill, diffStatsAutoOptIn, startedAt, finishedAt },
+    { trigger, ...summary, deepen, isMergeBackfill, diffStatsBackfill, diffStatsAutoOptIn, startedAt, finishedAt },
     'commit sync complete',
   );
 
@@ -358,6 +403,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     startedAt,
     finishedAt,
     deepen,
+    isMergeBackfill,
     diffStatsBackfill,
     diffStatsAutoOptIn,
     commits: summary,
@@ -471,6 +517,13 @@ export function diffStatsBackfillOptionsFromConfig(config: AppConfig): DiffStats
     maxPerRepoPerTick: config.DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK,
     budgetThreshold: config.DIFF_STATS_BACKFILL_BUDGET_THRESHOLD,
     concurrency: config.DIFF_STATS_BACKFILL_CONCURRENCY,
+  };
+}
+
+export function isMergeBackfillOptionsFromConfig(config: AppConfig): IsMergeBackfillOptions {
+  return {
+    maxPages: config.IS_MERGE_BACKFILL_MAX_PAGES,
+    budgetThreshold: config.IS_MERGE_BACKFILL_BUDGET_THRESHOLD,
   };
 }
 

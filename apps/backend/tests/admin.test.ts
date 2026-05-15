@@ -45,6 +45,8 @@ const testConfig: AppConfig = {
   SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY: 4,
   SYNC_BACKOFF_MIN_INTERVAL_MIN: 5,
   SYNC_BACKOFF_MAX_INTERVAL_MIN: 1440,
+  IS_MERGE_BACKFILL_MAX_PAGES: 5,
+  IS_MERGE_BACKFILL_BUDGET_THRESHOLD: 50,
 };
 
 // Discovery-flow admin tests don't exercise commit-sync. Provide a CommitStore
@@ -68,6 +70,10 @@ function noopCommitStore(): CommitStore {
     markDeepenAttempt: fail,
     markDeepenComplete: fail,
     updateIsMergeBatch: fail,
+    pickRepoForIsMergeBackfill: fail,
+    markIsMergeBackfillAttempt: fail,
+    advanceIsMergeBackfillCursor: fail,
+    markIsMergeBackfillComplete: fail,
   };
 }
 
@@ -219,6 +225,14 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
       state.isMergeBackfillCalls.push({ repositoryId, entries });
       return { updated: entries.length };
     },
+    async pickRepoForIsMergeBackfill() {
+      // No-op default; the is-merge tick treats this as queue-empty.
+      // Dedicated tests can override per-suite if needed.
+      return null;
+    },
+    async markIsMergeBackfillAttempt() {},
+    async advanceIsMergeBackfillCursor() {},
+    async markIsMergeBackfillComplete() {},
   };
   return { store, state };
 }

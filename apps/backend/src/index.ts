@@ -14,6 +14,7 @@ import {
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
   diffStatsBackfillOptionsFromConfig,
+  isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
 } from './sync/runner.js';
 import { createCache } from './cache/redis.js';
@@ -87,6 +88,7 @@ async function main(): Promise<void> {
       prStore,
       prTickOptions: prTickOptionsFromConfig(config),
       deepenOptions: deepenOptionsFromConfig(config),
+      isMergeBackfillOptions: isMergeBackfillOptionsFromConfig(config),
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
     };

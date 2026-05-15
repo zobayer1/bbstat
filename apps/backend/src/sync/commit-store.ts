@@ -128,6 +128,30 @@ export interface CommitStore {
     repositoryId: number,
     entries: Array<{ sha: string; isMerge: boolean }>,
   ): Promise<{ updated: number }>;
+
+  // Retroactive is_merge backfill queue. Picks the next incomplete repo
+  // (`is_merge_backfill_complete = false`), round-robin by
+  // `is_merge_last_run_at ASC NULLS FIRST`. Returns the resume cursor
+  // alongside repo identity. Null when every tracked non-archived
+  // non-excluded repo is complete.
+  pickRepoForIsMergeBackfill(): Promise<IsMergeBackfillCandidate | null>;
+
+  // Bumps `is_merge_last_run_at = now()` without touching cursor or
+  // complete flag. Mirrors `markDeepenAttempt` — called once per pick
+  // so the round-robin advances even when the tick is a no-op (e.g.,
+  // budget gate fires before any walking).
+  markIsMergeBackfillAttempt(repositoryId: number): Promise<void>;
+
+  // Advances `is_merge_backfill_cursor_sha` to the oldest sha we
+  // verified on this tick (the per-tick page cap fired and more
+  // history remains). Doesn't touch the complete flag.
+  advanceIsMergeBackfillCursor(repositoryId: number, cursorSha: string): Promise<void>;
+
+  // Flips `is_merge_backfill_complete = true`. Called when the
+  // paginator exhausted without hitting the page cap (verified every
+  // commit BB has) or when the cursor sha 404's (force-pushed history
+  // — give up, mirrors deepen seedMissing).
+  markIsMergeBackfillComplete(repositoryId: number): Promise<void>;
 }
 
 export interface DeepenCandidate {
@@ -139,6 +163,18 @@ export interface DeepenCandidate {
   // the repo has zero commits ingested — caller treats as
   // "nothing to deepen yet; cold mode hasn't run".
   oldestSha: string | null;
+}
+
+export interface IsMergeBackfillCandidate {
+  repositoryId: number;
+  workspace: string;
+  slug: string;
+  fullName: string;
+  // Resume cursor: oldest sha previously verified by this backfill.
+  // NULL = cold (start from newest, no `include` filter on the walk).
+  // Set = `include=<cursorSha>` on the next walk, then skip the seed
+  // sha (we've already verified it).
+  cursorSha: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +341,68 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
       await db
         .update(syncState)
         .set({ deepenComplete: true, deepenLastRunAt: now, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async pickRepoForIsMergeBackfill() {
+      // Mirrors pickRepoForDeepening shape: one round-trip, JOIN
+      // repositories so the orchestrator gets workspace/slug for the BB
+      // walk, ORDER BY last_run_at NULLS FIRST for round-robin. Filters
+      // archived + sync_excluded so retired/broken repos don't keep
+      // surfacing.
+      const rows = await db.execute<{
+        repository_id: number;
+        workspace: string;
+        slug: string;
+        full_name: string;
+        cursor_sha: string | null;
+      }>(sql`
+        SELECT
+          s.repository_id,
+          r.workspace,
+          r.slug,
+          r.full_name,
+          s.is_merge_backfill_cursor_sha AS cursor_sha
+        FROM sync_state s
+        JOIN repositories r ON r.id = s.repository_id
+        WHERE s.is_merge_backfill_complete = false
+          AND r.archived = false
+          AND r.sync_excluded = false
+        ORDER BY s.is_merge_last_run_at ASC NULLS FIRST, s.repository_id ASC
+        LIMIT 1
+      `);
+      const row = rows.rows[0];
+      if (row === undefined) return null;
+      return {
+        repositoryId: row.repository_id,
+        workspace: row.workspace,
+        slug: row.slug,
+        fullName: row.full_name,
+        cursorSha: row.cursor_sha,
+      };
+    },
+
+    async markIsMergeBackfillAttempt(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ isMergeLastRunAt: now, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async advanceIsMergeBackfillCursor(repositoryId, cursorSha) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ isMergeBackfillCursorSha: cursorSha, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async markIsMergeBackfillComplete(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ isMergeBackfillComplete: true, isMergeLastRunAt: now, updatedAt: now })
         .where(eq(syncState.repositoryId, repositoryId));
     },
 

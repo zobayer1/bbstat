@@ -54,6 +54,16 @@ export const users = pgTable('users', {
 // runtime via POST /repositories/:ws/:slug/archive (or unarchive). No
 // cascade — commits / sync_state stay intact so the data is still
 // available for dashboards and historical queries.
+//
+// `sync_excluded` — same effect as `archived` (filtered out of every
+// sync tick), but written by the sync layer itself when it detects a
+// permanently-broken state: a 404 on the commits endpoint (the repo
+// was renamed or deleted upstream), or an empty repo whose
+// `deepen_complete = true` arrived with `total_commits_synced = 0`.
+// Distinct column from `archived` so the UI can surface
+// "needs attention" separately from operator-initiated retirement,
+// and so a future admin recovery action (re-resolve / merge canonical
+// row) has a dedicated lifecycle to attach to.
 export const repositories = pgTable('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
@@ -63,6 +73,7 @@ export const repositories = pgTable('repositories', {
   fullName: text('full_name').notNull(),
   diffStatsEnabled: boolean('diff_stats_enabled').notNull().default(false),
   archived: boolean('archived').notNull().default(false),
+  syncExcluded: boolean('sync_excluded').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -235,6 +246,26 @@ export const syncState = pgTable('sync_state', {
   // sync_state on each tick.
   deepenComplete: boolean('deepen_complete').notNull().default(false),
   deepenLastRunAt: timestamp('deepen_last_run_at', { withTimezone: true }),
+  // Retroactive `is_merge` backfill state. The `commits.is_merge` column
+  // was added in migration V1_7 with DEFAULT false, so rows inserted
+  // before that migration are stuck at false regardless of BB's actual
+  // `parents.length`. New commits land with the correct value (both the
+  // forward sync in commits.ts and the deepen-backfill walk in
+  // deepen-backfill.ts read parents at insert time), so this state
+  // exists purely to drain the pre-V1_7 backlog. The is-merge backfill
+  // tick walks BB `/commits` newest-first, resuming from
+  // `is_merge_backfill_cursor_sha` (NULL = start from newest), and
+  // bulk-UPDATEs is_merge by sha via `updateIsMergeBatch`. When the
+  // paginator exhausts without hitting the per-tick page cap, the
+  // backfill is complete and `is_merge_backfill_complete` flips to
+  // true; the repo drops out of the queue. Round-robin rotation via
+  // `is_merge_last_run_at` mirrors the deepen worker. New repos enter
+  // with `is_merge_backfill_complete = false` and converge after one
+  // pass (every walked row already has the correct value, so
+  // `updateIsMergeBatch` is a no-op).
+  isMergeBackfillComplete: boolean('is_merge_backfill_complete').notNull().default(false),
+  isMergeBackfillCursorSha: text('is_merge_backfill_cursor_sha'),
+  isMergeLastRunAt: timestamp('is_merge_last_run_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

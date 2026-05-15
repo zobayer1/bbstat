@@ -83,6 +83,10 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     async updateIsMergeBatch(_repositoryId, entries) {
       return { updated: entries.length };
     },
+    pickRepoForIsMergeBackfill: unreachable as () => Promise<null>,
+    markIsMergeBackfillAttempt: unreachable as () => Promise<void>,
+    advanceIsMergeBackfillCursor: unreachable as () => Promise<void>,
+    markIsMergeBackfillComplete: unreachable as () => Promise<void>,
   };
   return { store, state };
 }

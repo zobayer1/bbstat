@@ -56,6 +56,8 @@ const testConfig: AppConfig = {
   SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY: 4,
   SYNC_BACKOFF_MIN_INTERVAL_MIN: 5,
   SYNC_BACKOFF_MAX_INTERVAL_MIN: 1440,
+  IS_MERGE_BACKFILL_MAX_PAGES: 5,
+  IS_MERGE_BACKFILL_BUDGET_THRESHOLD: 50,
 };
 
 function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
