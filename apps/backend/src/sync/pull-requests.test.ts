@@ -78,7 +78,14 @@ function createFakePrStore(seed?: { state?: PrSyncStateRow[]; users?: Array<[str
 }
 
 function makeRepo(repositoryId: number, slug = 'boing-server'): RepositoryHandle {
-  return { repositoryId, workspace: 'tigerit', slug, fullName: `tigerit/${slug}`, diffStatsEnabled: false };
+  return {
+    repositoryId,
+    workspace: 'tigerit',
+    slug,
+    fullName: `tigerit/${slug}`,
+    diffStatsEnabled: false,
+    diffStatsExcludePatterns: [],
+  };
 }
 
 function makePrStateRow(repositoryId: number, cursor?: { updatedAt: Date; prId: number }): PrSyncStateRow {

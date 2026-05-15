@@ -5,7 +5,7 @@
 // The Drizzle-backed implementation at the bottom of this file is what gets
 // wired up in the runtime (sync runner, admin endpoints).
 
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { repositories, syncState, users } from '../db/schema.js';
 
@@ -32,6 +32,16 @@ export interface RepositoryRow {
   fullName: string;
   diffStatsEnabled: boolean;
   archived: boolean;
+  // True when an auto-trip detected a permanently-broken state and
+  // pulled the repo out of sync. See schema.ts for the allowed
+  // `syncExcludeReason` values.
+  syncExcluded: boolean;
+  syncExcludeReason: string | null;
+  // Per-repo blacklist of file-path globs (picomatch syntax). Empty
+  // array = no filtering. Edited via the admin PUT endpoint; the
+  // POST /diff-stats/reset endpoint re-applies the filter to
+  // already-ingested commits.
+  diffStatsExcludePatterns: string[];
 }
 
 // Richer row used by the sync runners to decide which repos are due
@@ -95,9 +105,40 @@ export interface DiscoveryStore {
   // admin / scripts / manual SQL; NOT called during YAML reconciliation
   // (YAML is seed-only — see schema.ts comments on `repositories`).
   updateRepositoryDiffStatsEnabled(repositoryId: number, enabled: boolean): Promise<void>;
+
+  // Replace (not merge) the diff-stat exclude-pattern list for a repo.
+  // Called by the admin PUT endpoint after validation. Cheap UPDATE —
+  // does NOT trigger a recount; the operator runs POST
+  // /diff-stats/reset separately when ready to apply the new filter
+  // to already-ingested commits.
+  updateRepositoryExcludePatterns(repositoryId: number, patterns: string[]): Promise<void>;
   // Update the archived flag for an existing tracked repo. Used by the
   // admin archive / unarchive endpoints.
   updateRepositoryArchived(repositoryId: number, archived: boolean): Promise<void>;
+
+  // Auto-trip helper. Called by the sync paths (commits.ts on BB 404
+  // or history-rewrite detection, deepen-backfill.ts on empty-on-bb)
+  // and by the admin /include endpoint (`excluded=false, reason=null`).
+  // Reason MUST be non-null when excluded=true so the UI can render
+  // the cause; pass null when clearing the flag.
+  updateRepositorySyncExcluded(repositoryId: number, excluded: boolean, reason: string | null): Promise<void>;
+
+  // Operator-driven rename. Called by POST /repositories/:ws/:slug/rename
+  // after the caller has fetched the new BB metadata and verified the
+  // bitbucket_uuid still matches our row. Updates workspace / slug /
+  // full_name / project. NEVER touches bitbucket_uuid — that's the
+  // load-bearing identity. Idempotent.
+  updateRepositoryRename(
+    repositoryId: number,
+    input: { workspace: string; slug: string; fullName: string; project: string | null },
+  ): Promise<void>;
+
+  // Hard delete. Cascade via FKs removes commits / sync_state / branches
+  // / pull_requests for the repo. Used by DELETE /repositories/:ws/:slug
+  // when soft-retire (archive) is insufficient and the operator wants
+  // the row + all history gone. Returns the number of rows deleted
+  // (0 or 1).
+  deleteRepository(repositoryId: number): Promise<number>;
   // Enumerate the curated tracked set — every non-archived row in
   // `repositories` is by definition tracked (untracked repos are simply
   // absent; archived rows keep their data but are skipped by sync). Used
@@ -163,6 +204,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           fullName: repositories.fullName,
           diffStatsEnabled: repositories.diffStatsEnabled,
           archived: repositories.archived,
+          syncExcluded: repositories.syncExcluded,
+          syncExcludeReason: repositories.syncExcludeReason,
+          diffStatsExcludePatterns: repositories.diffStatsExcludePatterns,
         })
         .from(repositories)
         .where(eq(repositories.fullName, fullName))
@@ -185,6 +229,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             fullName: repositories.fullName,
             diffStatsEnabled: repositories.diffStatsEnabled,
             archived: repositories.archived,
+            syncExcluded: repositories.syncExcluded,
+            syncExcludeReason: repositories.syncExcludeReason,
+            diffStatsExcludePatterns: repositories.diffStatsExcludePatterns,
           });
         if (inserted.length > 0) {
           const row = inserted[0]!;
@@ -207,6 +254,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             fullName: repositories.fullName,
             diffStatsEnabled: repositories.diffStatsEnabled,
             archived: repositories.archived,
+            syncExcluded: repositories.syncExcluded,
+            syncExcludeReason: repositories.syncExcludeReason,
+            diffStatsExcludePatterns: repositories.diffStatsExcludePatterns,
           })
           .from(repositories)
           .where(eq(repositories.bitbucketUuid, input.bitbucketUuid))
@@ -229,7 +279,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           SELECT repository_id, MAX(authored_at) AS authored_at
           FROM commits GROUP BY repository_id
         ) latest ON latest.repository_id = r.id
-        WHERE r.diff_stats_enabled = false AND r.archived = false
+        WHERE r.diff_stats_enabled = false
+          AND r.archived = false
+          AND r.sync_excluded = false
         ORDER BY latest.authored_at DESC NULLS LAST, r.id ASC
         LIMIT 1
       `);
@@ -241,8 +293,39 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
       await db.update(repositories).set({ diffStatsEnabled: enabled }).where(eq(repositories.id, repositoryId));
     },
 
+    async updateRepositoryExcludePatterns(repositoryId, patterns) {
+      await db
+        .update(repositories)
+        .set({ diffStatsExcludePatterns: patterns })
+        .where(eq(repositories.id, repositoryId));
+    },
+
     async updateRepositoryArchived(repositoryId, archived) {
       await db.update(repositories).set({ archived }).where(eq(repositories.id, repositoryId));
+    },
+
+    async updateRepositorySyncExcluded(repositoryId, excluded, reason) {
+      await db
+        .update(repositories)
+        .set({ syncExcluded: excluded, syncExcludeReason: reason })
+        .where(eq(repositories.id, repositoryId));
+    },
+
+    async updateRepositoryRename(repositoryId, input) {
+      await db
+        .update(repositories)
+        .set({
+          workspace: input.workspace,
+          slug: input.slug,
+          fullName: input.fullName,
+          project: input.project,
+        })
+        .where(eq(repositories.id, repositoryId));
+    },
+
+    async deleteRepository(repositoryId) {
+      const result = await db.delete(repositories).where(eq(repositories.id, repositoryId));
+      return result.rowCount ?? 0;
     },
 
     async listRepositoriesForSync() {
@@ -261,6 +344,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         full_name: string;
         diff_stats_enabled: boolean;
         archived: boolean;
+        sync_excluded: boolean;
+        sync_exclude_reason: string | null;
+        diff_stats_exclude_patterns: string[];
         last_synced_at: Date | string | null;
         pr_last_synced_at: Date | string | null;
         latest_commit_at: Date | string | null;
@@ -276,6 +362,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           r.full_name,
           r.diff_stats_enabled,
           r.archived,
+          r.sync_excluded,
+          r.sync_exclude_reason,
+          r.diff_stats_exclude_patterns,
           r.created_at,
           s.last_synced_at,
           s.pr_last_synced_at,
@@ -291,7 +380,7 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           SELECT repository_id, MAX(bitbucket_updated_at) AS updated_at
           FROM pull_requests GROUP BY repository_id
         ) latest_pr ON latest_pr.repository_id = r.id
-        WHERE r.archived = false
+        WHERE r.archived = false AND r.sync_excluded = false
         ORDER BY s.last_synced_at ASC NULLS FIRST, r.id ASC
       `);
       const toDate = (v: Date | string | null): Date | null =>
@@ -306,6 +395,9 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         fullName: r.full_name,
         diffStatsEnabled: r.diff_stats_enabled,
         archived: r.archived,
+        syncExcluded: r.sync_excluded,
+        syncExcludeReason: r.sync_exclude_reason,
+        diffStatsExcludePatterns: r.diff_stats_exclude_patterns,
         lastSyncedAt: toDate(r.last_synced_at),
         prLastSyncedAt: toDate(r.pr_last_synced_at),
         latestCommitAt: toDate(r.latest_commit_at),
@@ -340,10 +432,13 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           fullName: repositories.fullName,
           diffStatsEnabled: repositories.diffStatsEnabled,
           archived: repositories.archived,
+          syncExcluded: repositories.syncExcluded,
+          syncExcludeReason: repositories.syncExcludeReason,
+          diffStatsExcludePatterns: repositories.diffStatsExcludePatterns,
         })
         .from(repositories)
         .leftJoin(syncState, eq(syncState.repositoryId, repositories.id))
-        .where(eq(repositories.archived, false))
+        .where(and(eq(repositories.archived, false), eq(repositories.syncExcluded, false)))
         .orderBy(sql`${syncState.lastSyncedAt} ASC NULLS FIRST`, asc(repositories.id));
     },
   };

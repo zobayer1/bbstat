@@ -93,6 +93,17 @@ describe('ActivityFeed', () => {
     expect(w.text()).not.toContain('more details');
   });
 
+  it('renders the short sha (first 7 chars) on commit entries', async () => {
+    vi.mocked(api.activity).mockResolvedValueOnce([commit]);
+
+    const w = await mountFeed();
+
+    // sha = 'sha-abcdef' (10 chars) → short = 'sha-abc'.
+    expect(w.text()).toContain('sha-abc');
+    // The full sha shouldn't leak into the rendered text.
+    expect(w.text()).not.toContain('sha-abcdef');
+  });
+
   it('shows the empty state when API returns []', async () => {
     vi.mocked(api.activity).mockResolvedValueOnce([]);
 

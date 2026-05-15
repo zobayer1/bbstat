@@ -16,6 +16,7 @@ function makeRepo(id: number): RepositoryHandle {
     slug: `repo-${id}`,
     fullName: `tigerit/repo-${id}`,
     diffStatsEnabled: false,
+    diffStatsExcludePatterns: [],
   };
 }
 
@@ -42,6 +43,8 @@ function fakeStore(): CommitStore {
     markIsMergeBackfillAttempt: fail,
     advanceIsMergeBackfillCursor: fail,
     markIsMergeBackfillComplete: fail,
+    resetSyncCursors: fail,
+    resetDiffStatsForRepo: fail,
   };
 }
 
@@ -80,6 +83,7 @@ function makeOkResult(repo: RepositoryHandle): RepoCommitSyncResult {
     diffStatsUpdated: 0,
     diffStatsFailed: 0,
     diffStatsRange: null,
+    autoExcluded: null,
   };
 }
 

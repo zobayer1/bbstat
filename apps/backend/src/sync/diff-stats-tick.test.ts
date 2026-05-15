@@ -14,6 +14,7 @@ function makeRepo(id: number, slug: string, diffStatsEnabled = true): Repository
     slug,
     fullName: `tigerit/${slug}`,
     diffStatsEnabled,
+    diffStatsExcludePatterns: [],
   };
 }
 
@@ -42,6 +43,8 @@ function unreachableStore(): CommitStore {
     markIsMergeBackfillAttempt: fail,
     advanceIsMergeBackfillCursor: fail,
     markIsMergeBackfillComplete: fail,
+    resetSyncCursors: fail,
+    resetDiffStatsForRepo: fail,
   };
 }
 

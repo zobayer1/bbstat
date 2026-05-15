@@ -16,6 +16,7 @@ function makeRepo(id: number): RepositoryHandle {
     slug: `repo-${id}`,
     fullName: `tigerit/repo-${id}`,
     diffStatsEnabled: false,
+    diffStatsExcludePatterns: [],
   };
 }
 

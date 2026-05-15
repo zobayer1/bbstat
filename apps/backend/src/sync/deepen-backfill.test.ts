@@ -87,6 +87,8 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     markIsMergeBackfillAttempt: unreachable as () => Promise<void>,
     advanceIsMergeBackfillCursor: unreachable as () => Promise<void>,
     markIsMergeBackfillComplete: unreachable as () => Promise<void>,
+    resetSyncCursors: unreachable as () => Promise<void>,
+    resetDiffStatsForRepo: unreachable as () => Promise<{ resetCount: number }>,
   };
   return { store, state };
 }
@@ -194,6 +196,45 @@ describe('deepenOneRepo', () => {
     expect(state.markedAttempt).toEqual([7]);
     expect(state.markedComplete).toEqual([7]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('empty-on-BB ALSO auto-trips sync_excluded when discoveryStore is wired', async () => {
+    const { store, state } = makeStore({
+      candidate: { ...REPO, oldestSha: null },
+      syncStateByRepo: new Map([
+        [
+          7,
+          {
+            repositoryId: 7,
+            lastSeenSha: null,
+            lastSyncedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStartedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStatus: 'success' as const,
+            lastSyncError: null,
+            totalCommitsSynced: 0,
+          } satisfies SyncStateRow,
+        ],
+      ]),
+    });
+    const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+    const excluded: Array<{ id: number; excluded: boolean; reason: string | null }> = [];
+    const discoveryStore = {
+      async updateRepositorySyncExcluded(id: number, ex: boolean, reason: string | null) {
+        excluded.push({ id, excluded: ex, reason });
+      },
+    };
+
+    await deepenOneRepo(
+      {
+        client,
+        store,
+        discoveryStore: discoveryStore as unknown as Parameters<typeof deepenOneRepo>[0]['discoveryStore'],
+      },
+      { maxPages: 5, budgetThreshold: 100 },
+    );
+
+    expect(excluded).toEqual([{ id: 7, excluded: true, reason: 'empty-on-bitbucket' }]);
+    expect(state.markedComplete).toEqual([7]);
   });
 
   it('does NOT mark complete when oldestSha is null AND last_sync_status=failed (transient cold-mode failure)', async () => {

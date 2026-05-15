@@ -19,7 +19,9 @@
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
+import { BitbucketApiError } from '../bitbucket/errors.js';
 import type { CommitInsertInput, CommitStore, PendingDiffStatCommit } from './commit-store.js';
+import type { DiscoveryStore } from './discovery-store.js';
 import { fetchDiffStatsForCommits, type DiffStatsSyncResult } from './diff-stats.js';
 
 export interface RepositoryHandle {
@@ -32,6 +34,12 @@ export interface RepositoryHandle {
   // commits.diff_stats_synced_at IS NULL). When false, the diff-stats step
   // is skipped entirely — no extra BB calls, no extra DB work.
   diffStatsEnabled: boolean;
+  // Per-repo blacklist of file-path globs (picomatch syntax) that the
+  // diff-stat aggregator skips. Sourced from
+  // `repositories.diff_stats_exclude_patterns`. Empty array = no
+  // filtering. Used only when `diffStatsEnabled === true`; ignored
+  // otherwise.
+  diffStatsExcludePatterns: string[];
 }
 
 export interface CommitSyncOptions {
@@ -78,13 +86,39 @@ export interface RepoCommitSyncResult {
   diffStatsUpdated: number;
   diffStatsFailed: number;
   diffStatsRange: { sinceDay: string; untilDay: string } | null;
+  // Populated when the auto-trip in this run flipped the repo's
+  // sync_excluded flag. NULL on a healthy outcome. Surfaced so
+  // log lines and operator-facing payloads can show what triggered
+  // the exclusion; the actual DB write happened before the result
+  // was returned.
+  autoExcluded: AutoExcludeReason | null;
 }
 
 export interface CommitSyncDeps {
   client: BitbucketClient;
   store: CommitStore;
+  // Optional. When wired, the sync auto-trips
+  // `repositories.sync_excluded = true` on two terminal conditions:
+  //   * BB 404 on `/commits` — the repo was renamed or deleted upstream
+  //     (reason: 'repo-404'). Caller still sees the BitbucketApiError;
+  //     the exclusion is recorded before the throw so future ticks skip
+  //     the row.
+  //   * Delta walk exhausted BB's full history without finding our
+  //     `last_seen_sha` — the cursor sha was rewritten out (reason:
+  //     'history-rewritten'). No insert is performed in this case; the
+  //     cursor stays put and the row is excluded so the operator can
+  //     /include (which clears the cursor) for a clean cold resync.
+  // Without this dep wired the failure paths still run but the row
+  // stays in the rotation (legacy behavior — only the admin endpoint
+  // can exclude).
+  discoveryStore?: DiscoveryStore;
   logger?: BitbucketLogger;
 }
+
+// Surfaced separately from `RepoCommitSyncResult.hitKnownSha` so the
+// orchestrator log can show the reason at a glance. NULL on a normal
+// (non-excluded) outcome.
+export type AutoExcludeReason = 'repo-404' | 'history-rewritten';
 
 export async function syncRepositoryCommits(
   deps: CommitSyncDeps,
@@ -103,6 +137,35 @@ export async function syncRepositoryCommits(
     const lastSeenSha = cursor.lastSeenSha;
     const isCold = lastSeenSha === null;
     const pull = await pullCommits(deps, repo, lastSeenSha, opts);
+
+    // History-rewrite detection. In delta mode, `pullCommits` walks BB
+    // newest-first until it hits the cursor (`hitKnownSha=true`) or the
+    // iterator exhausts (no `next` URL → BB has nothing older). When the
+    // iterator exhausts AND we never saw the cursor AND BB actually had
+    // commits, the cursor sha is no longer reachable from main → the
+    // branch was force-pushed / reset. Exclude the repo and skip the
+    // insert: persisting the new history under the same row would
+    // leave dangling rows for the now-orphaned shas and confuse the
+    // `lastSeenSha` cursor on the next tick. Operator recovery is
+    // POST /repositories/:ws/:slug/include, which clears the cursor
+    // and the exclusion in one shot.
+    if (!isCold && !pull.hitKnownSha && pull.batch.length > 0 && deps.discoveryStore !== undefined) {
+      await deps.discoveryStore.updateRepositorySyncExcluded(repo.repositoryId, true, 'history-rewritten');
+      await deps.store.markSyncFailed(
+        repo.repositoryId,
+        `history-rewritten: walked ${pull.batch.length} commits without finding last_seen_sha=${lastSeenSha}`,
+      );
+      deps.logger?.warn?.(
+        { ...repo, walked: pull.batch.length, lastSeenSha },
+        'commit sync: BB history rewritten — auto-excluding repo',
+      );
+      return {
+        ...emptyResult(repo, 'delta'),
+        fetched: pull.batch.length,
+        hitKnownSha: false,
+        autoExcluded: 'history-rewritten',
+      };
+    }
 
     // BB returns newest-first, so the head of the batch is our new cursor.
     // An empty batch leaves the existing cursor untouched (see store impl).
@@ -199,9 +262,19 @@ export async function syncRepositoryCommits(
       diffStatsUpdated: diffStatsResult.updated,
       diffStatsFailed: diffStatsResult.failed,
       diffStatsRange: diffStatsResult.diffStatsRange,
+      autoExcluded: null,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // BB 404 on the commits endpoint means the repo was renamed or
+    // deleted upstream — it's not coming back under this slug. Auto-trip
+    // exclusion before re-raising so the next tick won't burn another
+    // BB call on it. Operator recovery is POST /rename (re-resolves the
+    // new slug, clears the flag) or DELETE if the row is truly dead.
+    if (err instanceof BitbucketApiError && err.status === 404 && deps.discoveryStore !== undefined) {
+      await deps.discoveryStore.updateRepositorySyncExcluded(repo.repositoryId, true, 'repo-404');
+      deps.logger?.warn?.({ ...repo }, 'commit sync: BB 404 — auto-excluding repo');
+    }
     await deps.store.markSyncFailed(repo.repositoryId, msg);
     throw err;
   }
@@ -264,6 +337,7 @@ function emptyResult(repo: RepositoryHandle, mode: SyncMode): RepoCommitSyncResu
     diffStatsUpdated: 0,
     diffStatsFailed: 0,
     diffStatsRange: null,
+    autoExcluded: null,
   };
 }
 

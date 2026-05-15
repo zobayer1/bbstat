@@ -64,6 +64,20 @@
       "when": 1778835472789,
       "tag": "0008_young_harry_osborn",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1778841392190,
+      "tag": "0009_fair_obadiah_stane",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1778844276105,
+      "tag": "0010_vengeful_freak",
+      "breakpoints": true
     }
   ]
 }

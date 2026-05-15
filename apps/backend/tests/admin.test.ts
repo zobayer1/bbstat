@@ -74,6 +74,14 @@ function noopCommitStore(): CommitStore {
     markIsMergeBackfillAttempt: fail,
     advanceIsMergeBackfillCursor: fail,
     markIsMergeBackfillComplete: fail,
+    // No-op (not a `fail`) — the admin /include and /rename endpoints
+    // invoke this as a benign post-recovery cleanup on every call, so
+    // throwing would false-positive those tests that don't exercise
+    // commit-sync proper.
+    async resetSyncCursors() {},
+    async resetDiffStatsForRepo() {
+      return { resetCount: 0 };
+    },
   };
 }
 
@@ -233,6 +241,10 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
     async markIsMergeBackfillAttempt() {},
     async advanceIsMergeBackfillCursor() {},
     async markIsMergeBackfillComplete() {},
+    async resetSyncCursors() {},
+    async resetDiffStatsForRepo() {
+      return { resetCount: 0 };
+    },
   };
   return { store, state };
 }
@@ -267,7 +279,13 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
         }
       }
       const id = state.nextRepoId++;
-      const row: RepositoryRow = { id, ...input };
+      const row: RepositoryRow = {
+        id,
+        ...input,
+        syncExcluded: false,
+        syncExcludeReason: null,
+        diffStatsExcludePatterns: [],
+      };
       state.repositories.set(input.fullName, row);
       state.syncStateRepoIds.add(id);
       return { row, inserted: true };
@@ -289,7 +307,50 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       }
     },
     async listTrackedRepositories() {
-      return Array.from(state.repositories.values()).filter((r) => !r.archived);
+      return Array.from(state.repositories.values()).filter((r) => !r.archived && !r.syncExcluded);
+    },
+    async updateRepositorySyncExcluded(repositoryId, excluded, reason) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.syncExcluded = excluded;
+          row.syncExcludeReason = reason;
+          return;
+        }
+      }
+    },
+    async updateRepositoryRename(repositoryId, input) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          // Re-key the map under the new fullName so findRepositoryByFullName
+          // continues to resolve correctly post-rename.
+          const oldFullName = row.fullName;
+          row.workspace = input.workspace;
+          row.slug = input.slug;
+          row.fullName = input.fullName;
+          row.project = input.project;
+          state.repositories.delete(oldFullName);
+          state.repositories.set(row.fullName, row);
+          return;
+        }
+      }
+    },
+    async deleteRepository(repositoryId) {
+      for (const [k, row] of state.repositories.entries()) {
+        if (row.id === repositoryId) {
+          state.repositories.delete(k);
+          state.syncStateRepoIds.delete(repositoryId);
+          return 1;
+        }
+      }
+      return 0;
+    },
+    async updateRepositoryExcludePatterns(repositoryId, patterns) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.diffStatsExcludePatterns = patterns;
+          return;
+        }
+      }
     },
     async findNextDiffStatsCandidate() {
       // Simplified proxy — see discovery.test.ts for rationale. Real
@@ -305,7 +366,7 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       // is unset in makeSyncDeps (legacy behavior — every repo is due).
       // Synthesize nulls so the row type is satisfied.
       return Array.from(state.repositories.values())
-        .filter((r) => !r.archived)
+        .filter((r) => !r.archived && !r.syncExcluded)
         .map((r) => ({
           ...r,
           lastSyncedAt: null,
@@ -630,6 +691,363 @@ describe('admin routes', () => {
       const res = await appInstance.inject({
         method: 'POST',
         url: '/api/admin/repositories/tigerit/ghost/unarchive',
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  describe('POST /api/admin/repositories/:workspace/:slug/include', () => {
+    it('clears sync_excluded + reason and returns 200', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      const { row } = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      await deps.store.updateRepositorySyncExcluded(row.id, true, 'history-rewritten');
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/include',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        fullName: 'tigerit/boing-server',
+        syncExcluded: false,
+        cursorsReset: true,
+      });
+      const after = await deps.store.findRepositoryByFullName('tigerit/boing-server');
+      expect(after?.syncExcluded).toBe(false);
+      expect(after?.syncExcludeReason).toBeNull();
+    });
+
+    it('is idempotent on a non-excluded repo (still resets cursors)', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/include',
+      });
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('returns 404 when the repo is not tracked', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/ghost/include',
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  describe('POST /api/admin/repositories/:workspace/:slug/rename', () => {
+    it('updates ws/slug/fullName/project on UUID match and clears exclusion', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      const { row } = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'OLD',
+        slug: 'old-name',
+        fullName: 'tigerit/old-name',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      await deps.store.updateRepositorySyncExcluded(row.id, true, 'repo-404');
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          uuid: '{r1}',
+          slug: 'new-name',
+          full_name: 'tigerit/new-name',
+          workspace: { slug: 'tigerit' },
+          project: { key: 'NEW' },
+        }),
+      );
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/old-name/rename',
+        payload: { workspace: 'tigerit', slug: 'new-name' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({
+        previousFullName: 'tigerit/old-name',
+        fullName: 'tigerit/new-name',
+        syncExcluded: false,
+        cursorsReset: true,
+      });
+      const after = await deps.store.findRepositoryByFullName('tigerit/new-name');
+      expect(after?.slug).toBe('new-name');
+      expect(after?.project).toBe('NEW');
+      expect(after?.syncExcluded).toBe(false);
+    });
+
+    it('returns 409 when BB resolves to a different UUID', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'old-name',
+        fullName: 'tigerit/old-name',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          uuid: '{r-different}',
+          slug: 'other',
+          full_name: 'tigerit/other',
+          workspace: { slug: 'tigerit' },
+        }),
+      );
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/old-name/rename',
+        payload: { workspace: 'tigerit', slug: 'other' },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'uuid_mismatch' });
+      // Row unchanged.
+      const after = await deps.store.findRepositoryByFullName('tigerit/old-name');
+      expect(after?.slug).toBe('old-name');
+    });
+
+    it('returns 404 (bitbucket_not_found) when BB itself 404s the new slug', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'old-name',
+        fullName: 'tigerit/old-name',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404));
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/old-name/rename',
+        payload: { workspace: 'tigerit', slug: 'ghost' },
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ error: 'bitbucket_not_found' });
+    });
+
+    it('returns 400 on invalid body', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'old-name',
+        fullName: 'tigerit/old-name',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/old-name/rename',
+        payload: { workspace: '', slug: '' },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
+  describe('diff-stats exclusions', () => {
+    async function seedRepo(deps: SyncRunnerDeps): Promise<void> {
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'r',
+        fullName: 'tigerit/r',
+        diffStatsEnabled: true,
+        archived: false,
+      });
+    }
+
+    it('GET returns empty list by default', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await seedRepo(deps);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'GET',
+        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/r', patterns: [] });
+    });
+
+    it('PUT replaces the pattern list and is round-trippable via GET', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await seedRepo(deps);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const putRes = await appInstance.inject({
+        method: 'PUT',
+        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        payload: { patterns: ['*.png', '**/pnpm-lock.yaml', 'dist/**'] },
+      });
+      expect(putRes.statusCode).toBe(200);
+      expect(putRes.json()).toEqual({
+        fullName: 'tigerit/r',
+        patterns: ['*.png', '**/pnpm-lock.yaml', 'dist/**'],
+      });
+
+      const getRes = await appInstance.inject({
+        method: 'GET',
+        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+      });
+      expect(getRes.json()).toEqual({
+        fullName: 'tigerit/r',
+        patterns: ['*.png', '**/pnpm-lock.yaml', 'dist/**'],
+      });
+    });
+
+    it('PUT rejects an empty string in the pattern array with 400', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await seedRepo(deps);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'PUT',
+        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        payload: { patterns: ['*.png', ''] },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid_pattern', pattern: '' });
+    });
+
+    it('PUT returns 400 on a non-array body', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await seedRepo(deps);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'PUT',
+        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        payload: { patterns: 'not-an-array' },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('GET/PUT return 404 for unknown repos', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const getRes = await appInstance.inject({
+        method: 'GET',
+        url: '/api/admin/repositories/tigerit/ghost/diff-stats/exclusions',
+      });
+      expect(getRes.statusCode).toBe(404);
+
+      const putRes = await appInstance.inject({
+        method: 'PUT',
+        url: '/api/admin/repositories/tigerit/ghost/diff-stats/exclusions',
+        payload: { patterns: [] },
+      });
+      expect(putRes.statusCode).toBe(404);
+    });
+
+    it('POST /reset returns 200 with the reset count', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await seedRepo(deps);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/r/diff-stats/reset',
+      });
+
+      // The fake commitStore returns 0 for resetCount; we just verify
+      // the route wiring + response shape. The real recount semantics
+      // are covered in the resetDiffStatsForRepo unit tests / manual
+      // smoke testing.
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/r', resetCount: 0 });
+    });
+
+    it('POST /reset returns 404 for unknown repo', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/ghost/diff-stats/reset',
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  describe('DELETE /api/admin/repositories/:workspace/:slug', () => {
+    it('removes the row and returns 200', async () => {
+      const { deps, state } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: null,
+        slug: 'doomed',
+        fullName: 'tigerit/doomed',
+        diffStatsEnabled: false,
+        archived: false,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'DELETE',
+        url: '/api/admin/repositories/tigerit/doomed',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ fullName: 'tigerit/doomed', deleted: 1 });
+      expect(state.repositories.has('tigerit/doomed')).toBe(false);
+    });
+
+    it('returns 404 when the repo is not tracked', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'DELETE',
+        url: '/api/admin/repositories/tigerit/ghost',
       });
 
       expect(res.statusCode).toBe(404);

@@ -105,10 +105,13 @@ export interface ProjectStats {
   }>;
 }
 
-// 3-state sync health, derived server-side from sync_state.last_sync_status.
-// 'ok' covers both 'success' and in-flight 'running'; 'error' is a failed
-// most-recent attempt; 'never' is a tracked repo no sync has touched yet.
-export type RepoSyncStatus = 'ok' | 'error' | 'never';
+// 4-state sync health derived server-side from sync_state.last_sync_status
+// + repositories.sync_excluded. 'ok' covers both 'success' and in-flight
+// 'running'; 'error' is a failed most-recent attempt; 'never' is a
+// tracked repo no sync has touched yet; 'excluded' is an auto-trip
+// (404 / empty-on-BB / history-rewritten) needing an admin recovery
+// action via /include, /rename, or DELETE.
+export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded';
 
 export interface RepoActivity {
   repository: {

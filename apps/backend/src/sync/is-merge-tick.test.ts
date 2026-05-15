@@ -59,6 +59,8 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     async markIsMergeBackfillComplete(repositoryId) {
       state.marksComplete.push(repositoryId);
     },
+    resetSyncCursors: fail,
+    resetDiffStatsForRepo: fail,
   };
   return { store, state };
 }

@@ -57,13 +57,21 @@ export const users = pgTable('users', {
 //
 // `sync_excluded` — same effect as `archived` (filtered out of every
 // sync tick), but written by the sync layer itself when it detects a
-// permanently-broken state: a 404 on the commits endpoint (the repo
-// was renamed or deleted upstream), or an empty repo whose
-// `deepen_complete = true` arrived with `total_commits_synced = 0`.
-// Distinct column from `archived` so the UI can surface
-// "needs attention" separately from operator-initiated retirement,
-// and so a future admin recovery action (re-resolve / merge canonical
-// row) has a dedicated lifecycle to attach to.
+// permanently-broken state. `sync_exclude_reason` records WHY so the
+// dashboard and operator can act on it. Three auto-trip causes today:
+//
+//   - 'repo-404'           — the commits endpoint returned 404 (the
+//                            repo was renamed or deleted upstream).
+//   - 'empty-on-bitbucket' — cold-mode + deepen converged with zero
+//                            commits ever ingested (BB has nothing).
+//   - 'history-rewritten'  — delta sync walked BB's full history
+//                            without finding our last_seen_sha
+//                            (force-push rewrote the branch).
+//
+// Distinct from `archived` so the UI can surface "needs attention"
+// separately from operator-initiated retirement, and so admin recovery
+// (rename, include-back-into-sync, delete) has its own lifecycle. NULL
+// reason on a non-excluded row, populated string on an excluded row.
 export const repositories = pgTable('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
@@ -74,6 +82,20 @@ export const repositories = pgTable('repositories', {
   diffStatsEnabled: boolean('diff_stats_enabled').notNull().default(false),
   archived: boolean('archived').notNull().default(false),
   syncExcluded: boolean('sync_excluded').notNull().default(false),
+  syncExcludeReason: text('sync_exclude_reason'),
+  // Per-repo blacklist of file-path globs that the diff-stat aggregator
+  // skips. Picomatch syntax (gitignore-style). Patterns are additive
+  // per repo — no global defaults are layered on, so the operator's
+  // canonical "what counts" view lives entirely in this column.
+  // Empty array = unfiltered (every BB diffstat entry is summed).
+  // Editing this column is cheap (cheap UPDATE); applying the change
+  // to already-ingested commits requires POST /diff-stats/reset which
+  // clears the diff_stats_synced_at stamps and lets the backfill tick
+  // re-fetch with the new filter.
+  diffStatsExcludePatterns: text('diff_stats_exclude_patterns')
+    .array()
+    .notNull()
+    .default(sql`'{}'`),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

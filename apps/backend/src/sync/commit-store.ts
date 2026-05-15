@@ -10,7 +10,7 @@
 
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
-import { commits, syncState, users } from '../db/schema.js';
+import { commitDaily, commits, syncState, users } from '../db/schema.js';
 
 export type SyncStatus = 'idle' | 'running' | 'success' | 'failed';
 
@@ -152,6 +152,30 @@ export interface CommitStore {
   // commit BB has) or when the cursor sha 404's (force-pushed history
   // — give up, mirrors deepen seedMissing).
   markIsMergeBackfillComplete(repositoryId: number): Promise<void>;
+
+  // Reset the commit-sync cursor + deepen state to cold-mode defaults.
+  // Used by POST /repositories/:ws/:slug/include after a sync_excluded
+  // recovery so the next tick starts fresh — a stale or invalid
+  // last_seen_sha would just re-trip the history-rewritten exclusion.
+  // Clears: last_seen_sha → NULL, deepen_complete → false,
+  // is_merge_backfill_complete → false, is_merge_backfill_cursor_sha
+  // → NULL. Does NOT touch commits (history stays in the DB) or
+  // total_commits_synced (counter is monotonic / observational).
+  resetSyncCursors(repositoryId: number): Promise<void>;
+
+  // Re-arm diff-stat backfill for a repo. Zeros the line counts on
+  // every commit, clears `diff_stats_synced_at`, AND zeros the
+  // `commit_daily` aggregates for the repo so the dashboard shows
+  // clearly-wrong (zero) rather than subtly-wrong (mixed) during the
+  // drain. The next diff-stats backfill ticks re-fetch /diffstat with
+  // whatever filter is now configured in
+  // `repositories.diff_stats_exclude_patterns`, and the rollup hook
+  // refills `commit_daily` as commits drain.
+  //
+  // Single transaction so the dashboard never observes a partial
+  // state. Returns the count of commits whose stamp was cleared
+  // (i.e., re-queued for backfill).
+  resetDiffStatsForRepo(repositoryId: number): Promise<{ resetCount: number }>;
 }
 
 export interface DeepenCandidate {
@@ -404,6 +428,38 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .update(syncState)
         .set({ isMergeBackfillComplete: true, isMergeLastRunAt: now, updatedAt: now })
         .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async resetSyncCursors(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({
+          lastSeenSha: null,
+          deepenComplete: false,
+          isMergeBackfillComplete: false,
+          isMergeBackfillCursorSha: null,
+          updatedAt: now,
+        })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async resetDiffStatsForRepo(repositoryId) {
+      // Run both UPDATEs in one transaction so the dashboard never sees
+      // commits.* cleared while commit_daily still has the old (inflated)
+      // sums — or vice versa. The backfill tick repopulates upward as
+      // it drains.
+      return await db.transaction(async (tx) => {
+        const commitResult = await tx
+          .update(commits)
+          .set({ additions: 0, deletions: 0, filesChanged: 0, diffStatsSyncedAt: null })
+          .where(eq(commits.repositoryId, repositoryId));
+        await tx
+          .update(commitDaily)
+          .set({ additions: 0, deletions: 0 })
+          .where(eq(commitDaily.repositoryId, repositoryId));
+        return { resetCount: commitResult.rowCount ?? 0 };
+      });
     },
 
     async updateIsMergeBatch(repositoryId, entries) {

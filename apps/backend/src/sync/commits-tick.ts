@@ -15,11 +15,16 @@ import { BitbucketRateLimitError } from '../bitbucket/errors.js';
 import { syncRepositoryCommits } from './commits.js';
 import type { CommitSyncDeps, CommitSyncOptions, RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { CommitStore } from './commit-store.js';
+import type { DiscoveryStore } from './discovery-store.js';
 
 export interface CommitsTickDeps {
   client: BitbucketClient;
   store: CommitStore;
   logger?: BitbucketLogger;
+  // Forwarded into CommitSyncDeps so per-repo syncs can auto-trip
+  // `sync_excluded` on 404 / history-rewrite. Optional in tests; the
+  // runtime wires it.
+  discoveryStore?: DiscoveryStore;
   // Per-repo sync function. Defaults to syncRepositoryCommits; injectable
   // so the orchestrator can be tested without standing up the full BB
   // client + store + fetch fixture stack.
@@ -81,6 +86,7 @@ export async function runCommitsTick(
     client: deps.client,
     store: deps.store,
     ...(deps.logger ? { logger: deps.logger } : {}),
+    ...(deps.discoveryStore ? { discoveryStore: deps.discoveryStore } : {}),
   };
   // syncOne sees the same options as the per-repo function — it ignores the
   // tick-specific knobs (concurrency, budgetLowThreshold) since they have

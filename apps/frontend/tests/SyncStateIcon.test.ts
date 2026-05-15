@@ -21,4 +21,10 @@ describe('SyncStateIcon', () => {
     expect(wrapper.attributes('aria-label')).toBe('Not synced yet');
     expect(wrapper.classes()).toContain('text-slate-400');
   });
+
+  it('renders the needs-attention label + red tone for status=excluded', () => {
+    const wrapper = mount(SyncStateIcon, { props: { status: 'excluded' } });
+    expect(wrapper.attributes('aria-label')).toBe('Excluded from sync — needs attention');
+    expect(wrapper.classes()).toContain('text-red-600');
+  });
 });

@@ -153,7 +153,10 @@ function formatTime(iso: string): string {
               >
                 {{ entry.repository.slug }}
               </RouterLink>
-              <span v-if="entry.kind === 'commit'" class="text-slate-700"> — {{ commitTitle(entry.message) }}</span>
+              <span v-if="entry.kind === 'commit'" class="text-slate-700">
+                — <span class="font-mono text-xs text-slate-500">{{ entry.sha.slice(0, 7) }}</span>
+                {{ commitTitle(entry.message) }}
+              </span>
               <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
             </p>
             <p class="mt-1.5 text-xs text-slate-500">

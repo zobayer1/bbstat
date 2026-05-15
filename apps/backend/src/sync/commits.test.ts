@@ -137,6 +137,10 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     async markIsMergeBackfillAttempt() {},
     async advanceIsMergeBackfillCursor() {},
     async markIsMergeBackfillComplete() {},
+    async resetSyncCursors() {},
+    async resetDiffStatsForRepo() {
+      return { resetCount: 0 };
+    },
   };
 
   return { store, state };
@@ -147,7 +151,14 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
 // ---------------------------------------------------------------------------
 
 function makeRepo(repositoryId: number, slug = 'boing-server'): RepositoryHandle {
-  return { repositoryId, workspace: 'tigerit', slug, fullName: `tigerit/${slug}`, diffStatsEnabled: false };
+  return {
+    repositoryId,
+    workspace: 'tigerit',
+    slug,
+    fullName: `tigerit/${slug}`,
+    diffStatsEnabled: false,
+    diffStatsExcludePatterns: [],
+  };
 }
 
 function makeSyncStateRow(repositoryId: number, lastSeenSha: string | null = null): SyncStateRow {
@@ -570,5 +581,134 @@ describe('syncRepositoryCommits — inline-eager diff-stats', () => {
     expect(result.diffStatsUpdated).toBe(0);
     expect(result.diffStatsFailed).toBe(1);
     expect(result.diffStatsRange).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-exclusion (sync_excluded)
+// ---------------------------------------------------------------------------
+
+function makeFakeDiscoveryStore(): {
+  store: {
+    updateRepositorySyncExcluded: (id: number, excluded: boolean, reason: string | null) => Promise<void>;
+  };
+  calls: Array<{ id: number; excluded: boolean; reason: string | null }>;
+} {
+  const calls: Array<{ id: number; excluded: boolean; reason: string | null }> = [];
+  return {
+    store: {
+      async updateRepositorySyncExcluded(id, excluded, reason) {
+        calls.push({ id, excluded, reason });
+      },
+    },
+    calls,
+  };
+}
+
+describe('syncRepositoryCommits — auto-exclusion', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+  });
+
+  it('BB 404 on /commits: auto-trips sync_excluded with reason=repo-404 and rethrows', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404));
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1)] });
+    const fakeDiscovery = makeFakeDiscoveryStore();
+
+    await expect(
+      syncRepositoryCommits(
+        {
+          client: makeClient(fetchMock as unknown as typeof globalThis.fetch),
+          store,
+          // Cast: tests only exercise the one method this code path calls.
+          discoveryStore: fakeDiscovery.store as unknown as Parameters<
+            typeof syncRepositoryCommits
+          >[0]['discoveryStore'],
+        },
+        makeRepo(1),
+      ),
+    ).rejects.toThrow();
+
+    expect(fakeDiscovery.calls).toEqual([{ id: 1, excluded: true, reason: 'repo-404' }]);
+    expect(state.markFailedCalls).toHaveLength(1);
+  });
+
+  it('delta walk exhausts BB without finding cursor: auto-trips history-rewritten and skips insert', async () => {
+    // 3 commits returned, no `next` — iterator exhausts. Cursor 'sha-gone' isn't in the list.
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([makeCommit('sha-new-1'), makeCommit('sha-new-2'), makeCommit('sha-new-3')]),
+    );
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-gone')] });
+    const fakeDiscovery = makeFakeDiscoveryStore();
+
+    const result = await syncRepositoryCommits(
+      {
+        client: makeClient(fetchMock as unknown as typeof globalThis.fetch),
+        store,
+        discoveryStore: fakeDiscovery.store as unknown as Parameters<typeof syncRepositoryCommits>[0]['discoveryStore'],
+      },
+      makeRepo(1),
+    );
+
+    expect(result.autoExcluded).toBe('history-rewritten');
+    expect(result.inserted).toBe(0);
+    expect(fakeDiscovery.calls).toEqual([{ id: 1, excluded: true, reason: 'history-rewritten' }]);
+    expect(state.markFailedCalls).toHaveLength(1);
+    expect(state.markSuccessCalls).toEqual([]);
+    // No commits should have been inserted under the rewritten history.
+    expect(state.commits.size).toBe(0);
+  });
+
+  it('delta walk finds cursor normally: no auto-exclusion, commits insert as usual', async () => {
+    fetchMock.mockResolvedValueOnce(commitsPage([makeCommit('sha-new'), makeCommit('sha-cursor')]));
+    const { store } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    const fakeDiscovery = makeFakeDiscoveryStore();
+
+    const result = await syncRepositoryCommits(
+      {
+        client: makeClient(fetchMock as unknown as typeof globalThis.fetch),
+        store,
+        discoveryStore: fakeDiscovery.store as unknown as Parameters<typeof syncRepositoryCommits>[0]['discoveryStore'],
+      },
+      makeRepo(1),
+    );
+
+    expect(result.autoExcluded).toBeNull();
+    expect(result.inserted).toBe(1);
+    expect(fakeDiscovery.calls).toEqual([]);
+  });
+
+  it('empty delta response (no commits at all, cursor not found): does NOT auto-exclude', async () => {
+    // batch.length === 0 — even though hitKnownSha is false, no commits
+    // came back so we can't conclude history was rewritten (might just
+    // be a transient empty page or branch reset to nothing). Don't trip.
+    fetchMock.mockResolvedValueOnce(commitsPage([]));
+    const { store } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
+    const fakeDiscovery = makeFakeDiscoveryStore();
+
+    const result = await syncRepositoryCommits(
+      {
+        client: makeClient(fetchMock as unknown as typeof globalThis.fetch),
+        store,
+        discoveryStore: fakeDiscovery.store as unknown as Parameters<typeof syncRepositoryCommits>[0]['discoveryStore'],
+      },
+      makeRepo(1),
+    );
+
+    expect(result.autoExcluded).toBeNull();
+    expect(fakeDiscovery.calls).toEqual([]);
+  });
+
+  it('no discoveryStore wired: 404 still throws but no exclusion attempt', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404));
+    const { store } = createFakeCommitStore({ syncState: [makeSyncStateRow(1)] });
+
+    await expect(
+      syncRepositoryCommits(
+        { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+        makeRepo(1),
+      ),
+    ).rejects.toThrow();
   });
 });

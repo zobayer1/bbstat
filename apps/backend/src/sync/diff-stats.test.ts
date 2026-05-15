@@ -11,6 +11,7 @@ function makeRepo(over: Partial<RepositoryHandle> = {}): RepositoryHandle {
     slug: 'r',
     fullName: 'tigerit/r',
     diffStatsEnabled: true,
+    diffStatsExcludePatterns: [],
     ...over,
   };
 }
@@ -48,6 +49,8 @@ function makeStore(pending: PendingDiffStatCommit[] = []): { store: CommitStore;
     markIsMergeBackfillAttempt: unreachable,
     advanceIsMergeBackfillCursor: unreachable,
     markIsMergeBackfillComplete: unreachable,
+    resetSyncCursors: unreachable,
+    resetDiffStatsForRepo: unreachable,
   };
   return { store, state };
 }

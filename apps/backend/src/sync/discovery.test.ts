@@ -51,7 +51,13 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
         }
       }
       const id = state.nextRepoId++;
-      const row: RepositoryRow = { id, ...input };
+      const row: RepositoryRow = {
+        id,
+        ...input,
+        syncExcluded: false,
+        syncExcludeReason: null,
+        diffStatsExcludePatterns: [],
+      };
       state.repositories.set(input.fullName, row);
       state.syncStateRepoIds.add(id);
       return { row, inserted: true };
@@ -73,7 +79,45 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       }
     },
     async listTrackedRepositories() {
-      return Array.from(state.repositories.values()).filter((r) => !r.archived);
+      return Array.from(state.repositories.values()).filter((r) => !r.archived && !r.syncExcluded);
+    },
+    async updateRepositorySyncExcluded(repositoryId, excluded, reason) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.syncExcluded = excluded;
+          row.syncExcludeReason = reason;
+          return;
+        }
+      }
+    },
+    async updateRepositoryRename(repositoryId, input) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.workspace = input.workspace;
+          row.slug = input.slug;
+          row.fullName = input.fullName;
+          row.project = input.project;
+          return;
+        }
+      }
+    },
+    async deleteRepository(repositoryId) {
+      for (const [k, row] of state.repositories.entries()) {
+        if (row.id === repositoryId) {
+          state.repositories.delete(k);
+          state.syncStateRepoIds.delete(repositoryId);
+          return 1;
+        }
+      }
+      return 0;
+    },
+    async updateRepositoryExcludePatterns(repositoryId, patterns) {
+      for (const row of state.repositories.values()) {
+        if (row.id === repositoryId) {
+          row.diffStatsExcludePatterns = patterns;
+          return;
+        }
+      }
     },
     async findNextDiffStatsCandidate() {
       // Real impl orders by MAX(commits.authored_at) DESC NULLS LAST
@@ -92,7 +136,7 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       // don't exercise the backoff path. The runner falls back to
       // createdAt as the activity floor.
       return Array.from(state.repositories.values())
-        .filter((r) => !r.archived)
+        .filter((r) => !r.archived && !r.syncExcluded)
         .map((r) => ({
           ...r,
           lastSyncedAt: null,

@@ -130,7 +130,13 @@ async function walkAndPersist(
       break;
     }
     try {
-      const stat = await getCommitDiffStat(deps.client, repo.workspace, repo.slug, commit.sha);
+      const stat = await getCommitDiffStat(
+        deps.client,
+        repo.workspace,
+        repo.slug,
+        commit.sha,
+        repo.diffStatsExcludePatterns,
+      );
       await deps.store.updateCommitDiffStats(commit.id, stat);
       updated++;
       // YYYY-MM-DD of the commit's authored_at, matching Postgres'

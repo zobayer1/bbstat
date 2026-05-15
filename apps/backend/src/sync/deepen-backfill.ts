@@ -29,6 +29,7 @@ import { BitbucketApiError, BitbucketRateLimitError } from '../bitbucket/errors.
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
 import type { CommitInsertInput, CommitStore, DeepenCandidate } from './commit-store.js';
+import type { DiscoveryStore } from './discovery-store.js';
 
 export interface DeepenBackfillOptions {
   // Max pages of 100 commits per deepen page. Shape mirrors the cold-mode
@@ -84,6 +85,13 @@ export interface DeepenBackfillDeps {
   // cache entries get DEL'd after the rollup recompute, so the next read
   // for those users repopulates from the fresh rollup.
   userSummaryCache?: UserSummaryCache;
+  // Optional. When wired, the empty-on-BB branch (cold-mode succeeded
+  // but BB returned zero commits) auto-trips
+  // `sync_excluded = true, reason = 'empty-on-bitbucket'` alongside
+  // the existing markDeepenComplete. Without it, empty repos stay in
+  // the dashboard's tracked list with no badge — they still skip
+  // sync work via deepen_complete, but the operator never sees them.
+  discoveryStore?: DiscoveryStore;
 }
 
 // Extends CommitInsertInput with the BB-side author uuid so we can resolve
@@ -151,9 +159,16 @@ export async function deepenOneRepo(
     const isEmptyOnBitbucket = state?.lastSyncStatus === 'success';
     if (isEmptyOnBitbucket) {
       await deps.store.markDeepenComplete(candidate.repositoryId);
+      // Surface in the dashboard too: an empty repo isn't broken per se
+      // but it's not contributing data either, and the operator should
+      // see it called out. Same auto-trip channel as commit-sync 404 /
+      // history-rewrite.
+      if (deps.discoveryStore !== undefined) {
+        await deps.discoveryStore.updateRepositorySyncExcluded(candidate.repositoryId, true, 'empty-on-bitbucket');
+      }
       deps.logger?.info?.(
         { repositoryId: candidate.repositoryId, fullName: candidate.fullName },
-        'deepen-backfill: repo is empty on BB (cold-mode success, 0 commits) — marking complete',
+        'deepen-backfill: repo is empty on BB (cold-mode success, 0 commits) — marking complete + auto-excluding',
       );
       return {
         ...emptyResult(candidate.repositoryId, candidate.fullName),

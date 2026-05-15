@@ -224,14 +224,18 @@ export interface ActivityFilters {
 }
 
 // Derived sync health for a tracked repository, surfaced to the dashboard
-// as a small status icon. Maps `sync_state.last_sync_status`:
-//   - 'failed'        → 'error'
-//   - 'success' / 'running' (with non-null last_synced_at) → 'ok'
-//   - 'idle' + null timestamp (never attempted) → 'never'
+// as a small status icon. Maps `repositories.sync_excluded` +
+// `sync_state.last_sync_status`:
+//   - sync_excluded=true                                  → 'excluded' (red — auto-tripped, needs attention)
+//   - last_sync_status='failed'                           → 'error'   (amber — transient / actionable failure)
+//   - last_sync_status='success'/'running' + last_synced_at set → 'ok' (green)
+//   - last_sync_status='idle' + null timestamp            → 'never'   (slate — not synced yet)
 // Kept as a closed-set string (not the raw enum) so the frontend doesn't
 // need to know about 'running' as a separate state — a mid-flight tick is
-// considered healthy here.
-export type RepoSyncStatus = 'ok' | 'error' | 'never';
+// considered healthy here. `excluded` outranks `error` because the
+// underlying cause is durable (rename / empty / force-push) and the
+// recovery is a specific admin action, not a wait-and-retry.
+export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded';
 
 export interface TrackedRepositorySummary {
   workspace: string;
@@ -457,6 +461,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           commits: number;
           last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
           last_synced_at: string | Date | null;
+          sync_excluded: boolean;
           additions_30d: number;
           deletions_30d: number;
           files_30d: number;
@@ -465,6 +470,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
             sum(cd.commit_count)::int AS commits,
             ss.last_sync_status, ss.last_synced_at,
+            r.sync_excluded,
             COALESCE(ds.additions_30d, 0) AS additions_30d,
             COALESCE(ds.deletions_30d, 0) AS deletions_30d,
             COALESCE(ds.files_30d, 0) AS files_30d
@@ -485,7 +491,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           ) ds ON ds.repository_id = r.id
           WHERE cd.author_user_id = ${userId} AND cd.day >= current_date - 29
           GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
-                   ss.last_sync_status, ss.last_synced_at,
+                   ss.last_sync_status, ss.last_synced_at, r.sync_excluded,
                    ds.additions_30d, ds.deletions_30d, ds.files_30d
           ORDER BY sum(cd.commit_count) DESC
           LIMIT 5
@@ -512,7 +518,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           fullName: r.full_name,
           project: r.project,
           commits: r.commits,
-          syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at),
+          syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
           diffStatsEnabled: r.diff_stats_enabled,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
@@ -596,6 +602,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last_commit_at: string | Date | null;
           last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
           last_synced_at: string | Date | null;
+          sync_excluded: boolean;
         }>(sql`
           SELECT
             r.workspace,
@@ -613,7 +620,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             ), 0) AS contributors_30d,
             (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at,
             ss.last_sync_status,
-            ss.last_synced_at
+            ss.last_synced_at,
+            r.sync_excluded
           FROM repositories r
           LEFT JOIN sync_state ss ON ss.repository_id = r.id
           WHERE r.project = ${projectKey}
@@ -645,7 +653,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           commits30d: r.commits_30d,
           contributors30d: r.contributors_30d,
           lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
-          syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at),
+          syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
         })),
       };
     },
@@ -661,6 +669,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         last_commit_at: string | Date | null;
         last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
         last_synced_at: string | Date | null;
+        sync_excluded: boolean;
       }>(sql`
         SELECT
           r.workspace,
@@ -679,7 +688,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           ), 0) AS contributors_30d,
           (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at,
           ss.last_sync_status,
-          ss.last_synced_at
+          ss.last_synced_at,
+          r.sync_excluded
         FROM repositories r
         LEFT JOIN sync_state ss ON ss.repository_id = r.id
         ORDER BY last_commit_at DESC NULLS LAST
@@ -692,7 +702,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         commits30d: r.commits_30d,
         contributors30d: r.contributors_30d,
         lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
-        syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at),
+        syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
       }));
     },
 
@@ -704,6 +714,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           slug: repositories.slug,
           fullName: repositories.fullName,
           diffStatsEnabled: repositories.diffStatsEnabled,
+          syncExcluded: repositories.syncExcluded,
           lastSyncStatus: syncState.lastSyncStatus,
           lastSyncedAt: syncState.lastSyncedAt,
         })
@@ -834,7 +845,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           workspace: repo.workspace,
           slug: repo.slug,
           fullName: repo.fullName,
-          syncStatus: deriveSyncStatus(repo.lastSyncStatus ?? null, repo.lastSyncedAt ?? null),
+          syncStatus: deriveSyncStatus(repo.lastSyncStatus ?? null, repo.lastSyncedAt ?? null, repo.syncExcluded),
           diffStatsEnabled: repo.diffStatsEnabled,
         },
         dailyCommits: dailyRows.rows.map((r) => ({
@@ -1004,14 +1015,19 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
   };
 }
 
-// Collapse `last_sync_status` + `last_synced_at` to the 3-state UI signal.
-// A 'running' status is folded into 'ok' — the current tick is in flight,
-// the previous outcome (whatever it was) is what matters for the user.
-// Repos never attempted (idle + null timestamp) report 'never'.
+// Collapse `sync_excluded` + `last_sync_status` + `last_synced_at` to
+// the 4-state UI signal. A 'running' status is folded into 'ok' — the
+// current tick is in flight, the previous outcome is what matters.
+// `sync_excluded` is checked first; an excluded row's last_sync_status
+// might be anything (commits 404 sets 'failed', empty-on-bb leaves it
+// 'success', history-rewritten sets 'failed') but the exclusion is
+// the operator-actionable signal.
 function deriveSyncStatus(
   lastSyncStatus: 'idle' | 'running' | 'success' | 'failed' | null,
   lastSyncedAt: string | Date | null,
+  syncExcluded: boolean = false,
 ): RepoSyncStatus {
+  if (syncExcluded) return 'excluded';
   if (lastSyncStatus === 'failed') return 'error';
   if (lastSyncedAt === null && (lastSyncStatus === null || lastSyncStatus === 'idle')) return 'never';
   return 'ok';

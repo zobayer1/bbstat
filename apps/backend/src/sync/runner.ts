@@ -211,6 +211,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     slug: r.slug,
     fullName: r.fullName,
     diffStatsEnabled: r.diffStatsEnabled,
+    diffStatsExcludePatterns: r.diffStatsExcludePatterns,
   }));
   const now = new Date();
   const dueHandles: RepositoryHandle[] =
@@ -231,6 +232,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
             slug: r.slug,
             fullName: r.fullName,
             diffStatsEnabled: r.diffStatsEnabled,
+            diffStatsExcludePatterns: r.diffStatsExcludePatterns,
           }));
   deps.logger.info?.(
     { trigger, workspace: deps.workspace, repoCount: handles.length, dueCount: dueHandles.length },
@@ -251,7 +253,13 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     : syncRepositoryCommits;
 
   const tick = await runCommitsTick(
-    { client: deps.client, store: deps.commitStore, logger: deps.logger, syncOne },
+    {
+      client: deps.client,
+      store: deps.commitStore,
+      logger: deps.logger,
+      discoveryStore: deps.store,
+      syncOne,
+    },
     dueHandles,
     deps.commitTickOptions ?? {},
   );
@@ -280,6 +288,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
           client: deps.client,
           store: deps.commitStore,
           logger: deps.logger,
+          discoveryStore: deps.store,
           ...(deps.rollupStore ? { rollupStore: deps.rollupStore } : {}),
           ...(deps.userSummaryCache ? { userSummaryCache: deps.userSummaryCache } : {}),
         },
@@ -428,6 +437,7 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
           slug: r.slug,
           fullName: r.fullName,
           diffStatsEnabled: r.diffStatsEnabled,
+          diffStatsExcludePatterns: r.diffStatsExcludePatterns,
         }))
       : rows
           .filter((r) =>
@@ -444,6 +454,7 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
             slug: r.slug,
             fullName: r.fullName,
             diffStatsEnabled: r.diffStatsEnabled,
+            diffStatsExcludePatterns: r.diffStatsExcludePatterns,
           }));
   deps.logger.info?.(
     { trigger, workspace: deps.workspace, repoCount: rows.length, dueCount: dueHandles.length },
