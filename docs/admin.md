@@ -14,7 +14,10 @@ the dev CA) and the default backend at `bbstat.localhost:8443`.
 ## Sync triggers
 
 Manual analogues of the cron-driven sync jobs. Idempotent — re-running
-them produces the same end state.
+them produces the same end state. Manual triggers **bypass the adaptive
+per-repo backoff** ([docs/sync.md "Layer 5"](sync.md)) — every tracked
+repo is considered regardless of how recently it was synced. The hourly
+BB-call budget still applies.
 
 | Method | Path                           | Role                                                                                                                       |
 | ------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
@@ -30,7 +33,8 @@ curl -k -X POST https://bbstat.localhost:8443/api/admin/sync/commits | jq
 
 Single-repo equivalents of the ticks above. Useful for debugging,
 backfills, and post-fix verification without waiting on the cron round-
-robin.
+robin. These call `syncRepositoryCommits` / `syncRepositoryPullRequests`
+directly, so they also bypass the adaptive backoff layer.
 
 | Method | Path                                                         | Role                                                                                                                      |
 | ------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |

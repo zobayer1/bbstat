@@ -75,6 +75,21 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
     async listTrackedRepositories() {
       return Array.from(state.repositories.values()).filter((r) => !r.archived);
     },
+    async listRepositoriesForSync() {
+      // Synthesize the activity timestamps to nulls; tests in this file
+      // don't exercise the backoff path. The runner falls back to
+      // createdAt as the activity floor.
+      return Array.from(state.repositories.values())
+        .filter((r) => !r.archived)
+        .map((r) => ({
+          ...r,
+          lastSyncedAt: null,
+          prLastSyncedAt: null,
+          latestCommitAt: null,
+          latestPrAt: null,
+          createdAt: new Date(),
+        }));
+    },
   };
 
   return { store, state };

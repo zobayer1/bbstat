@@ -10,6 +10,7 @@ import { createDrizzleDiscoveryStore } from './sync/discovery-store.js';
 import { createDrizzlePrStore } from './sync/pr-store.js';
 import { loadSeedTrackedRepos } from './sync/discovery.js';
 import {
+  backoffOptionsFromConfig,
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
   diffStatsBackfillOptionsFromConfig,
@@ -87,6 +88,7 @@ async function main(): Promise<void> {
       prTickOptions: prTickOptionsFromConfig(config),
       deepenOptions: deepenOptionsFromConfig(config),
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
+      backoffOptions: backoffOptionsFromConfig(config),
     };
   }
 

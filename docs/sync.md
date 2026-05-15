@@ -34,10 +34,12 @@ fixed-interval retries keeps it hot, and BB's eventual response is to refuse
 every call for the rest of the rolling window. We get one cycle of dashboard
 data per hour instead of every 5 minutes.
 
-The pipeline solves this with **four layers of defense**, each addressing a
-specific failure mode. Layers compose: an outer layer never trusts the
-inner one to have gotten things right, so even if (for example) the call
-pacer mispredicts BB's burst threshold, the budget gate and the tick-level
+The pipeline solves this with **five layers of defense**, each addressing a
+specific failure mode. Layers 1–4 are inside the call path (how fast / how
+many BB calls); layer 5 is upstream of it (which repos to even consider
+this tick). Layers compose: an outer layer never trusts the inner one to
+have gotten things right, so even if (for example) the call pacer
+mispredicts BB's burst threshold, the budget gate and the tick-level
 abort still cap the blast radius.
 
 ### Layer 1 — Self-counted call budget (hourly soft cap)
@@ -163,14 +165,14 @@ update naturally as work flows through.
 The sync runs five derived queues simultaneously, all drawing from the same
 hourly call budget:
 
-| Queue           | Source                                                  | Order                                | Tick                      |
-| --------------- | ------------------------------------------------------- | ------------------------------------ | ------------------------- |
-| Members         | `runMembersSync` (cron only)                            | N/A — one workspace call             | `SYNC_MEMBERS_CRON`       |
-| Discovery       | `runReposSync` (cron + admin)                           | YAML order from `tracked-repos.yaml` | `SYNC_REPOS_CRON`         |
-| Commit (delta)  | `DiscoveryStore.listTrackedRepositories()`              | `last_synced_at ASC NULLS FIRST`     | `SYNC_COMMITS_CRON`       |
-| Diff-stats      | `commits WHERE diff_stats_synced_at IS NULL` (per repo) | `authored_at DESC`                   | piggy-back on commit tick |
-| Deepen-backfill | `sync_state WHERE deepen_complete = false`              | `deepen_last_run_at ASC NULLS FIRST` | piggy-back on commit tick |
-| Pull-requests   | `DiscoveryStore.listTrackedRepositories()`              | `last_synced_at ASC NULLS FIRST`     | `SYNC_PRS_CRON`           |
+| Queue           | Source                                                                       | Order                                | Tick                      |
+| --------------- | ---------------------------------------------------------------------------- | ------------------------------------ | ------------------------- |
+| Members         | `runMembersSync` (cron only)                                                 | N/A — one workspace call             | `SYNC_MEMBERS_CRON`       |
+| Discovery       | `runReposSync` (cron + admin)                                                | YAML order from `tracked-repos.yaml` | `SYNC_REPOS_CRON`         |
+| Commit (delta)  | `listRepositoriesForSync()` filtered by `isDueForSync` (commit-list backoff) | `last_synced_at ASC NULLS FIRST`     | `SYNC_COMMITS_CRON`       |
+| Diff-stats      | `commits WHERE diff_stats_synced_at IS NULL` (per opted-in repo, all)        | `authored_at DESC`                   | piggy-back on commit tick |
+| Deepen-backfill | `sync_state WHERE deepen_complete = false`                                   | `deepen_last_run_at ASC NULLS FIRST` | piggy-back on commit tick |
+| Pull-requests   | `listRepositoriesForSync()` filtered by `isDueForSync` (PR backoff)          | `last_synced_at ASC NULLS FIRST`     | `SYNC_PRS_CRON`           |
 
 None of these are persistent queue tables — every queue is **derived state**
 materialised at tick start from `repositories` + `sync_state` + `commits`.
@@ -184,6 +186,69 @@ Each queue has its own budget threshold (`COMMIT_SYNC_BUDGET_THRESHOLD`,
 delta. The deepen threshold (100) is higher than the commit threshold (20),
 so heavy delta ticks naturally starve deepen rather than the reverse —
 freshness beats history.
+
+### Layer 5 — Adaptive per-repo backoff (cron-tick yield)
+
+Layers 1–4 control _how fast_ we make BB calls. Layer 5 controls _which
+repos we even consider_ per tick.
+
+At ~100+ tracked repos, the idle-delta cost (1 BB call per repo, found
+`last_seen_sha` on first page, stopped) is the dominant load. A
+fully-quiet org would burn ~160 × 12 = 1920 calls/hr — over budget.
+Worse, the fair round-robin (`last_synced_at ASC NULLS FIRST`)
+_actively prioritises_ the longest-unsynced repos, which means dormant
+repos crowd the queue and starve active ones.
+
+The backoff layer skips quiet repos at the cron-tick boundary. Each
+repo has an effective polling interval derived from how long it has
+been quiet:
+
+```
+days_quiet      = (now - MAX(activity)) / 86400        // commits.authored_at for commit-sync,
+                                                       // pull_requests.bitbucket_updated_at for PR-sync
+intervalMin     = clamp(days_quiet × SLOPE, MIN, MAX)
+due_for_sync    = (last_synced_at IS NULL)
+               || (now - last_synced_at) >= intervalMin
+```
+
+Defaults (`SLOPE=4 min/day`, `MIN=5 min`, `MAX=1440 min`):
+
+| Days quiet | Effective interval |
+| ---------: | -----------------: |
+|        0–1 |              5 min |
+|          7 |             28 min |
+|         30 |          2 h 0 min |
+|         90 |          6 h 0 min |
+|        180 |         12 h 0 min |
+|       365+ |       24 h (clamp) |
+
+Empty repos (no commits ever ingested) fall back to `repositories.created_at`
+as the activity floor — so a freshly-tracked empty repo polls every
+5 min until commits arrive (or it's been on the books long enough for
+the backoff to kick in).
+
+Self-healing: a quiet repo that suddenly receives a commit has
+`MAX(authored_at)` reset to today → next tick its interval is back to
+5 min. No reclassification logic; the formula re-evaluates each tick.
+
+**What backoff does NOT affect:**
+
+- **Diff-stats backfill tick** — receives the full unfiltered repo list,
+  drains pending `/diffstat/:sha` fetches for any opted-in repo as long
+  as budget allows. Diff-stats work is _independent_ of commit-list
+  staleness — a repo whose commit-list check is skipped this tick can
+  still have its pending diff stats walked.
+- **Deepen-backfill tick** — picks its own repo via
+  `pickRepoForDeepening()` (incomplete-deepen round-robin). Quiet repos
+  still get history backfilled.
+- **Manual admin triggers** — `/api/admin/sync/repositories/:ws/:slug/commits`
+  and related hit `syncRepositoryCommits` directly without going through
+  the listRepositoriesForSync filter. Operators always get an immediate
+  sync regardless of staleness.
+
+Logs surface `repoCount` (total non-archived) and `dueCount` (after
+backoff filter) on every `commit sync start` / `PR sync start` line, so
+you can watch the savings.
 
 ### Why progressive pacing beats fixed sleep
 
@@ -209,12 +274,12 @@ All four converge on `runSync()`-style functions in
 `apps/backend/src/sync/runner.ts` and share the same dedupe / idempotency /
 store contracts:
 
-| Function              | Cron default   | What it does                                                                 |
-| --------------------- | -------------- | ---------------------------------------------------------------------------- |
-| `runMembersSync`      | `*/10 * * * *` | Workspace members → `users`                                                  |
-| `runReposSync`        | `*/5 * * * *`  | Curated tracked-repo bootstrap → `repositories` (incl. `diff_stats_enabled`) |
-| `runCommitsSync`      | `*/5 * * * *`  | Per-repo commit delta pull + one piggybacked deepen-backfill page per tick   |
-| `runPullRequestsSync` | `0 * * * *`    | Per-repo PR delta pull across all four BB states                             |
+| Function              | Cron default   | What it does                                                                                                                          |
+| --------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `runMembersSync`      | `*/10 * * * *` | Workspace members → `users`                                                                                                           |
+| `runReposSync`        | `*/5 * * * *`  | Curated tracked-repo bootstrap → `repositories` (initial seed only)                                                                   |
+| `runCommitsSync`      | `*/5 * * * *`  | Per-repo commit delta pull (with inline-eager /diffstat for new commits) → deepen-backfill tick → diff-stats backfill tick. See below |
+| `runPullRequestsSync` | `0 * * * *`    | Per-repo PR delta pull across all four BB states                                                                                      |
 
 `make dev-sync` runs the cron host. The HTTPS API (`make dev-backend`) does
 **not** schedule any cron — they're deliberately separate processes, so
@@ -227,28 +292,38 @@ The set of repos `runReposSync` / `runCommitsSync` / `runPullRequestsSync`
 operate on is sourced from `tracked-repos.yaml` at the repo root (gitignored
 — copy from `tracked-repos.yaml.example` on a fresh clone). The file holds
 one top-level `repos:` list whose entries are either a plain
-`"<workspace>/<slug>"` string (default — diff stats off) or an object
-`{ name: "<workspace>/<slug>", diffStats: true }` to opt that repo into the
-Phase 4 per-commit diff-stat ingest. Each entry is upserted into
-`repositories` + `sync_state` via `bootstrapTrackedRepositories`, idempotent
-across runs; the `diff_stats_enabled` column is written through on insert
-and **updated** on subsequent runs when the YAML value diverges (so flipping
-the flag in YAML re-applies at the next discovery tick). The
-`BootstrapReposResult.diffStatsToggled` counter reports how many rows
-changed per run.
+`"<workspace>/<slug>"` string (defaults — `diffStats=false`, `archived=false`)
+or an object `{ name: "<workspace>/<slug>", diffStats?: boolean, archived?: boolean }`
+for explicit per-flag seeding.
+
+**YAML is seed-only.** `bootstrapTrackedRepositories` inserts brand-new repos
+into `repositories` + `sync_state` using the YAML's per-flag values as the
+initial column values. Once a row exists, the DB is canonical:
+`diff_stats_enabled` and `archived` are flipped via admin endpoints
+(`POST /repositories/:ws/:slug/archive`, `/unarchive`) or direct SQL, and
+those changes survive every subsequent discovery sync. Editing the YAML for
+an existing repo is a no-op for those flags — operators can trust their
+runtime toggles aren't fighting the YAML reconciler.
 
 The file is read on backend startup (one-time fail-loud parse check) and
-re-read on every `runReposSync` / `runDiscoverySync` invocation, so YAML edits
-land at the next sync without a restart. A missing file at the default path
-is a no-op; an explicit `SEED_REPO_FILE_PATH` that doesn't exist fails loud
-at startup. Malformed YAML throws — at boot if bad on startup, otherwise as
-the sync's error path (500 on `POST /sync/discover`, error log under cron).
+re-read on every `runReposSync` / `runDiscoverySync` invocation, so adding a
+**new** repo to the YAML lands at the next sync without a restart. A missing
+file at the default path is a no-op; an explicit `SEED_REPO_FILE_PATH` that
+doesn't exist fails loud at startup. Malformed YAML throws — at boot if bad
+on startup, otherwise as the sync's error path (500 on `POST /sync/discover`,
+error log under cron).
 
-Removal isn't symmetric: deleting a YAML entry stops the repo being
-re-bootstrapped, but the already-tracked row stays in `repositories` and
-keeps getting synced. Soft-delete via a `tracked` column is on the Phase 5
-roadmap; for now the workaround is a manual DELETE against `repositories`
-(cascades to `sync_state` and `commits`).
+**Removal:** dropping a YAML entry does NOT untrack the repo (the row stays
+in `repositories` and keeps getting synced). The intended retirement path is
+`POST /api/admin/repositories/:ws/:slug/archive` — sets `archived = true`,
+keeps every commit / sync_state / pull_request row intact for historical
+queries, and excludes the repo from `listTrackedRepositories()` /
+`listRepositoriesForSync()` so commit / deepen / diff-stats ticks skip it
+entirely. Reversible via `/unarchive`. A hard delete (`DELETE FROM
+repositories WHERE …`, cascading to commits / sync_state / pull_requests) is
+still possible for "this repo was a mistake, drop everything" cases, but
+the archive endpoint is the right answer for "stop syncing but keep the
+data."
 
 ## Commit-sync modes
 
@@ -467,54 +542,155 @@ throughput adjusts without code changes.
 
 ## Diff-stat ingest (opt-in, Phase 4)
 
-Per-commit `additions` / `deletions` aren't populated by the commit walk
-itself — that would mean one `/diffstat/:sha` call per commit ingested
-across the entire backfill. Instead, diff-stat ingest is a separate
-opt-in step inside the commit tick that runs only for repos with
-`repositories.diff_stats_enabled = true` and only for commits whose
-`commits.diff_stats_synced_at` is still NULL. A partial index
-(`commits_pending_diff_stats_idx (repository_id) WHERE
-diff_stats_synced_at IS NULL`) keeps the pickup query cheap as the commit
-log grows.
+Per-commit `additions` / `deletions` / `files_changed` aren't populated
+by the commit walk itself — that would mean one `/diffstat/:sha` call
+per commit ingested across the entire backfill. Instead, diff-stat
+ingest is gated on `repositories.diff_stats_enabled = true` and walks
+commits via two independent paths:
 
-How it runs:
+- **Inline-eager (forward)** — runs _inside_ `syncRepositoryCommits`,
+  immediately after `insertCommits` returns the newly-landed rows. Walks
+  the just-inserted shas only (`fetchDiffStatsForCommits`); no DB pickup,
+  no per-repo cap (input is bounded by however many new commits arrived
+  this tick). Same-tick latency for new commits.
+- **Backfill (backward)** — `runDiffStatsBackfillTick` runs _after_
+  `runDeepenTick` in the same `runCommitsSync` invocation. Walks
+  `commits WHERE diff_stats_synced_at IS NULL` across every opted-in
+  repo, capped at `DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK` (default 50) per repo per tick, newest-authored-first. Catches up on (a) the
+  historical backlog after a repo opts in, and (b) inline-eager
+  transient failures (the row stays NULL → retried next tick).
 
-- `syncRepositoryCommits` invokes `syncRepositoryDiffStats` after
-  `markSyncSuccess` lands, so the cursor and the new commit rows are
-  durable before any diff call happens. Failures in this step never
-  poison the commit-sync result: the rows already inserted stay
-  inserted, the cursor stays advanced, and any commits with
-  `diff_stats_synced_at IS NULL` get retried on the next tick.
-- Per tick: up to `DIFF_STATS_MAX_PER_REPO_PER_TICK` (default 50)
-  pending commits per repo, ordered newest-authored-first. Before each
-  fetch, `getBudgetRemaining()` is checked against
-  `DIFF_STATS_BUDGET_THRESHOLD` (default 10); if the BB-call budget
-  falls below the threshold the worker stops and remaining commits roll
-  over to the next tick.
-- Per commit: one `/diffstat/:sha` call, sum across files (treating
-  NULL `lines_added/lines_removed` as zero for binary diffs), UPDATE
-  `commits` with the totals and stamp `diff_stats_synced_at = now()`.
-  A per-commit fetch error logs and continues — that one row stays
-  NULL and gets retried; siblings aren't affected.
+A partial index (`commits_pending_diff_stats_idx (repository_id) WHERE
+diff_stats_synced_at IS NULL`) keeps the backfill pickup query cheap as
+the commit log grows.
 
-Backfilled history (cold-mode commits inserted during the first run for
-a repo) is implicitly skipped per the roadmap — those commits ALSO have
-`diff_stats_synced_at IS NULL` and will be picked up, so if you toggle
-a repo into diff*stats \_after* its cold-mode backfill, expect a one-time
-spend of up to `pending_commits / DIFF_STATS_MAX_PER_REPO_PER_TICK`
-ticks to drain. The cap keeps that drain bounded.
+Per commit (either path): one `/diffstat/:sha` call (or more for
+multi-file mega-commits — BB paginates), sum lines across files (treating
+NULL `lines_added/lines_removed` as zero for binary diffs), count
+entries for `files_changed`, UPDATE `commits` with the totals and stamp
+`diff_stats_synced_at = now()`. Per-commit fetch error logs and
+continues — that one row stays NULL and gets retried on the next
+backfill tick; siblings aren't affected.
 
-Rollup interaction: `commit_daily` aggregates additions / deletions from
-`commits`. The rollup hook in `dashboard/rollup-hook.ts` recomputes the
-`commit_daily` day window whenever either `inserted > 0` OR
-`diffStatsUpdated > 0`, passing the union of `insertedRange` and
-`diffStatsRange` to `recomputeCommitDailyForRepo`. Cache invalidation
-widens to the same range.
+**Independence from commit-sync backoff.** The inline-eager path is
+gated transitively (it runs inside `syncRepositoryCommits`, which
+backoff skips on quiet repos). The **backfill tick is NOT** — it
+receives the full unfiltered opted-in repo list and drains pending
+`/diffstat` work for any opted-in repo every cron tick, regardless of
+whether commit-sync ran for that repo this tick. So flipping
+`diff_stats_enabled = true` on a backed-off repo lights up the backfill
+on the very next tick.
+
+Once a repo is fully drained (`deepen_complete = true` AND no rows with
+`diff_stats_synced_at IS NULL`), the backfill tick's cost per cron is
+**1 DB query, 0 BB calls** — `listPendingDiffStatCommits()` returns `[]`
+and the walker early-exits.
+
+`is_merge` is captured at commit-insert time from BB's `parents.length >
+1`. The flag is independent of diff-stat fetch state: a merge commit
+still has its /diffstat fetched (the line counts represent the merged
+branch's full delta, not authorship volume — surfaced in the activity
+feed as a "merge" pill). User-facing 30-day aggregates over
+additions/deletions default-exclude `is_merge = true` rows. For repos
+whose history pre-dates the `is_merge` column (migration 0006),
+`POST /api/admin/repositories/:ws/:slug/backfill/is_merge` walks BB's
+/commits and bulk-UPDATEs the column by sha — see [docs/admin.md](admin.md).
+
+Rollup interaction: `commit_daily` aggregates additions / deletions /
+files_changed from `commits`. The rollup hook in
+`dashboard/rollup-hook.ts` recomputes the `commit_daily` day window
+whenever either `inserted > 0` (inline-eager) OR `diffStatsUpdated > 0`
+(backfill), passing the union of `insertedRange` and `diffStatsRange` to
+`recomputeCommitDailyForRepo`. Cache invalidation widens to the same
+range.
+
+## Tick execution order
+
+The five tick-level orchestrators inside `runCommitsSync` execute in a
+deterministic order, all sharing the same hourly BB-call budget. The
+shape below shows one cron firing end-to-end — useful when reading a
+log line back-to-front:
+
+```
+runCommitsSync()
+│
+├─ listRepositoriesForSync()                   ← one query: repo rows
+│                                                + activity timestamps
+│                                                + last-sync timestamps
+│
+├─ filter handles → dueHandles                 ← Layer 5 backoff
+│   (isDueForSync per repo: due iff
+│    now - lastSyncedAt >= interval(daysQuiet))
+│
+├─ runCommitsTick(dueHandles)
+│   for each due repo, concurrent ≤ COMMIT_SYNC_CONCURRENCY:
+│   ├─ syncRepositoryCommits():
+│   │  ├─ paginate /commits stopping at lastSeenSha
+│   │  ├─ insertCommits()                       ← new commits land
+│   │  │                                          (diff_stats_synced_at = NULL,
+│   │  │                                           is_merge from parents.length>1)
+│   │  ├─ markSyncSuccess()                     ← cursor + last_synced_at
+│   │  └─ if (diffStatsEnabled && insertedRows > 0):
+│   │     └─ fetchDiffStatsForCommits()         ★ INLINE-EAGER /diffstat ★
+│   │                                             walks just-inserted shas,
+│   │                                             stamps diff_stats_synced_at
+│   └─ rollup hook recomputes commit_daily over
+│      insertedRange ∪ diffStatsRange
+│
+├─ runDeepenTick()                              ← picks ONE repo via
+│   pickRepoForDeepening (deepen_complete=false,
+│   round-robin on deepen_last_run_at)
+│   ├─ if budget < DEEPEN_BUDGET_THRESHOLD: return
+│   └─ deepenOneRepo: walk one backfill page,
+│      inserts older commits (diff_stats_synced_at = NULL),
+│      stamps deepen_complete = true if reached root
+│
+└─ runDiffStatsBackfillTick(handles)            ← FULL opted-in list,
+                                                  ignores Layer 5 backoff
+   for each opted-in repo, concurrent ≤ DIFF_STATS_BACKFILL_CONCURRENCY:
+   ├─ if budget < DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: defer
+   ├─ listPendingDiffStatCommits(repo, 50)       ← pickup
+   │  (commits WHERE diff_stats_synced_at IS NULL
+   │   ORDER BY authored_at DESC LIMIT 50)
+   └─ walk + fetch /diffstat per commit, stamp
+      diff_stats_synced_at, rollup recompute for the touched range
+```
+
+A few invariants worth naming:
+
+- **Same-tick coverage for forward stats.** A new commit ingested by
+  `runCommitsTick` has its `/diffstat` fetched in the same per-repo
+  function call (inline-eager). By the time `runDiffStatsBackfillTick`
+  runs at the end of the cron, those just-inserted rows are already
+  stamped and won't appear in the pickup. The backfill is strictly the
+  catch-up path for historical and retry work.
+- **Three independent budget gates, one ledger.** `COMMIT_SYNC_BUDGET_THRESHOLD`
+  (default 20), `DEEPEN_BUDGET_THRESHOLD` (default 100), and
+  `DIFF_STATS_BACKFILL_BUDGET_THRESHOLD` (default 20) each yield at a
+  different point. Higher thresholds = more reserved headroom = lower
+  priority. Deepen yields first (high threshold) so an aggressive
+  commit-sync tick doesn't starve forward freshness; diff-stats
+  backfill runs last and uses whatever slack survives.
+- **Layer 5 only affects forward delta sync.** Deepen has its own queue
+  (`pickRepoForDeepening`); diff-stats backfill iterates the unfiltered
+  opted-in list. A repo backed off for delta sync still gets historical
+  deepen + diff-stats backfill on every tick.
+- **Idempotent at every step.** Re-running a tick (manual + cron racing,
+  or a retry after a partial failure) converges: insertCommits dedupes
+  on `(repository_id, sha)`, diff-stat fetches no-op on rows already
+  stamped, deepen picks the next round-robin candidate.
+
+`runPullRequestsSync` follows a simpler shape: `listRepositoriesForSync()`
+→ filter by `isDueForSync` (keyed on `latestPrAt` + `prLastSyncedAt`)
+→ `runPullRequestsTick(dueHandles)`. No deepen, no backfill — PR state
+is mutable, so the regular delta walk handles updates inline.
 
 ## Pull-request ingest (Phase 4)
 
-PR ingest runs on its own 30-minute cron (`SYNC_PRS_CRON`) — PRs mutate
-slower than commits, and a tighter cadence would waste budget. The
+PR ingest runs on its own hourly cron (`SYNC_PRS_CRON` default `0 * * * *`)
+— PRs mutate slower than commits, and a tighter cadence would waste budget.
+Same Layer 5 backoff as commit-sync applies, keyed on
+`MAX(pull_requests.bitbucket_updated_at)` rather than commits. The
 mechanics mirror the commit pipeline:
 
 - BB endpoint: `/repositories/{ws}/{slug}/pullrequests?state=OPEN&state=
@@ -560,24 +736,29 @@ bitbucket_pr_id) DO UPDATE` — PR state mutates over a PR's lifetime
 All knobs have safe defaults — a fresh clone runs the cron without
 overrides. Set in `.env` at the repo root.
 
-| Env var                            | Default       | Notes                                                                            |
-| ---------------------------------- | ------------- | -------------------------------------------------------------------------------- |
-| `BITBUCKET_HOURLY_CALL_BUDGET`     | `1000`        | Layer 1: hourly soft cap on outbound BB calls, shared across every sync surface. |
-| `BITBUCKET_MIN_CALL_INTERVAL_MS`   | `400`         | Layer 2 floor: minimum wall-clock interval between successive BB calls.          |
-| `BITBUCKET_MAX_CALL_INTERVAL_MS`   | `3200`        | Layer 2 ceiling: pacing doubles on each 429, capped here; abort triggers above.  |
-| `SYNC_COMMITS_CRON`                | `*/5 * * * *` | When the commit cron fires. Also drives the piggybacked deepen-backfill step.    |
-| `COMMITS_BACKFILL_MAX_PAGES`       | `5`           | Cold-mode commit cap: stop after N pages of 100.                                 |
-| `COMMITS_BACKFILL_SINCE`           | _(empty)_     | Cold-mode commit cap: ISO 8601 date. Empty = no date cap.                        |
-| `COMMIT_SYNC_CONCURRENCY`          | `3`           | Max repos in flight per commit tick.                                             |
-| `COMMIT_SYNC_BUDGET_THRESHOLD`     | `20`          | Defer next repo when budget falls below this.                                    |
-| `DEEPEN_BACKFILL_MAX_PAGES`        | `5`           | Self-queueing deepen-backfill: pages × 100 commits per piggybacked run.          |
-| `DEEPEN_BUDGET_THRESHOLD`          | `100`         | Headroom required after the delta tick before deepen runs. Yields to delta sync. |
-| `DIFF_STATS_MAX_PER_REPO_PER_TICK` | `50`          | Phase 4: per-repo pending-commit cap for the diff-stat worker.                   |
-| `DIFF_STATS_BUDGET_THRESHOLD`      | `10`          | Phase 4: per-repo budget gate inside the diff-stat worker loop.                  |
-| `SYNC_PRS_CRON`                    | `0 * * * *`   | Phase 4: when the PR cron fires (hourly). PR data mutates slower than commits.   |
-| `PR_BACKFILL_MAX_PAGES`            | `5`           | Phase 4: cold-mode PR cap (pages × 100).                                         |
-| `PR_SYNC_CONCURRENCY`              | `3`           | Phase 4: max repos in flight per PR tick.                                        |
-| `PR_SYNC_BUDGET_THRESHOLD`         | `20`          | Phase 4: defer next repo when budget falls below this.                           |
+| Env var                                     | Default       | Notes                                                                                  |
+| ------------------------------------------- | ------------- | -------------------------------------------------------------------------------------- |
+| `BITBUCKET_HOURLY_CALL_BUDGET`              | `1000`        | Layer 1: hourly soft cap on outbound BB calls, shared across every sync surface.       |
+| `BITBUCKET_MIN_CALL_INTERVAL_MS`            | `400`         | Layer 2 floor: minimum wall-clock interval between successive BB calls.                |
+| `BITBUCKET_MAX_CALL_INTERVAL_MS`            | `3200`        | Layer 2 ceiling: pacing doubles on each 429, capped here; abort triggers above.        |
+| `SYNC_COMMITS_CRON`                         | `*/5 * * * *` | When the commit cron fires. Also drives the piggybacked deepen-backfill step.          |
+| `COMMITS_BACKFILL_MAX_PAGES`                | `5`           | Cold-mode commit cap: stop after N pages of 100.                                       |
+| `COMMITS_BACKFILL_SINCE`                    | _(empty)_     | Cold-mode commit cap: ISO 8601 date. Empty = no date cap.                              |
+| `COMMIT_SYNC_CONCURRENCY`                   | `3`           | Max repos in flight per commit tick.                                                   |
+| `COMMIT_SYNC_BUDGET_THRESHOLD`              | `20`          | Defer next repo when budget falls below this.                                          |
+| `DEEPEN_BACKFILL_MAX_PAGES`                 | `5`           | Self-queueing deepen-backfill: pages × 100 commits per piggybacked run.                |
+| `DEEPEN_BUDGET_THRESHOLD`                   | `100`         | Headroom required after the delta tick before deepen runs. Yields to delta sync.       |
+| `DIFF_STATS_BUDGET_THRESHOLD`               | `10`          | Phase 4: inline-eager forward fetch budget gate inside the commit-sync per-repo loop.  |
+| `DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK` | `50`          | Phase 4: per-repo pending-commit cap for the diff-stats _backfill_ tick (post-deepen). |
+| `DIFF_STATS_BACKFILL_BUDGET_THRESHOLD`      | `20`          | Phase 4: budget gate for the backfill tick.                                            |
+| `DIFF_STATS_BACKFILL_CONCURRENCY`           | `1`           | Phase 4: max repos in flight for the backfill tick (serial by default).                |
+| `SYNC_PRS_CRON`                             | `0 * * * *`   | Phase 4: when the PR cron fires (hourly). PR data mutates slower than commits.         |
+| `PR_BACKFILL_MAX_PAGES`                     | `5`           | Phase 4: cold-mode PR cap (pages × 100).                                               |
+| `PR_SYNC_CONCURRENCY`                       | `3`           | Phase 4: max repos in flight per PR tick.                                              |
+| `PR_SYNC_BUDGET_THRESHOLD`                  | `20`          | Phase 4: defer next repo when budget falls below this.                                 |
+| `SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY`      | `4`           | Layer 5: minutes added to the polling interval per day a repo has been quiet.          |
+| `SYNC_BACKOFF_MIN_INTERVAL_MIN`             | `5`           | Layer 5: floor on the per-repo polling interval (default matches the commit cron).     |
+| `SYNC_BACKOFF_MAX_INTERVAL_MIN`             | `1440`        | Layer 5: ceiling on the per-repo polling interval (24h default).                       |
 
 The members + repos crons (`SYNC_MEMBERS_CRON`, `SYNC_REPOS_CRON`) are also
 overridable, but their defaults are intentionally tight for dev visibility —

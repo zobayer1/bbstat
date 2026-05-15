@@ -66,6 +66,20 @@ const envSchema = z.object({
   COMMIT_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
   COMMIT_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 
+  // Adaptive backoff for the commit + PR sync cron ticks. Linear slope:
+  // every day a repo has been quiet (no new commits / PRs) adds
+  // SLOPE_MIN_PER_QUIET_DAY minutes to its minimum polling interval,
+  // clamped to [MIN, MAX]. Defaults: 4 min/day, [5, 1440] → an idle
+  // repo's interval grows from 5 min (today) to 2h (30d) to 24h
+  // (365d+). Pure short-circuit: a repo whose interval hasn't elapsed
+  // is skipped this tick without any BB call. Diff-stats backfill and
+  // deepen are NOT affected — both have their own orthogonal queues
+  // and run as long as budget allows. Manual admin sync triggers also
+  // bypass backoff (they hit syncRepositoryCommits directly).
+  SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY: z.coerce.number().nonnegative().default(4),
+  SYNC_BACKOFF_MIN_INTERVAL_MIN: z.coerce.number().nonnegative().default(5),
+  SYNC_BACKOFF_MAX_INTERVAL_MIN: z.coerce.number().int().positive().default(1440),
+
   // Phase 4 T21: per-repo diff-stat ingest (1 BB call per file-page of a
   // commit's /diffstat). Opt-in via tracked-repos.yaml. Two parallel
   // paths share the inner walker:

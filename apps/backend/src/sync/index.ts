@@ -9,6 +9,7 @@ import { createDrizzleDiscoveryStore } from './discovery-store.js';
 import { createDrizzlePrStore } from './pr-store.js';
 import { loadSeedTrackedRepos } from './discovery.js';
 import {
+  backoffOptionsFromConfig,
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
   diffStatsBackfillOptionsFromConfig,
@@ -62,6 +63,7 @@ async function main(): Promise<void> {
   const prTickOptions = prTickOptionsFromConfig(config);
   const deepenOptions = deepenOptionsFromConfig(config);
   const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
+  const backoffOptions = backoffOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
     client,
@@ -77,6 +79,7 @@ async function main(): Promise<void> {
     prTickOptions,
     deepenOptions,
     diffStatsBackfillOptions,
+    backoffOptions,
   };
 
   // Four independent schedules. Members rarely change; repo metadata
@@ -112,6 +115,7 @@ async function main(): Promise<void> {
       prTickOptions,
       deepenOptions,
       diffStatsBackfillOptions,
+      backoffOptions,
       seedCount: initialSeeds.length,
     },
     'Sync runner scheduled. Press Ctrl+C to exit.',

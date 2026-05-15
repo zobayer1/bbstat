@@ -34,6 +34,24 @@ export interface RepositoryRow {
   archived: boolean;
 }
 
+// Richer row used by the sync runners to decide which repos are due
+// for a BB call this tick. Carries the timestamps the backoff formula
+// needs (see src/sync/backoff.ts). Returned by listRepositoriesForSync().
+export interface RepositoryForSyncRow extends RepositoryRow {
+  // From sync_state — when this repo's commit / PR sync last completed.
+  // Null = never synced (always due).
+  lastSyncedAt: Date | null;
+  prLastSyncedAt: Date | null;
+  // From MAX(commits.authored_at) / MAX(pull_requests.bitbucket_updated_at).
+  // Null = no commits / PRs ever ingested for this repo.
+  latestCommitAt: Date | null;
+  latestPrAt: Date | null;
+  // From repositories.created_at — used as the activity-floor when the
+  // MAX(...) timestamps are null (empty repos still back off based on
+  // how long they've been tracked).
+  createdAt: Date;
+}
+
 export interface RepositoryInsertInput {
   bitbucketUuid: string;
   workspace: string;
@@ -85,6 +103,14 @@ export interface DiscoveryStore {
   // absent; archived rows keep their data but are skipped by sync). Used
   // by the commit-sync cron / admin trigger to build the tick's repo list.
   listTrackedRepositories(): Promise<RepositoryRow[]>;
+
+  // Richer variant used by the cron runners: includes per-repo activity
+  // timestamps (MAX(commits.authored_at) / MAX(pr.updated_at)) and
+  // last-sync timestamps so the runner can apply the adaptive backoff
+  // formula (see src/sync/backoff.ts). One query, two LEFT JOIN
+  // aggregates over the commit/PR tables — cheap at curated-set scale.
+  // Archived repos are filtered out, same as listTrackedRepositories.
+  listRepositoriesForSync(): Promise<RepositoryForSyncRow[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +211,75 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
 
     async updateRepositoryArchived(repositoryId, archived) {
       await db.update(repositories).set({ archived }).where(eq(repositories.id, repositoryId));
+    },
+
+    async listRepositoriesForSync() {
+      // One round-trip: every non-archived repo plus the two activity
+      // aggregates (MAX(commits.authored_at), MAX(pr.bitbucket_updated_at))
+      // pulled via LEFT JOIN subqueries. At curated-set scale (~hundreds
+      // of repos, tens of thousands of commits) this is sub-millisecond;
+      // if it ever isn't, materializing the aggregates into a column on
+      // sync_state would be the next step.
+      const rows = await db.execute<{
+        id: number;
+        bitbucket_uuid: string;
+        workspace: string;
+        project: string | null;
+        slug: string;
+        full_name: string;
+        diff_stats_enabled: boolean;
+        archived: boolean;
+        last_synced_at: Date | string | null;
+        pr_last_synced_at: Date | string | null;
+        latest_commit_at: Date | string | null;
+        latest_pr_at: Date | string | null;
+        created_at: Date | string;
+      }>(sql`
+        SELECT
+          r.id,
+          r.bitbucket_uuid,
+          r.workspace,
+          r.project,
+          r.slug,
+          r.full_name,
+          r.diff_stats_enabled,
+          r.archived,
+          r.created_at,
+          s.last_synced_at,
+          s.pr_last_synced_at,
+          latest_commit.authored_at AS latest_commit_at,
+          latest_pr.updated_at AS latest_pr_at
+        FROM repositories r
+        LEFT JOIN sync_state s ON s.repository_id = r.id
+        LEFT JOIN (
+          SELECT repository_id, MAX(authored_at) AS authored_at
+          FROM commits GROUP BY repository_id
+        ) latest_commit ON latest_commit.repository_id = r.id
+        LEFT JOIN (
+          SELECT repository_id, MAX(bitbucket_updated_at) AS updated_at
+          FROM pull_requests GROUP BY repository_id
+        ) latest_pr ON latest_pr.repository_id = r.id
+        WHERE r.archived = false
+        ORDER BY s.last_synced_at ASC NULLS FIRST, r.id ASC
+      `);
+      const toDate = (v: Date | string | null): Date | null =>
+        v === null ? null : v instanceof Date ? v : new Date(v);
+      const toDateNotNull = (v: Date | string): Date => (v instanceof Date ? v : new Date(v));
+      return rows.rows.map((r) => ({
+        id: r.id,
+        bitbucketUuid: r.bitbucket_uuid,
+        workspace: r.workspace,
+        project: r.project,
+        slug: r.slug,
+        fullName: r.full_name,
+        diffStatsEnabled: r.diff_stats_enabled,
+        archived: r.archived,
+        lastSyncedAt: toDate(r.last_synced_at),
+        prLastSyncedAt: toDate(r.pr_last_synced_at),
+        latestCommitAt: toDate(r.latest_commit_at),
+        latestPrAt: toDate(r.latest_pr_at),
+        createdAt: toDateNotNull(r.created_at),
+      }));
     },
 
     async listTrackedRepositories() {

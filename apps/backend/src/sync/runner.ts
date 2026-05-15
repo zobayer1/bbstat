@@ -15,6 +15,7 @@
 // but the receiver endpoint is deferred — see memory/webhook_deferred.md.
 
 import { bootstrapTrackedRepositories, syncWorkspaceMembers } from './discovery.js';
+import { isDueForSync, type BackoffOptions } from './backoff.js';
 import { runCommitsTick } from './commits-tick.js';
 import { syncRepositoryCommits } from './commits.js';
 import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
@@ -72,6 +73,12 @@ export interface SyncRunnerDeps {
   // commit sync still runs, but pending commits from past ticks won't
   // be picked up.
   diffStatsBackfillOptions?: DiffStatsBackfillTickOptions;
+  // Adaptive per-repo backoff for the commit + PR cron ticks. When
+  // omitted, every non-archived repo is checked every tick (legacy
+  // behavior). When wired (default in all runtime entrypoints), quiet
+  // repos are skipped per the formula in backoff.ts. Diff-stats
+  // backfill and deepen are NOT affected by this filter.
+  backoffOptions?: BackoffOptions;
 }
 
 interface BaseResult {
@@ -167,7 +174,13 @@ export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigge
 
 export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<CommitsSyncResult> {
   const startedAt = new Date().toISOString();
-  const rows = await deps.store.listTrackedRepositories();
+  const rows = await deps.store.listRepositoriesForSync();
+  // `handles` is the full curated set — used by the diff-stats backfill
+  // tick (which is independent of commit-list staleness; it drains
+  // pending /diffstat fetches for any opted-in repo as long as budget
+  // allows). `dueHandles` is the subset whose commit-list interval has
+  // elapsed under the backoff formula — used by the commit-tick. When
+  // backoffOptions is unset, dueHandles == handles (legacy behavior).
   const handles: RepositoryHandle[] = rows.map((r) => ({
     repositoryId: r.id,
     workspace: r.workspace,
@@ -175,7 +188,30 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     fullName: r.fullName,
     diffStatsEnabled: r.diffStatsEnabled,
   }));
-  deps.logger.info?.({ trigger, workspace: deps.workspace, repoCount: handles.length }, 'commit sync start');
+  const now = new Date();
+  const dueHandles: RepositoryHandle[] =
+    deps.backoffOptions === undefined
+      ? handles
+      : rows
+          .filter((r) =>
+            isDueForSync(deps.backoffOptions!, {
+              lastSyncedAt: r.lastSyncedAt,
+              latestActivityAt: r.latestCommitAt,
+              createdAt: r.createdAt,
+              now,
+            }),
+          )
+          .map((r) => ({
+            repositoryId: r.id,
+            workspace: r.workspace,
+            slug: r.slug,
+            fullName: r.fullName,
+            diffStatsEnabled: r.diffStatsEnabled,
+          }));
+  deps.logger.info?.(
+    { trigger, workspace: deps.workspace, repoCount: handles.length, dueCount: dueHandles.length },
+    'commit sync start',
+  );
 
   // When a rollupStore is wired, decorate the per-repo syncer so each
   // successful insert triggers a scoped commit_daily recompute (and, if
@@ -192,7 +228,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
 
   const tick = await runCommitsTick(
     { client: deps.client, store: deps.commitStore, logger: deps.logger, syncOne },
-    handles,
+    dueHandles,
     deps.commitTickOptions ?? {},
   );
 
@@ -280,19 +316,44 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
 
 export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<PrsSyncResult> {
   const startedAt = new Date().toISOString();
-  const rows = await deps.store.listTrackedRepositories();
-  const handles: RepositoryHandle[] = rows.map((r) => ({
-    repositoryId: r.id,
-    workspace: r.workspace,
-    slug: r.slug,
-    fullName: r.fullName,
-    diffStatsEnabled: r.diffStatsEnabled,
-  }));
-  deps.logger.info?.({ trigger, workspace: deps.workspace, repoCount: handles.length }, 'PR sync start');
+  const rows = await deps.store.listRepositoriesForSync();
+  // PR sync has no analog of the diff-stats backfill — there's just one
+  // list (the due-for-PR-sync set under the backoff formula). When
+  // backoffOptions is absent we fall back to the full list.
+  const now = new Date();
+  const dueHandles: RepositoryHandle[] =
+    deps.backoffOptions === undefined
+      ? rows.map((r) => ({
+          repositoryId: r.id,
+          workspace: r.workspace,
+          slug: r.slug,
+          fullName: r.fullName,
+          diffStatsEnabled: r.diffStatsEnabled,
+        }))
+      : rows
+          .filter((r) =>
+            isDueForSync(deps.backoffOptions!, {
+              lastSyncedAt: r.prLastSyncedAt,
+              latestActivityAt: r.latestPrAt,
+              createdAt: r.createdAt,
+              now,
+            }),
+          )
+          .map((r) => ({
+            repositoryId: r.id,
+            workspace: r.workspace,
+            slug: r.slug,
+            fullName: r.fullName,
+            diffStatsEnabled: r.diffStatsEnabled,
+          }));
+  deps.logger.info?.(
+    { trigger, workspace: deps.workspace, repoCount: rows.length, dueCount: dueHandles.length },
+    'PR sync start',
+  );
 
   const tick = await runPullRequestsTick(
     { client: deps.client, store: deps.prStore, logger: deps.logger },
-    handles,
+    dueHandles,
     deps.prTickOptions ?? {},
   );
 
@@ -357,5 +418,13 @@ export function diffStatsBackfillOptionsFromConfig(config: AppConfig): DiffStats
     maxPerRepoPerTick: config.DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK,
     budgetThreshold: config.DIFF_STATS_BACKFILL_BUDGET_THRESHOLD,
     concurrency: config.DIFF_STATS_BACKFILL_CONCURRENCY,
+  };
+}
+
+export function backoffOptionsFromConfig(config: AppConfig): BackoffOptions {
+  return {
+    slopeMinPerQuietDay: config.SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY,
+    minIntervalMin: config.SYNC_BACKOFF_MIN_INTERVAL_MIN,
+    maxIntervalMin: config.SYNC_BACKOFF_MAX_INTERVAL_MIN,
   };
 }

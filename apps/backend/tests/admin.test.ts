@@ -42,6 +42,9 @@ const testConfig: AppConfig = {
   PR_SYNC_BUDGET_THRESHOLD: 20,
   DEEPEN_BACKFILL_MAX_PAGES: 5,
   DEEPEN_BUDGET_THRESHOLD: 100,
+  SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY: 4,
+  SYNC_BACKOFF_MIN_INTERVAL_MIN: 5,
+  SYNC_BACKOFF_MAX_INTERVAL_MIN: 1440,
 };
 
 // Discovery-flow admin tests don't exercise commit-sync. Provide a CommitStore
@@ -273,6 +276,21 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
     },
     async listTrackedRepositories() {
       return Array.from(state.repositories.values()).filter((r) => !r.archived);
+    },
+    async listRepositoriesForSync() {
+      // Admin tests don't seed activity history; default backoffOptions
+      // is unset in makeSyncDeps (legacy behavior — every repo is due).
+      // Synthesize nulls so the row type is satisfied.
+      return Array.from(state.repositories.values())
+        .filter((r) => !r.archived)
+        .map((r) => ({
+          ...r,
+          lastSyncedAt: null,
+          prLastSyncedAt: null,
+          latestCommitAt: null,
+          latestPrAt: null,
+          createdAt: new Date(),
+        }));
     },
   };
   return { store, state };
