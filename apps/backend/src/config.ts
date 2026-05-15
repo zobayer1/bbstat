@@ -100,7 +100,7 @@ const envSchema = z.object({
   //     to zero — slightly above the commit-tick threshold so we never
   //     starve the next cron tick's commit ingest.
   DIFF_STATS_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
-  DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(50),
+  DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(100),
   DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
   DIFF_STATS_BACKFILL_CONCURRENCY: z.coerce.number().int().positive().default(1),
 

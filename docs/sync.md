@@ -556,7 +556,7 @@ commits via two independent paths:
 - **Backfill (backward)** — `runDiffStatsBackfillTick` runs _after_
   `runDeepenTick` in the same `runCommitsSync` invocation. Walks
   `commits WHERE diff_stats_synced_at IS NULL` across every opted-in
-  repo, capped at `DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK` (default 50) per repo per tick, newest-authored-first. Catches up on (a) the
+  repo, capped at `DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK` (default 100) per repo per tick, newest-authored-first. Catches up on (a) the
   historical backlog after a repo opts in, and (b) inline-eager
   transient failures (the row stays NULL → retried next tick).
 
@@ -770,7 +770,7 @@ overrides. Set in `.env` at the repo root.
 | `DEEPEN_BACKFILL_MAX_PAGES`                 | `5`           | Self-queueing deepen-backfill: pages × 100 commits per piggybacked run.                |
 | `DEEPEN_BUDGET_THRESHOLD`                   | `100`         | Headroom required after the delta tick before deepen runs. Yields to delta sync.       |
 | `DIFF_STATS_BUDGET_THRESHOLD`               | `10`          | Phase 4: inline-eager forward fetch budget gate inside the commit-sync per-repo loop.  |
-| `DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK` | `50`          | Phase 4: per-repo pending-commit cap for the diff-stats _backfill_ tick (post-deepen). |
+| `DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK` | `100`         | Phase 4: per-repo pending-commit cap for the diff-stats _backfill_ tick (post-deepen). |
 | `DIFF_STATS_BACKFILL_BUDGET_THRESHOLD`      | `20`          | Phase 4: budget gate for the backfill tick.                                            |
 | `DIFF_STATS_BACKFILL_CONCURRENCY`           | `1`           | Phase 4: max repos in flight for the backfill tick (serial by default).                |
 | `SYNC_PRS_CRON`                             | `0 * * * *`   | Phase 4: when the PR cron fires (hourly). PR data mutates slower than commits.         |
