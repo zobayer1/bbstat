@@ -21,6 +21,8 @@ import { createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import { createRedisUserSummaryCache, type UserSummaryCache } from './dashboard/user-summary-cache.js';
+import { createEventBus } from './events/bus.js';
+import { wrapBusWithRedis } from './events/redis-bridge.js';
 import type { UserSummary } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 
@@ -40,6 +42,30 @@ async function main(): Promise<void> {
   // routes are absent but the rest of the app still starts.
   const db = createDb(config.DATABASE_URL);
   const statsStore = createDrizzleStatsStore(db);
+  // Shared Redis client: previously only constructed inside the BB-creds
+  // branch (lazy-connect for the user-summary cache). Now also backs the
+  // live-events Redis bridge, so the API process can receive events
+  // published by the separate cron host process.
+  const redis = createCache(config.REDIS_URL);
+
+  // Shared event bus: the sync runner (when wired below) publishes
+  // tick / auto-trip / admin events; buildApp wires it into the SSE
+  // route at /api/live. The Redis bridge fans publishes out to other
+  // processes (the cron host) and re-publishes their events here.
+  // If Redis is unreachable at boot we fall back to the in-process bus
+  // and log a loud warning — the API still serves traffic, but cron
+  // events won't reach SSE clients until Redis is healthy.
+  const localBus = createEventBus();
+  let bus = localBus;
+  try {
+    bus = await wrapBusWithRedis(localBus, redis, { logger });
+    logger.info({ sourceId: (bus as { sourceId?: string }).sourceId }, 'live updates: redis bridge attached');
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'live updates: redis unreachable at boot — cron-host events will not reach SSE clients',
+    );
+  }
 
   let syncDeps: SyncRunnerDeps | undefined;
   // Declared at the outer scope so both syncDeps wiring (below) and buildApp
@@ -51,9 +77,6 @@ async function main(): Promise<void> {
     const commitStore = createDrizzleCommitStore(db);
     const prStore = createDrizzlePrStore(db);
     const rollupStore = createDrizzleRollupStore(db);
-    // Redis client is lazy-connect; first use is either the sync hook DEL
-    // (rollup-hook.ts) or a GET from the user-summary route.
-    const redis = createCache(config.REDIS_URL);
     userSummaryCache = createRedisUserSummaryCache<UserSummary>(redis);
     const client = new BitbucketClient({
       baseUrl: config.BITBUCKET_BASE_URL,
@@ -91,6 +114,7 @@ async function main(): Promise<void> {
       isMergeBackfillOptions: isMergeBackfillOptionsFromConfig(config),
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
+      bus,
     };
   }
 
@@ -100,6 +124,7 @@ async function main(): Promise<void> {
     https,
     syncDeps,
     statsStore,
+    bus,
     ...(userSummaryCache ? { userSummaryCache } : {}),
   });
 

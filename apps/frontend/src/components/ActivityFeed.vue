@@ -193,11 +193,7 @@ function nextCommit(): void {
               </RouterLink>
               <span v-if="entry.kind === 'commit'" class="text-slate-700">
                 —
-                <button
-                  type="button"
-                  class="cursor-pointer text-left hover:underline"
-                  @click="openCommit(entry.sha)"
-                >
+                <button type="button" class="cursor-pointer text-left hover:underline" @click="openCommit(entry.sha)">
                   <span class="font-mono text-xs text-slate-500">{{ entry.sha.slice(0, 7) }}</span>
                   <span class="font-medium text-slate-800">{{ commitTitle(entry.message) }}</span>
                 </button>

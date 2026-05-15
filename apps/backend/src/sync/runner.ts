@@ -19,6 +19,7 @@ import { isDueForSync, type BackoffOptions } from './backoff.js';
 import { runCommitsTick } from './commits-tick.js';
 import { syncRepositoryCommits } from './commits.js';
 import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
+import type { EventBus } from '../events/bus.js';
 import { runDiffStatsBackfillTick, type DiffStatsBackfillTickResult } from './diff-stats-tick.js';
 import {
   runIsMergeBackfillTick,
@@ -89,6 +90,12 @@ export interface SyncRunnerDeps {
   // repos are skipped per the formula in backoff.ts. Diff-stats
   // backfill and deepen are NOT affected by this filter.
   backoffOptions?: BackoffOptions;
+  // In-process pub/sub for live updates. When wired, the runner
+  // publishes a `tick.commits.complete` / `tick.prs.complete` event at
+  // the end of each sync entry-point. Auto-trip sites (commits.ts,
+  // deepen-backfill.ts) also publish `repository.sync-excluded`
+  // through this bus. Optional — omit in tests that don't care.
+  bus?: EventBus;
 }
 
 interface BaseResult {
@@ -258,6 +265,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
       store: deps.commitStore,
       logger: deps.logger,
       discoveryStore: deps.store,
+      ...(deps.bus ? { bus: deps.bus } : {}),
       syncOne,
     },
     dueHandles,
@@ -289,6 +297,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
           store: deps.commitStore,
           logger: deps.logger,
           discoveryStore: deps.store,
+          ...(deps.bus ? { bus: deps.bus } : {}),
           ...(deps.rollupStore ? { rollupStore: deps.rollupStore } : {}),
           ...(deps.userSummaryCache ? { userSummaryCache: deps.userSummaryCache } : {}),
         },
@@ -407,7 +416,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     'commit sync complete',
   );
 
-  return {
+  const result: CommitsSyncResult = {
     trigger,
     startedAt,
     finishedAt,
@@ -420,6 +429,33 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     errors: tick.errors,
     deferred: tick.deferred,
   };
+  // Slim payload for the SSE wire: drop the per-repo arrays
+  // (repoResults / deepen.repos / isMergeBackfill.repos /
+  // diffStatsBackfill.attempted+deferred+errors). At ~20+ repos × ~500
+  // bytes each across four sub-ticks, the full result is large enough
+  // to overrun the SSE response's write buffers and kill the TLS
+  // connection. Callers in-process still see the full `result` via
+  // the return value.
+  deps.bus?.publish({
+    event: 'tick.commits.complete',
+    payload: {
+      trigger,
+      startedAt,
+      finishedAt,
+      attempted: summary.attempted,
+      deferred: summary.deferred,
+      errors: summary.errors,
+      totalCommitsInserted: summary.totalCommitsInserted,
+      budgetRemainingAtEnd: summary.budgetRemainingAtEnd,
+      stoppedEarly: summary.stoppedEarly,
+      deepenStoppedReason: deepen?.stoppedReason ?? null,
+      isMergeBackfillStoppedReason: isMergeBackfill?.stoppedReason ?? null,
+      diffStatsBackfillStopReason: diffStatsBackfill?.stopReason ?? null,
+      diffStatsBackfillTotalUpdated: diffStatsBackfill?.totalUpdated ?? 0,
+      diffStatsAutoOptIn,
+    },
+  });
+  return result;
 }
 
 export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<PrsSyncResult> {
@@ -481,7 +517,7 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
   const finishedAt = new Date().toISOString();
   deps.logger.info?.({ trigger, ...summary, startedAt, finishedAt }, 'PR sync complete');
 
-  return {
+  const result: PrsSyncResult = {
     trigger,
     startedAt,
     finishedAt,
@@ -490,6 +526,23 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
     errors: tick.errors,
     deferred: tick.deferred,
   };
+  // Slim payload — see runCommitsSync above for rationale.
+  deps.bus?.publish({
+    event: 'tick.prs.complete',
+    payload: {
+      trigger,
+      startedAt,
+      finishedAt,
+      attempted: summary.attempted,
+      deferred: summary.deferred,
+      errors: summary.errors,
+      totalPrsInserted: summary.totalPrsInserted,
+      totalPrsUpdated: summary.totalPrsUpdated,
+      budgetRemainingAtEnd: summary.budgetRemainingAtEnd,
+      stoppedEarly: summary.stoppedEarly,
+    },
+  });
+  return result;
 }
 
 // Build CommitsTickOptions from app config. Both runtime entry points (HTTPS

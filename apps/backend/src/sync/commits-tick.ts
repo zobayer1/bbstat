@@ -16,6 +16,7 @@ import { syncRepositoryCommits } from './commits.js';
 import type { CommitSyncDeps, CommitSyncOptions, RepoCommitSyncResult, RepositoryHandle } from './commits.js';
 import type { CommitStore } from './commit-store.js';
 import type { DiscoveryStore } from './discovery-store.js';
+import type { EventBus } from '../events/bus.js';
 
 export interface CommitsTickDeps {
   client: BitbucketClient;
@@ -25,6 +26,9 @@ export interface CommitsTickDeps {
   // `sync_excluded` on 404 / history-rewrite. Optional in tests; the
   // runtime wires it.
   discoveryStore?: DiscoveryStore;
+  // Forwarded into CommitSyncDeps so the auto-trip can publish
+  // `repository.sync-excluded` events to SSE subscribers.
+  bus?: EventBus;
   // Per-repo sync function. Defaults to syncRepositoryCommits; injectable
   // so the orchestrator can be tested without standing up the full BB
   // client + store + fetch fixture stack.
@@ -87,6 +91,7 @@ export async function runCommitsTick(
     store: deps.store,
     ...(deps.logger ? { logger: deps.logger } : {}),
     ...(deps.discoveryStore ? { discoveryStore: deps.discoveryStore } : {}),
+    ...(deps.bus ? { bus: deps.bus } : {}),
   };
   // syncOne sees the same options as the per-repo function — it ignores the
   // tick-specific knobs (concurrency, budgetLowThreshold) since they have

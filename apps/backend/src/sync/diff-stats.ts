@@ -25,6 +25,7 @@
 
 import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
+import { BitbucketRateLimitError } from '../bitbucket/errors.js';
 import type { CommitStore, PendingDiffStatCommit } from './commit-store.js';
 import type { RepositoryHandle } from './commits.js';
 
@@ -146,6 +147,17 @@ async function walkAndPersist(
       if (sinceDay === null || day < sinceDay) sinceDay = day;
       if (untilDay === null || day > untilDay) untilDay = day;
     } catch (err) {
+      // Rate-limit-exhausted is a tick-wide stop signal, NOT a per-commit
+      // failure. The BitbucketClient throws this only after pacing has
+      // topped out (default 3200ms) AND BB still 429s through the
+      // in-request retry budget — soldiering on to the next commit just
+      // hammers BB and produces dozens more 429s per tick. Re-throw so
+      // `runDiffStatsBackfillTick` can yield the queue to the next cron
+      // firing, by which time BB's rolling window has rotated and the
+      // pacer has had time to decay.
+      if (err instanceof BitbucketRateLimitError) {
+        throw err;
+      }
       failed++;
       deps.logger?.warn?.(
         {
@@ -161,17 +173,23 @@ async function walkAndPersist(
 
   const diffStatsRange = sinceDay !== null && untilDay !== null ? { sinceDay, untilDay } : null;
   const deferred = commits.length - updated - failed;
-  deps.logger?.info?.(
-    {
-      repositoryId: repo.repositoryId,
-      fullName: repo.fullName,
-      updated,
-      failed,
-      deferred,
-      hitBudgetGate,
-      diffStatsRange,
-    },
-    'diff-stats sync complete',
-  );
+  const logFields = {
+    repositoryId: repo.repositoryId,
+    fullName: repo.fullName,
+    updated,
+    failed,
+    deferred,
+    hitBudgetGate,
+    diffStatsRange,
+  };
+  // No-op completions (zero commits walked, zero rows updated/failed,
+  // no budget gate fired) log at debug — they fire per opted-in repo
+  // per backfill tick once a repo has fully drained, and at 26+
+  // opted-in repos × 12 ticks/hr this saturates the log without signal.
+  if (updated === 0 && failed === 0 && deferred === 0 && !hitBudgetGate) {
+    deps.logger?.debug?.(logFields, 'diff-stats sync complete (idle)');
+  } else {
+    deps.logger?.info?.(logFields, 'diff-stats sync complete');
+  }
   return { updated, failed, deferred, hitBudgetGate, diffStatsRange };
 }

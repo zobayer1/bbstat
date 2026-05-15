@@ -30,6 +30,7 @@ import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
 import type { CommitInsertInput, CommitStore, DeepenCandidate } from './commit-store.js';
 import type { DiscoveryStore } from './discovery-store.js';
+import type { EventBus } from '../events/bus.js';
 
 export interface DeepenBackfillOptions {
   // Max pages of 100 commits per deepen page. Shape mirrors the cold-mode
@@ -92,6 +93,10 @@ export interface DeepenBackfillDeps {
   // the dashboard's tracked list with no badge — they still skip
   // sync work via deepen_complete, but the operator never sees them.
   discoveryStore?: DiscoveryStore;
+  // Optional. Mirrors commits.ts — when wired alongside discoveryStore,
+  // the empty-on-BB auto-trip publishes `repository.sync-excluded`
+  // so SSE subscribers update the badge immediately.
+  bus?: EventBus;
 }
 
 // Extends CommitInsertInput with the BB-side author uuid so we can resolve
@@ -165,6 +170,14 @@ export async function deepenOneRepo(
       // history-rewrite.
       if (deps.discoveryStore !== undefined) {
         await deps.discoveryStore.updateRepositorySyncExcluded(candidate.repositoryId, true, 'empty-on-bitbucket');
+        deps.bus?.publish({
+          event: 'repository.sync-excluded',
+          payload: {
+            repositoryId: candidate.repositoryId,
+            fullName: candidate.fullName,
+            reason: 'empty-on-bitbucket',
+          },
+        });
       }
       deps.logger?.info?.(
         { repositoryId: candidate.repositoryId, fullName: candidate.fullName },

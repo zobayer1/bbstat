@@ -241,6 +241,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         await opts.syncDeps.store.updateRepositorySyncExcluded(row.id, false, null);
       }
       await opts.syncDeps.commitStore.resetSyncCursors(row.id);
+      opts.syncDeps.bus?.publish({
+        event: 'repository.included',
+        payload: { repositoryId: row.id, fullName: row.fullName, source: 'include' },
+      });
       opts.syncDeps.logger?.info?.(
         { fullName: row.fullName, previousReason: row.syncExcludeReason },
         'repository re-included in sync — cursors reset',
@@ -306,6 +310,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         await opts.syncDeps.store.updateRepositorySyncExcluded(row.id, false, null);
       }
       await opts.syncDeps.commitStore.resetSyncCursors(row.id);
+      opts.syncDeps.bus?.publish({
+        event: 'repository.included',
+        payload: { repositoryId: row.id, fullName: bb.full_name, source: 'rename' },
+      });
       opts.syncDeps.logger?.info?.(
         { previousFullName, newFullName: bb.full_name, previousReason },
         'repository renamed — cursors reset',
@@ -330,6 +338,12 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
       if (row === null) return reply.code(404).send({ error: 'not_tracked', fullName });
       const deleted = await opts.syncDeps.store.deleteRepository(row.id);
+      if (deleted > 0) {
+        opts.syncDeps.bus?.publish({
+          event: 'repository.deleted',
+          payload: { repositoryId: row.id, fullName: row.fullName },
+        });
+      }
       opts.syncDeps.logger?.info?.({ fullName: row.fullName, repositoryId: row.id }, 'repository deleted');
       return reply.code(200).send({ fullName: row.fullName, deleted });
     },

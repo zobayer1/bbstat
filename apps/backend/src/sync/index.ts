@@ -23,6 +23,8 @@ import {
 import { createCache } from '../cache/redis.js';
 import { createDrizzleRollupStore } from '../dashboard/rollup-store.js';
 import { createRedisUserSummaryCache } from '../dashboard/user-summary-cache.js';
+import { createEventBus } from '../events/bus.js';
+import { wrapBusWithRedis } from '../events/redis-bridge.js';
 import type { SyncRunnerDeps } from './runner.js';
 
 async function main(): Promise<void> {
@@ -67,6 +69,24 @@ async function main(): Promise<void> {
   const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
   const backoffOptions = backoffOptionsFromConfig(config);
 
+  // Bridge the local bus through Redis so cron-published events
+  // (tick.commits.complete, repository.sync-excluded, etc.) reach the
+  // SSE subscribers in the separate HTTPS backend process. If Redis is
+  // unreachable at boot the cron still runs — we just fall back to the
+  // local in-memory bus, which means SSE clients won't see cron events
+  // until Redis is healthy. Loud warning so operators notice.
+  const localBus = createEventBus();
+  let bus = localBus;
+  try {
+    bus = await wrapBusWithRedis(localBus, redis, { logger });
+    logger.info({ sourceId: (bus as { sourceId?: string }).sourceId }, 'live updates: redis bridge attached');
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'live updates: redis unreachable at boot — cron events will not reach SSE clients until reconnect',
+    );
+  }
+
   const deps: SyncRunnerDeps = {
     client,
     store,
@@ -83,6 +103,7 @@ async function main(): Promise<void> {
     isMergeBackfillOptions,
     diffStatsBackfillOptions,
     backoffOptions,
+    bus,
   };
 
   // Four independent schedules. Members rarely change; repo metadata

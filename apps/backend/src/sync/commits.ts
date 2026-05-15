@@ -20,6 +20,7 @@
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
 import { BitbucketApiError } from '../bitbucket/errors.js';
+import type { EventBus } from '../events/bus.js';
 import type { CommitInsertInput, CommitStore, PendingDiffStatCommit } from './commit-store.js';
 import type { DiscoveryStore } from './discovery-store.js';
 import { fetchDiffStatsForCommits, type DiffStatsSyncResult } from './diff-stats.js';
@@ -112,6 +113,11 @@ export interface CommitSyncDeps {
   // stays in the rotation (legacy behavior — only the admin endpoint
   // can exclude).
   discoveryStore?: DiscoveryStore;
+  // Optional. When wired alongside `discoveryStore`, each auto-trip
+  // exclusion publishes a `repository.sync-excluded` event so the
+  // dashboard's SSE clients update the badge without waiting for the
+  // next poll. No-op when omitted.
+  bus?: EventBus;
   logger?: BitbucketLogger;
 }
 
@@ -155,6 +161,10 @@ export async function syncRepositoryCommits(
         repo.repositoryId,
         `history-rewritten: walked ${pull.batch.length} commits without finding last_seen_sha=${lastSeenSha}`,
       );
+      deps.bus?.publish({
+        event: 'repository.sync-excluded',
+        payload: { repositoryId: repo.repositoryId, fullName: repo.fullName, reason: 'history-rewritten' },
+      });
       deps.logger?.warn?.(
         { ...repo, walked: pull.batch.length, lastSeenSha },
         'commit sync: BB history rewritten — auto-excluding repo',
@@ -233,20 +243,26 @@ export async function syncRepositoryCommits(
       }
     }
 
-    deps.logger?.info?.(
-      {
-        ...repo,
-        mode: isCold ? 'cold' : 'delta',
-        fetched: pull.batch.length,
-        inserted,
-        hitKnownSha: pull.hitKnownSha,
-        hitPageCap: pull.hitPageCap,
-        hitDateCap: pull.hitDateCap,
-        diffStatsUpdated: diffStatsResult.updated,
-        diffStatsFailed: diffStatsResult.failed,
-      },
-      'commit sync complete',
-    );
+    // Idle path (delta walk hit the cursor on the first response, no
+    // new commits) logs at debug — at curated-set scale this fires
+    // ~70 times per cron tick, drowning out everything else. Real
+    // work (fetched OR inserted > 0) stays at info.
+    const logFields = {
+      ...repo,
+      mode: isCold ? 'cold' : 'delta',
+      fetched: pull.batch.length,
+      inserted,
+      hitKnownSha: pull.hitKnownSha,
+      hitPageCap: pull.hitPageCap,
+      hitDateCap: pull.hitDateCap,
+      diffStatsUpdated: diffStatsResult.updated,
+      diffStatsFailed: diffStatsResult.failed,
+    };
+    if (pull.batch.length === 0 && inserted === 0) {
+      deps.logger?.debug?.(logFields, 'commit sync complete (idle)');
+    } else {
+      deps.logger?.info?.(logFields, 'commit sync complete');
+    }
 
     return {
       repositoryId: repo.repositoryId,
@@ -273,6 +289,10 @@ export async function syncRepositoryCommits(
     // new slug, clears the flag) or DELETE if the row is truly dead.
     if (err instanceof BitbucketApiError && err.status === 404 && deps.discoveryStore !== undefined) {
       await deps.discoveryStore.updateRepositorySyncExcluded(repo.repositoryId, true, 'repo-404');
+      deps.bus?.publish({
+        event: 'repository.sync-excluded',
+        payload: { repositoryId: repo.repositoryId, fullName: repo.fullName, reason: 'repo-404' },
+      });
       deps.logger?.warn?.({ ...repo }, 'commit sync: BB 404 — auto-excluding repo');
     }
     await deps.store.markSyncFailed(repo.repositoryId, msg);
