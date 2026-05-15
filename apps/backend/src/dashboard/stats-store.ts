@@ -77,6 +77,18 @@ export interface UserSummary {
     project: string | null;
     commits: number;
     syncStatus: RepoSyncStatus;
+    // True iff the repo is opted into per-commit diff-stat ingest.
+    // When false, the adds/dels/files columns below are 0 — the
+    // frontend renders them as muted em-dashes to flag "no data here
+    // yet" vs. "actually zero contribution".
+    diffStatsEnabled: boolean;
+    // This user's last-30-day per-repo code-change footprint, excluding
+    // merge commits. Always present in the response shape; zero when
+    // diff_stats_enabled is false OR the user genuinely made no
+    // non-merge changes in this repo over the window.
+    additions30d: number;
+    deletions30d: number;
+    filesChanged30d: number;
   }>;
 }
 
@@ -107,15 +119,44 @@ export interface ProjectStats {
 }
 
 export interface RepoActivity {
-  repository: { workspace: string; slug: string; fullName: string; syncStatus: RepoSyncStatus };
+  repository: {
+    workspace: string;
+    slug: string;
+    fullName: string;
+    syncStatus: RepoSyncStatus;
+    // Mirrors `repositories.diff_stats_enabled`. The frontend gates the
+    // code-changes cards + per-contributor diff-stat column on this flag.
+    diffStatsEnabled: boolean;
+  };
   // Last 365 calendar days, oldest first. Zero-commit days omitted —
   // the frontend backfills gaps when rendering the contribution heatmap.
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
+  // Per-window code-change summary (additions / deletions / files
+  // changed) for the repo, excluding merge commits. Null when
+  // `diff_stats_enabled = false` — the column is meaningless until
+  // /diffstat ingestion has run for this repo. Day windows match the
+  // commit cards: 7d = last 7 calendar days, 30d = last 30.
+  diffStats: {
+    additions7d: number;
+    deletions7d: number;
+    filesChanged7d: number;
+    additions30d: number;
+    deletions30d: number;
+    filesChanged30d: number;
+  } | null;
   // All contributors active in the last 30 days, ordered by commit count desc.
   // `last30Days` is repo-scoped (this user's commits in THIS repo, day-by-day)
   // so the repo-detail sparkline reflects the contributor's activity here,
-  // not their workspace-wide pattern.
-  contributors: TopContributorWithSparkline[];
+  // not their workspace-wide pattern. Diff-stat fields are 30-day,
+  // exclude merges, and read zero when `diff_stats_enabled = false` —
+  // the frontend hides the column in that case.
+  contributors: RepoContributor[];
+}
+
+export interface RepoContributor extends TopContributorWithSparkline {
+  additions30d: number;
+  deletions30d: number;
+  filesChanged30d: number;
 }
 
 export interface ActivityRepository {
@@ -412,19 +453,40 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           slug: string;
           full_name: string;
           project: string | null;
+          diff_stats_enabled: boolean;
           commits: number;
           last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
           last_synced_at: string | Date | null;
+          additions_30d: number;
+          deletions_30d: number;
+          files_30d: number;
         }>(sql`
           SELECT
-            r.workspace, r.slug, r.full_name, r.project,
+            r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
             sum(cd.commit_count)::int AS commits,
-            ss.last_sync_status, ss.last_synced_at
+            ss.last_sync_status, ss.last_synced_at,
+            COALESCE(ds.additions_30d, 0) AS additions_30d,
+            COALESCE(ds.deletions_30d, 0) AS deletions_30d,
+            COALESCE(ds.files_30d, 0) AS files_30d
           FROM commit_daily cd
           JOIN repositories r ON r.id = cd.repository_id
           LEFT JOIN sync_state ss ON ss.repository_id = r.id
+          LEFT JOIN (
+            SELECT
+              repository_id,
+              sum(additions)::int AS additions_30d,
+              sum(deletions)::int AS deletions_30d,
+              sum(files_changed)::int AS files_30d
+            FROM commits
+            WHERE author_user_id = ${userId}
+              AND authored_at >= (current_date - 29)::timestamp
+              AND NOT is_merge
+            GROUP BY repository_id
+          ) ds ON ds.repository_id = r.id
           WHERE cd.author_user_id = ${userId} AND cd.day >= current_date - 29
-          GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project, ss.last_sync_status, ss.last_synced_at
+          GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
+                   ss.last_sync_status, ss.last_synced_at,
+                   ds.additions_30d, ds.deletions_30d, ds.files_30d
           ORDER BY sum(cd.commit_count) DESC
           LIMIT 5
         `),
@@ -451,6 +513,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           project: r.project,
           commits: r.commits,
           syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at),
+          diffStatsEnabled: r.diff_stats_enabled,
+          additions30d: r.additions_30d,
+          deletions30d: r.deletions_30d,
+          filesChanged30d: r.files_30d,
         })),
       };
     },
@@ -637,6 +703,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           workspace: repositories.workspace,
           slug: repositories.slug,
           fullName: repositories.fullName,
+          diffStatsEnabled: repositories.diffStatsEnabled,
           lastSyncStatus: syncState.lastSyncStatus,
           lastSyncedAt: syncState.lastSyncedAt,
         })
@@ -646,7 +713,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         .limit(1);
       if (repo === undefined) return null;
 
-      const [dailyRows, contributorRows] = await Promise.all([
+      const [dailyRows, contributorRows, diffStatsRows] = await Promise.all([
         db.execute<{ date: string; commits: number; additions: number; deletions: number }>(sql`
           SELECT
             day::text AS date,
@@ -668,6 +735,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           display_name: string;
           commits: number;
           last_30_days: number[];
+          additions_30d: number;
+          deletions_30d: number;
+          files_30d: number;
         }>(sql`
           WITH top AS (
             SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
@@ -692,20 +762,80 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval) AS sd(day)
             LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
             GROUP BY t.user_id
+          ),
+          diff_summary AS (
+            SELECT
+              author_user_id,
+              sum(additions)::int AS additions_30d,
+              sum(deletions)::int AS deletions_30d,
+              sum(files_changed)::int AS files_30d
+            FROM commits
+            WHERE repository_id = ${repo.id}
+              AND authored_at >= (current_date - 29)::timestamp
+              AND NOT is_merge
+              AND author_user_id IN (SELECT user_id FROM top)
+            GROUP BY author_user_id
           )
-          SELECT t.user_id, t.bitbucket_uuid, t.display_name, t.commits, spark.last_30_days
+          SELECT
+            t.user_id,
+            t.bitbucket_uuid,
+            t.display_name,
+            t.commits,
+            spark.last_30_days,
+            COALESCE(diff_summary.additions_30d, 0) AS additions_30d,
+            COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d,
+            COALESCE(diff_summary.files_30d, 0) AS files_30d
           FROM top t
           JOIN spark ON spark.user_id = t.user_id
+          LEFT JOIN diff_summary ON diff_summary.author_user_id = t.user_id
           ORDER BY t.commits DESC
+        `),
+        // Per-window code-change summary for the repo. Runs unconditionally
+        // (cheap — sub-50ms even on the biggest opted-in repo) but the
+        // result is only included in the response when diff_stats_enabled
+        // is true; otherwise we return null below to make the "opt in to
+        // see this" semantic explicit to the frontend.
+        db.execute<{
+          additions_7d: number;
+          deletions_7d: number;
+          files_7d: number;
+          additions_30d: number;
+          deletions_30d: number;
+          files_30d: number;
+        }>(sql`
+          SELECT
+            COALESCE(SUM(CASE WHEN authored_at >= (current_date - 6)::timestamp THEN additions END), 0)::int AS additions_7d,
+            COALESCE(SUM(CASE WHEN authored_at >= (current_date - 6)::timestamp THEN deletions END), 0)::int AS deletions_7d,
+            COALESCE(SUM(CASE WHEN authored_at >= (current_date - 6)::timestamp THEN files_changed END), 0)::int AS files_7d,
+            COALESCE(SUM(additions), 0)::int AS additions_30d,
+            COALESCE(SUM(deletions), 0)::int AS deletions_30d,
+            COALESCE(SUM(files_changed), 0)::int AS files_30d
+          FROM commits
+          WHERE repository_id = ${repo.id}
+            AND authored_at >= (current_date - 29)::timestamp
+            AND NOT is_merge
         `),
       ]);
 
+      const diffStatsAgg = diffStatsRows.rows[0];
+      const diffStats =
+        repo.diffStatsEnabled && diffStatsAgg !== undefined
+          ? {
+              additions7d: diffStatsAgg.additions_7d,
+              deletions7d: diffStatsAgg.deletions_7d,
+              filesChanged7d: diffStatsAgg.files_7d,
+              additions30d: diffStatsAgg.additions_30d,
+              deletions30d: diffStatsAgg.deletions_30d,
+              filesChanged30d: diffStatsAgg.files_30d,
+            }
+          : null;
       return {
         repository: {
           workspace: repo.workspace,
           slug: repo.slug,
           fullName: repo.fullName,
           syncStatus: deriveSyncStatus(repo.lastSyncStatus ?? null, repo.lastSyncedAt ?? null),
+          diffStatsEnabled: repo.diffStatsEnabled,
         },
         dailyCommits: dailyRows.rows.map((r) => ({
           date: r.date,
@@ -713,12 +843,16 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           additions: r.additions,
           deletions: r.deletions,
         })),
+        diffStats,
         contributors: contributorRows.rows.map((r) => ({
           userId: r.user_id,
           bitbucketUuid: r.bitbucket_uuid,
           displayName: r.display_name,
           commits: r.commits,
           last30Days: r.last_30_days,
+          additions30d: r.additions_30d,
+          deletions30d: r.deletions_30d,
+          filesChanged30d: r.files_30d,
         })),
       };
     },

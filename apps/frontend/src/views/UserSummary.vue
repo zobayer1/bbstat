@@ -54,7 +54,7 @@ watch(userId, (next) => void store.fetch(next));
                 <th class="w-8 px-2 py-2 text-center font-medium"><span class="sr-only">Sync state</span></th>
                 <th class="px-4 py-2 text-left font-medium">Repository</th>
                 <th class="px-4 py-2 text-left font-medium">Project</th>
-                <th class="px-4 py-2 text-right font-medium">Commits</th>
+                <th colspan="4" class="py-2 pl-1 pr-4 text-right font-medium">Changes</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
@@ -80,7 +80,26 @@ watch(userId, (next) => void store.fetch(next));
                   </RouterLink>
                   <span v-else class="text-slate-400">—</span>
                 </td>
-                <td class="px-4 py-2 text-right text-slate-900">{{ r.commits }}</td>
+                <!-- Adds/Dels/Files columns: render numbers only for
+                     diff-stats-opted-in repos. Non-opted-in repos leave
+                     the cell blank — the auto-opt-in rollout means
+                     absence here is a temporary state, not a meaningful
+                     "no data" signal worth visual weight. Excludes
+                     merge commits. -->
+                <td class="w-20 px-1 py-2 text-right text-xs tabular-nums">
+                  <span v-if="r.diffStatsEnabled" class="text-emerald-700">+{{ r.additions30d.toLocaleString() }}</span>
+                </td>
+                <td class="w-20 px-1 py-2 text-right text-xs tabular-nums">
+                  <span v-if="r.diffStatsEnabled" class="text-rose-700">−{{ r.deletions30d.toLocaleString() }}</span>
+                </td>
+                <td class="w-24 px-1 py-2 text-right text-xs tabular-nums">
+                  <span v-if="r.diffStatsEnabled" class="text-slate-700"
+                    >{{ r.filesChanged30d.toLocaleString() }} file<span v-if="r.filesChanged30d !== 1">s</span></span
+                  >
+                </td>
+                <td class="w-28 whitespace-nowrap py-2 pl-4 pr-4 text-right text-slate-500">
+                  {{ r.commits.toLocaleString() }} commit<span v-if="r.commits !== 1">s</span>
+                </td>
               </tr>
             </tbody>
           </table>

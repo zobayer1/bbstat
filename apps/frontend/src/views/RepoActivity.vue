@@ -42,9 +42,29 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
     <p v-if="error" class="mb-4 text-sm text-red-600">Could not load activity: {{ error }}</p>
 
     <template v-if="activity">
-      <section class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Commits — last 365 days" :value="commits365d" />
         <StatCard label="Active contributors — 30d" :value="activity.contributors.length" />
+        <StatCard v-if="activity.diffStats" label="Code changes — last 7 days">
+          <template #value>
+            <span class="text-emerald-700">+{{ activity.diffStats.additions7d.toLocaleString() }}</span>
+            <span class="ml-2 text-rose-700">−{{ activity.diffStats.deletions7d.toLocaleString() }}</span>
+          </template>
+          <template #hint>
+            {{ activity.diffStats.filesChanged7d.toLocaleString() }}
+            file<span v-if="activity.diffStats.filesChanged7d !== 1">s</span> · excludes merges
+          </template>
+        </StatCard>
+        <StatCard v-if="activity.diffStats" label="Code changes — last 30 days">
+          <template #value>
+            <span class="text-emerald-700">+{{ activity.diffStats.additions30d.toLocaleString() }}</span>
+            <span class="ml-2 text-rose-700">−{{ activity.diffStats.deletions30d.toLocaleString() }}</span>
+          </template>
+          <template #hint>
+            {{ activity.diffStats.filesChanged30d.toLocaleString() }}
+            file<span v-if="activity.diffStats.filesChanged30d !== 1">s</span> · excludes merges
+          </template>
+        </StatCard>
       </section>
 
       <section class="mt-8">
@@ -76,6 +96,17 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
                     :height="16"
                     class="shrink-0 text-slate-400 transition-colors group-hover:text-blue-600"
                   />
+                  <div v-if="activity.repository.diffStatsEnabled" class="flex items-center gap-1">
+                    <span class="w-20 shrink-0 text-right text-xs tabular-nums text-emerald-700">
+                      +{{ c.additions30d.toLocaleString() }}
+                    </span>
+                    <span class="w-20 shrink-0 text-right text-xs tabular-nums text-rose-700">
+                      −{{ c.deletions30d.toLocaleString() }}
+                    </span>
+                    <span class="w-24 shrink-0 text-right text-xs tabular-nums text-slate-500">
+                      {{ c.filesChanged30d.toLocaleString() }} file<span v-if="c.filesChanged30d !== 1">s</span>
+                    </span>
+                  </div>
                   <span class="w-24 shrink-0 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
                 </div>
               </RouterLink>

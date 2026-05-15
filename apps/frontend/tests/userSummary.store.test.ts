@@ -23,7 +23,18 @@ const sampleSummary: UserSummary = {
   },
   dailyCommits: [{ date: '2026-05-12', commits: 3 }],
   topRepos: [
-    { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', project: 'COMM', commits: 8, syncStatus: 'ok' },
+    {
+      workspace: 'tigerit',
+      slug: 'r1',
+      fullName: 'tigerit/r1',
+      project: 'COMM',
+      commits: 8,
+      syncStatus: 'ok',
+      diffStatsEnabled: false,
+      additions30d: 0,
+      deletions30d: 0,
+      filesChanged30d: 0,
+    },
   ],
 };
 

@@ -227,7 +227,18 @@ const sampleUserSummary: UserSummary = {
   },
   dailyCommits: [{ date: '2026-05-12', commits: 3 }],
   topRepos: [
-    { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', project: 'COMM', commits: 8, syncStatus: 'ok' },
+    {
+      workspace: 'tigerit',
+      slug: 'r1',
+      fullName: 'tigerit/r1',
+      project: 'COMM',
+      commits: 8,
+      syncStatus: 'ok',
+      diffStatsEnabled: false,
+      additions30d: 0,
+      deletions30d: 0,
+      filesChanged30d: 0,
+    },
   ],
 };
 
@@ -367,9 +378,27 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
 
   it('returns the repo activity from the store', async () => {
     const activity: RepoActivity = {
-      repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', syncStatus: 'ok' },
+      repository: {
+        workspace: 'tigerit',
+        slug: 'r1',
+        fullName: 'tigerit/r1',
+        syncStatus: 'ok',
+        diffStatsEnabled: false,
+      },
       dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
-      contributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 4, last30Days: [0, 1, 0, 3] }],
+      diffStats: null,
+      contributors: [
+        {
+          userId: 1,
+          bitbucketUuid: '{u1}',
+          displayName: 'Alice',
+          commits: 4,
+          last30Days: [0, 1, 0, 3],
+          additions30d: 0,
+          deletions30d: 0,
+          filesChanged30d: 0,
+        },
+      ],
     };
     const getRepositoryActivity = vi.fn().mockResolvedValue(activity);
     const statsStore = makeStatsStore({ getRepositoryActivity });

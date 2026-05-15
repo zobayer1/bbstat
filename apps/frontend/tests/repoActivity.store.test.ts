@@ -10,9 +10,27 @@ import { api } from '../src/api/client';
 import type { RepoActivity } from '../src/api/client';
 
 const sample: RepoActivity = {
-  repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1', syncStatus: 'ok' },
+  repository: {
+    workspace: 'tigerit',
+    slug: 'r1',
+    fullName: 'tigerit/r1',
+    syncStatus: 'ok',
+    diffStatsEnabled: false,
+  },
   dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
-  contributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 4, last30Days: [0, 1, 0, 3] }],
+  diffStats: null,
+  contributors: [
+    {
+      userId: 1,
+      bitbucketUuid: '{u1}',
+      displayName: 'Alice',
+      commits: 4,
+      last30Days: [0, 1, 0, 3],
+      additions30d: 0,
+      deletions30d: 0,
+      filesChanged30d: 0,
+    },
+  ],
 };
 
 describe('repoActivity store', () => {

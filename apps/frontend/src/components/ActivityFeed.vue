@@ -120,12 +120,20 @@ function formatTime(iso: string): string {
     <div ref="scrollContainer" :style="height !== undefined ? { height, overflowY: 'auto' } : {}">
       <ul v-if="entries.length > 0" class="divide-y divide-slate-100">
         <li v-for="entry in entries" :key="entryKey(entry)" class="flex items-start gap-3 px-4 py-3 text-sm">
-          <span
-            v-if="entry.kind === 'commit'"
-            class="mt-0.5 inline-block w-16 shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-700"
-          >
-            commit
-          </span>
+          <div v-if="entry.kind === 'commit'" class="mt-0.5 flex w-16 shrink-0 flex-col items-stretch gap-1">
+            <span
+              class="inline-block rounded bg-emerald-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-700"
+            >
+              commit
+            </span>
+            <span
+              v-if="entry.isMerge"
+              class="inline-block rounded bg-violet-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-violet-700"
+              title="Merge commit — additions / deletions cover the merged branch's full delta, not authorship volume"
+            >
+              merge
+            </span>
+          </div>
           <span
             v-else
             :class="prBadgeClass(entry.state)"
@@ -145,17 +153,10 @@ function formatTime(iso: string): string {
               >
                 {{ entry.repository.slug }}
               </RouterLink>
-              <span
-                v-if="entry.kind === 'commit' && entry.isMerge"
-                class="ml-1.5 inline-block rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-violet-700"
-                title="Merge commit — additions / deletions cover the merged branch's full delta, not authorship volume"
-              >
-                merge
-              </span>
               <span v-if="entry.kind === 'commit'" class="text-slate-700"> — {{ commitTitle(entry.message) }}</span>
               <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
             </p>
-            <p class="mt-0.5 text-xs text-slate-500">
+            <p class="mt-1.5 text-xs text-slate-500">
               <span v-if="entry.author">
                 <RouterLink
                   :to="{ name: 'user', params: { userId: entry.author.userId } }"
