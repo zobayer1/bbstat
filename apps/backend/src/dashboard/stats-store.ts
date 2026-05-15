@@ -85,10 +85,14 @@ export interface UserSummary {
     // This user's last-30-day per-repo code-change footprint, excluding
     // merge commits. Always present in the response shape; zero when
     // diff_stats_enabled is false OR the user genuinely made no
-    // non-merge changes in this repo over the window.
+    // non-merge changes in this repo over the window. Note: file count
+    // is intentionally NOT aggregated here — SUM(files_changed) across
+    // many commits double-counts the same path edited repeatedly, which
+    // doesn't carry meaningful authorship signal. Per-commit file count
+    // still appears in the activity feed where it's the actual count
+    // for that single commit.
     additions30d: number;
     deletions30d: number;
-    filesChanged30d: number;
   }>;
 }
 
@@ -139,10 +143,8 @@ export interface RepoActivity {
   diffStats: {
     additions7d: number;
     deletions7d: number;
-    filesChanged7d: number;
     additions30d: number;
     deletions30d: number;
-    filesChanged30d: number;
   } | null;
   // All contributors active in the last 30 days, ordered by commit count desc.
   // `last30Days` is repo-scoped (this user's commits in THIS repo, day-by-day)
@@ -156,7 +158,6 @@ export interface RepoActivity {
 export interface RepoContributor extends TopContributorWithSparkline {
   additions30d: number;
   deletions30d: number;
-  filesChanged30d: number;
 }
 
 export interface ActivityRepository {
@@ -464,7 +465,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           sync_excluded: boolean;
           additions_30d: number;
           deletions_30d: number;
-          files_30d: number;
         }>(sql`
           SELECT
             r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
@@ -472,8 +472,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             ss.last_sync_status, ss.last_synced_at,
             r.sync_excluded,
             COALESCE(ds.additions_30d, 0) AS additions_30d,
-            COALESCE(ds.deletions_30d, 0) AS deletions_30d,
-            COALESCE(ds.files_30d, 0) AS files_30d
+            COALESCE(ds.deletions_30d, 0) AS deletions_30d
           FROM commit_daily cd
           JOIN repositories r ON r.id = cd.repository_id
           LEFT JOIN sync_state ss ON ss.repository_id = r.id
@@ -481,8 +480,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             SELECT
               repository_id,
               sum(additions)::int AS additions_30d,
-              sum(deletions)::int AS deletions_30d,
-              sum(files_changed)::int AS files_30d
+              sum(deletions)::int AS deletions_30d
             FROM commits
             WHERE author_user_id = ${userId}
               AND authored_at >= (current_date - 29)::timestamp
@@ -492,7 +490,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           WHERE cd.author_user_id = ${userId} AND cd.day >= current_date - 29
           GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
                    ss.last_sync_status, ss.last_synced_at, r.sync_excluded,
-                   ds.additions_30d, ds.deletions_30d, ds.files_30d
+                   ds.additions_30d, ds.deletions_30d
           ORDER BY sum(cd.commit_count) DESC
           LIMIT 5
         `),
@@ -522,7 +520,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           diffStatsEnabled: r.diff_stats_enabled,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
-          filesChanged30d: r.files_30d,
         })),
       };
     },
@@ -748,7 +745,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last_30_days: number[];
           additions_30d: number;
           deletions_30d: number;
-          files_30d: number;
         }>(sql`
           WITH top AS (
             SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
@@ -778,8 +774,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             SELECT
               author_user_id,
               sum(additions)::int AS additions_30d,
-              sum(deletions)::int AS deletions_30d,
-              sum(files_changed)::int AS files_30d
+              sum(deletions)::int AS deletions_30d
             FROM commits
             WHERE repository_id = ${repo.id}
               AND authored_at >= (current_date - 29)::timestamp
@@ -794,8 +789,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             t.commits,
             spark.last_30_days,
             COALESCE(diff_summary.additions_30d, 0) AS additions_30d,
-            COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d,
-            COALESCE(diff_summary.files_30d, 0) AS files_30d
+            COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d
           FROM top t
           JOIN spark ON spark.user_id = t.user_id
           LEFT JOIN diff_summary ON diff_summary.author_user_id = t.user_id
@@ -809,18 +803,14 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         db.execute<{
           additions_7d: number;
           deletions_7d: number;
-          files_7d: number;
           additions_30d: number;
           deletions_30d: number;
-          files_30d: number;
         }>(sql`
           SELECT
             COALESCE(SUM(CASE WHEN authored_at >= (current_date - 6)::timestamp THEN additions END), 0)::int AS additions_7d,
             COALESCE(SUM(CASE WHEN authored_at >= (current_date - 6)::timestamp THEN deletions END), 0)::int AS deletions_7d,
-            COALESCE(SUM(CASE WHEN authored_at >= (current_date - 6)::timestamp THEN files_changed END), 0)::int AS files_7d,
             COALESCE(SUM(additions), 0)::int AS additions_30d,
-            COALESCE(SUM(deletions), 0)::int AS deletions_30d,
-            COALESCE(SUM(files_changed), 0)::int AS files_30d
+            COALESCE(SUM(deletions), 0)::int AS deletions_30d
           FROM commits
           WHERE repository_id = ${repo.id}
             AND authored_at >= (current_date - 29)::timestamp
@@ -834,10 +824,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           ? {
               additions7d: diffStatsAgg.additions_7d,
               deletions7d: diffStatsAgg.deletions_7d,
-              filesChanged7d: diffStatsAgg.files_7d,
               additions30d: diffStatsAgg.additions_30d,
               deletions30d: diffStatsAgg.deletions_30d,
-              filesChanged30d: diffStatsAgg.files_30d,
             }
           : null;
       return {
@@ -863,7 +851,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last30Days: r.last_30_days,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
-          filesChanged30d: r.files_30d,
         })),
       };
     },

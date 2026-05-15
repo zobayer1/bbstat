@@ -50,20 +50,14 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
             <span class="text-emerald-700">+{{ activity.diffStats.additions7d.toLocaleString() }}</span>
             <span class="ml-2 text-rose-700">−{{ activity.diffStats.deletions7d.toLocaleString() }}</span>
           </template>
-          <template #hint>
-            {{ activity.diffStats.filesChanged7d.toLocaleString() }}
-            file<span v-if="activity.diffStats.filesChanged7d !== 1">s</span> · excludes merges
-          </template>
+          <template #hint>excludes merges</template>
         </StatCard>
         <StatCard v-if="activity.diffStats" label="Code changes — last 30 days">
           <template #value>
             <span class="text-emerald-700">+{{ activity.diffStats.additions30d.toLocaleString() }}</span>
             <span class="ml-2 text-rose-700">−{{ activity.diffStats.deletions30d.toLocaleString() }}</span>
           </template>
-          <template #hint>
-            {{ activity.diffStats.filesChanged30d.toLocaleString() }}
-            file<span v-if="activity.diffStats.filesChanged30d !== 1">s</span> · excludes merges
-          </template>
+          <template #hint>excludes merges</template>
         </StatCard>
       </section>
 
@@ -102,9 +96,6 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
                     </span>
                     <span class="w-20 shrink-0 text-right text-xs tabular-nums text-rose-700">
                       −{{ c.deletions30d.toLocaleString() }}
-                    </span>
-                    <span class="w-24 shrink-0 text-right text-xs tabular-nums text-slate-500">
-                      {{ c.filesChanged30d.toLocaleString() }} file<span v-if="c.filesChanged30d !== 1">s</span>
                     </span>
                   </div>
                   <span class="w-24 shrink-0 text-right text-sm text-slate-500">{{ c.commits }} commits</span>

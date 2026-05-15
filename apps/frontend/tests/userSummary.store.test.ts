@@ -34,7 +34,6 @@ const sampleSummary: UserSummary = {
       diffStatsEnabled: false,
       additions30d: 0,
       deletions30d: 0,
-      filesChanged30d: 0,
     },
   ],
 };

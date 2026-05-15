@@ -79,7 +79,6 @@ export interface UserSummary {
     diffStatsEnabled: boolean;
     additions30d: number;
     deletions30d: number;
-    filesChanged30d: number;
   }>;
 }
 
@@ -128,10 +127,8 @@ export interface RepoActivity {
   diffStats: {
     additions7d: number;
     deletions7d: number;
-    filesChanged7d: number;
     additions30d: number;
     deletions30d: number;
-    filesChanged30d: number;
   } | null;
   // Sparkline `last30Days` is scoped to this repo (this user's commits in
   // this repo, day-by-day over the trailing 30 days). Same shape as the
@@ -144,7 +141,6 @@ export interface RepoActivity {
 export interface RepoContributor extends TopContributorWithSparkline {
   additions30d: number;
   deletions30d: number;
-  filesChanged30d: number;
 }
 
 export interface TrackedRepositorySummary {
