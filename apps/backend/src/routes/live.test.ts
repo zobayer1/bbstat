@@ -75,6 +75,17 @@ describe('GET /api/live', () => {
     expect(buf).toContain('retry: 5000');
   });
 
+  it('echoes the request Origin in Access-Control-Allow-Origin (cross-origin EventSource)', async () => {
+    server = await start();
+    const res = await fetch(`${server.url}/api/live`, {
+      headers: { Origin: 'https://bbstat.localhost:5173' },
+    });
+
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://bbstat.localhost:5173');
+    expect(res.headers.get('vary')).toContain('Origin');
+    void res.body?.cancel();
+  });
+
   it('writes a frame per published event', async () => {
     server = await start();
     const res = await fetch(`${server.url}/api/live`);

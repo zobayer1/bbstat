@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
 import type { UserSummary } from '@/api/client';
+import { liveBus } from '@/lib/live';
 
 // Keyed cache of per-user summaries. Offline-first: components read
 // `byUserId.value[id]` synchronously (may show a stale-but-present entry while
@@ -31,7 +32,26 @@ export const useUserSummaryStore = defineStore(
       error.value = {};
     }
 
-    return { byUserId, loading, error, fetch, clear };
+    // Re-fetch every currently-cached user summary. Cheap when only
+    // one user is in view; if many are cached from prior navigation
+    // they all refresh in parallel. Errors per-user; one failure
+    // doesn't poison the others.
+    async function applyTickComplete(): Promise<void> {
+      const ids = Object.keys(byUserId.value).map(Number);
+      await Promise.all(ids.map((id) => fetch(id)));
+    }
+
+    liveBus.on('tick.commits.complete', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.deleted', () => {
+      void applyTickComplete();
+    });
+    liveBus.onFallback(() => {
+      void applyTickComplete();
+    });
+
+    return { byUserId, loading, error, fetch, clear, applyTickComplete };
   },
   { persist: { pick: ['byUserId'] } },
 );

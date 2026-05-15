@@ -237,3 +237,71 @@ export const api = {
     return request<ActivityEntry[]>(`/api/activity${qs.length > 0 ? `?${qs}` : ''}`);
   },
 };
+
+// ----------------------------------------------------------------------------
+// Live updates (Server-Sent Events at /api/live)
+//
+// Frontend mirror of the slim payloads the backend publishes on its event
+// bus. See apps/backend/src/events/bus.ts for the canonical definitions —
+// these must stay in lockstep. Frontend wraps them in a typed event map
+// consumed by `lib/live.ts`.
+// ----------------------------------------------------------------------------
+
+export interface TickCommitsCompletePayload {
+  trigger: 'manual' | 'cron' | 'webhook';
+  startedAt: string;
+  finishedAt: string;
+  attempted: number;
+  deferred: number;
+  errors: number;
+  totalCommitsInserted: number;
+  budgetRemainingAtEnd: number;
+  stoppedEarly: boolean;
+  deepenStoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete' | null;
+  isMergeBackfillStoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete' | null;
+  diffStatsBackfillStopReason: 'budget' | 'rate-limited' | null;
+  diffStatsBackfillTotalUpdated: number;
+  diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null;
+}
+
+export interface TickPrsCompletePayload {
+  trigger: 'manual' | 'cron' | 'webhook';
+  startedAt: string;
+  finishedAt: string;
+  attempted: number;
+  deferred: number;
+  errors: number;
+  totalPrsInserted: number;
+  totalPrsUpdated: number;
+  budgetRemainingAtEnd: number;
+  stoppedEarly: boolean;
+}
+
+export interface RepositoryExcludedPayload {
+  repositoryId: number;
+  fullName: string;
+  reason: 'repo-404' | 'history-rewritten' | 'empty-on-bitbucket';
+}
+
+export interface RepositoryIncludedPayload {
+  repositoryId: number;
+  fullName: string;
+  source: 'include' | 'rename';
+}
+
+export interface RepositoryDeletedPayload {
+  repositoryId: number;
+  fullName: string;
+}
+
+// Map from event-name → payload shape. `lib/live.ts` uses this for
+// type-safe handler registration (`bus.on('tick.commits.complete', p => ...)`).
+export interface LiveEventMap {
+  'tick.commits.complete': TickCommitsCompletePayload;
+  'tick.prs.complete': TickPrsCompletePayload;
+  'repository.sync-excluded': RepositoryExcludedPayload;
+  'repository.included': RepositoryIncludedPayload;
+  'repository.deleted': RepositoryDeletedPayload;
+}
+
+export type LiveEventName = keyof LiveEventMap;

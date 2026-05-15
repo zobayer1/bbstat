@@ -130,6 +130,24 @@ async function walkAndPersist(
       );
       break;
     }
+    // Pre-emptive yield when the adaptive pacer has fully saturated.
+    // Continuing to call at the ceiling (default 3.2 s/call) makes minimal
+    // progress and produces a stream of 429s — better to defer the
+    // remaining commits to the next cron firing. Throws RateLimitError so
+    // the orchestrator yields the whole tick (instead of just this repo),
+    // mirroring the post-retry-exhaustion path.
+    if (deps.client.isPacingSaturated()) {
+      deps.logger?.warn?.(
+        {
+          repositoryId: repo.repositoryId,
+          fullName: repo.fullName,
+          pacingMs: deps.client.getCurrentPacingMs(),
+          deferred: commits.length - updated - failed,
+        },
+        'diff-stats sync: adaptive pacer saturated — yielding tick to next cron',
+      );
+      throw new BitbucketRateLimitError(`/repositories/${repo.workspace}/${repo.slug}/diffstat/${commit.sha}`, 0);
+    }
     try {
       const stat = await getCommitDiffStat(
         deps.client,

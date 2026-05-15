@@ -218,4 +218,42 @@ describe('syncRepositoryDiffStats', () => {
     expect(result.updated).toBe(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('throws BitbucketRateLimitError when the adaptive pacer saturates mid-walk', async () => {
+    // Force pacing to its ceiling by stubbing isPacingSaturated. This
+    // is a behavior contract test: when the client reports saturation,
+    // the walker must yield the tick (throw RateLimitError) rather
+    // than continuing to make ceiling-paced calls.
+    const fetchMock = vi.fn();
+    const diffByCommit = new Map<string, Array<{ lines_added: number; lines_removed: number }>>([
+      ['sha-a', [{ lines_added: 5, lines_removed: 1 }]],
+    ]);
+    const { store, state } = makeStore([
+      { id: 1, sha: 'sha-a', authoredAt: new Date('2026-05-05T00:00:00Z') },
+      { id: 2, sha: 'sha-b', authoredAt: new Date('2026-05-05T00:00:00Z') },
+      { id: 3, sha: 'sha-c', authoredAt: new Date('2026-05-05T00:00:00Z') },
+    ]);
+    const client = makeClientWithDiffstat({ fetch: fetchMock, diffByCommit });
+    // First call passes, then flip the pacer to saturated.
+    let saturated = false;
+    vi.spyOn(client, 'isPacingSaturated').mockImplementation(() => saturated);
+    vi.spyOn(client, 'getCurrentPacingMs').mockReturnValue(3200);
+    // After the first successful call, future iterations see saturated=true.
+    vi.spyOn(store, 'updateCommitDiffStats').mockImplementation(async (commitId, input) => {
+      state.updates.push({ commitId, ...input });
+      saturated = true;
+    });
+
+    await expect(
+      syncRepositoryDiffStats({ client, store }, makeRepo(), {
+        maxPerRepoPerTick: 50,
+        budgetThreshold: 10,
+      }),
+    ).rejects.toMatchObject({ name: 'BitbucketRateLimitError' });
+
+    // One successful call landed before saturation flipped; the second
+    // and third pending commits stay queued for the next tick.
+    expect(state.updates).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

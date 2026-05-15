@@ -119,6 +119,35 @@ describe('BitbucketClient', () => {
 
       await expect(client.get('/workspaces/foo')).rejects.toBeInstanceOf(BitbucketRateLimitError);
     });
+
+    it('isPacingSaturated flips true once pacing reaches the ceiling', async () => {
+      // pacing ramps 400 → 800 → 1600 → 3200 on 429s. After enough
+      // 429-then-success cycles the pacer pins at max.
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, {
+        minCallIntervalMs: 100,
+        maxCallIntervalMs: 400,
+      });
+      expect(client.isPacingSaturated()).toBe(false);
+
+      // Two 429-then-success cycles: 100 → 200 → 400 (cap).
+      for (let i = 0; i < 2; i++) {
+        fetchMock
+          .mockResolvedValueOnce(mockResponse({ status: 429, headers: { 'retry-after': '0' } }))
+          .mockResolvedValueOnce(mockResponse({ body: { ok: true } }));
+        await client.get('/workspaces/foo');
+      }
+
+      expect(client.isPacingSaturated()).toBe(true);
+      expect(client.getCurrentPacingMs()).toBe(400);
+    });
+
+    it('isPacingSaturated stays false when maxCallIntervalMs is 0 (disabled)', () => {
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, {
+        minCallIntervalMs: 0,
+        maxCallIntervalMs: 0,
+      });
+      expect(client.isPacingSaturated()).toBe(false);
+    });
   });
 
   describe('5xx retries', () => {

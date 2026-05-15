@@ -7,6 +7,7 @@ import type {
   TopContributorWithSparkline,
   TrackedRepositorySummary,
 } from '@/api/client';
+import { liveBus } from '@/lib/live';
 
 // Pinia is the client-side cache (per CLAUDE.md). Hydrates from
 // /api/stats/overview + /api/stats/top-contributors + /api/stats/repositories;
@@ -61,6 +62,31 @@ export const useStatsStore = defineStore(
       error.value = null;
     }
 
+    // Re-fetch the dashboard aggregates when a tick lands or push
+    // goes stale. Skip if nothing has ever been loaded — the next
+    // navigation to the dashboard will trigger the first fetch on
+    // its own. Avoids waking a sleeping tab into network work.
+    async function applyTickComplete(): Promise<void> {
+      if (overview.value === null) return;
+      await fetchOverview();
+    }
+
+    liveBus.on('tick.commits.complete', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.sync-excluded', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.included', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.deleted', () => {
+      void applyTickComplete();
+    });
+    liveBus.onFallback(() => {
+      void applyTickComplete();
+    });
+
     return {
       overview,
       topContributors,
@@ -72,6 +98,7 @@ export const useStatsStore = defineStore(
       fetchOverview,
       setContributorsWindow,
       clear,
+      applyTickComplete,
     };
   },
   { persist: { pick: ['overview', 'topContributors', 'repositories', 'contributorsWindow', 'lastSyncedAt'] } },

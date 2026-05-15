@@ -142,6 +142,23 @@ export class BitbucketClient {
     return this.currentPacingMs;
   }
 
+  /**
+   * True when the adaptive pacer has fully ramped up to its ceiling
+   * (`maxCallIntervalMs`). The pacer only reaches this state after
+   * a series of 429s, so when it's true BB is signaling sustained
+   * back-pressure — each subsequent call is paced at the ceiling
+   * (default 3.2 s) and has a high chance of 429ing again. Hot
+   * ingest loops (the per-commit diff-stat walker, in particular)
+   * use this as a pre-emptive yield signal: continuing to call at
+   * this rate burns the rolling-hour budget without much progress;
+   * better to defer remaining work to the next cron firing, by
+   * which time the rolling window has rotated and the pacer has
+   * decayed.
+   */
+  isPacingSaturated(): boolean {
+    return this.maxCallIntervalMs > 0 && this.currentPacingMs >= this.maxCallIntervalMs;
+  }
+
   /** Outbound-fetch attempts made in the last rolling hour. */
   getCallsInLastHour(): number {
     const cutoff = this.now() - HOUR_MS;

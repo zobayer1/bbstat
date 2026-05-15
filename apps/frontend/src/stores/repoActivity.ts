@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
 import type { RepoActivity } from '@/api/client';
+import { liveBus } from '@/lib/live';
 
 // Keyed cache of per-repo activity, indexed by "<workspace>/<slug>" so the
 // key is stable and round-trips through URLs cleanly.
@@ -34,7 +35,46 @@ export const useRepoActivityStore = defineStore(
       error.value = {};
     }
 
-    return { byFullName, loading, error, fetch, clear, keyFor };
+    // Re-fetch every cached repo's activity payload. Per-repo events
+    // (sync-excluded / included / deleted) also drive a global
+    // refresh — finer-grained patching is possible but the payload
+    // is small and re-fetching keeps the store logic simple.
+    async function applyTickComplete(): Promise<void> {
+      const keys = Object.keys(byFullName.value);
+      await Promise.all(
+        keys.map((key) => {
+          const [workspace, slug] = key.split('/', 2);
+          if (workspace === undefined || slug === undefined) return Promise.resolve();
+          return fetch(workspace, slug);
+        }),
+      );
+    }
+
+    function dropRepo(fullName: string): void {
+      delete byFullName.value[fullName];
+      delete loading.value[fullName];
+      delete error.value[fullName];
+    }
+
+    liveBus.on('tick.commits.complete', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.sync-excluded', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.included', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.deleted', (payload) => {
+      // Hard delete: the repo doesn't exist anymore, drop it from
+      // cache rather than re-fetching (which would 404).
+      dropRepo(payload.fullName);
+    });
+    liveBus.onFallback(() => {
+      void applyTickComplete();
+    });
+
+    return { byFullName, loading, error, fetch, clear, keyFor, applyTickComplete };
   },
   { persist: { pick: ['byFullName'] } },
 );

@@ -35,6 +35,19 @@ export const liveRoutes: FastifyPluginAsync<LiveRouteOptions> = async (app, opts
     // SSE headers. `Connection: keep-alive` is the HTTP/1.1 default but
     // we set it explicitly because some proxies look for it before
     // letting the response stream through unchunked.
+    //
+    // CORS: writing through reply.raw bypasses Fastify's onSend hook
+    // (where @fastify/cors would normally inject the
+    // Access-Control-Allow-Origin header), so we set CORS headers
+    // manually here. Mirrors the plugin's config in app.ts
+    // (`origin: true, credentials: false`): echo the request's Origin
+    // so cross-origin EventSource clients (e.g., dev frontend at :5173
+    // hitting the backend at :8443) are not rejected by the browser's
+    // CORS check. The `Vary: Origin` response header is the cache-
+    // correctness companion when echoing.
+    const origin = request.headers.origin;
+    const corsHeaders: Record<string, string> =
+      typeof origin === 'string' && origin.length > 0 ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {};
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
@@ -42,6 +55,7 @@ export const liveRoutes: FastifyPluginAsync<LiveRouteOptions> = async (app, opts
       // Disable nginx-style buffering — see
       // https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering
       'X-Accel-Buffering': 'no',
+      ...corsHeaders,
     });
 
     // Browser reconnect interval. SSE clients honor this on disconnect.

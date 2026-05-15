@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api, type ActivityEntry } from '@/api/client';
+import { liveBus } from '@/lib/live';
 
 // Filter axes for the activity feed. The store keys its cache by the
 // serialized triple, so switching between an actor-filtered view and the
@@ -97,5 +98,42 @@ export const useActivityStore = defineStore('activity', () => {
     exhausted.value = {};
   }
 
-  return { byKey, loading, error, exhausted, keyFor, load, loadMore, clear };
+  // Live updates: re-fetch the first page for every currently-loaded
+  // filter. New entries surface at the top; pagination state (the
+  // user's accumulated additional pages) is intentionally NOT
+  // preserved — `load()` overwrites `byKey[key]` with the fresh page.
+  // For an activity feed this is the right call: a "live" feed
+  // shouldn't strand the user 10 pages deep in stale data when a tick
+  // just landed new commits at the top.
+  async function applyTickComplete(): Promise<void> {
+    const keys = Object.keys(byKey.value);
+    await Promise.all(
+      keys.map((key) => {
+        const filters = JSON.parse(key) as { actor: number | null; repo: string | null; project: string | null };
+        const restored: ActivityFilters = {};
+        if (filters.actor !== null) restored.actor = filters.actor;
+        if (filters.repo !== null) restored.repo = filters.repo;
+        if (filters.project !== null) restored.project = filters.project;
+        return load(restored);
+      }),
+    );
+  }
+
+  // Wire push + polling fallback. Both call applyTickComplete so the
+  // store has one re-fetch path regardless of trigger. Stays registered
+  // for the app lifetime — Pinia stores aren't torn down in an SPA.
+  liveBus.on('tick.commits.complete', () => {
+    void applyTickComplete();
+  });
+  liveBus.on('tick.prs.complete', () => {
+    void applyTickComplete();
+  });
+  liveBus.on('repository.deleted', () => {
+    void applyTickComplete();
+  });
+  liveBus.onFallback(() => {
+    void applyTickComplete();
+  });
+
+  return { byKey, loading, error, exhausted, keyFor, load, loadMore, clear, applyTickComplete };
 });

@@ -115,6 +115,27 @@ The deepen tick has the same handler (`runDeepenTick` checks
 The next cron tick (5 minutes later) starts fresh — pacing has had time to
 decay; BB's rolling window has rotated.
 
+**Pre-emptive saturation yield (diff-stats walker).** The per-commit
+`/diffstat` walker doesn't wait for the retry budget to fully exhaust
+before yielding. Before each call it checks
+`BitbucketClient.isPacingSaturated()` — true when `currentPacingMs >=
+maxCallIntervalMs`. When the pacer has fully ramped to its ceiling,
+BB is signaling sustained back-pressure and each subsequent call is
+~3.2 s paced with high 429 probability. Continuing makes minimal
+progress; the walker throws a synthetic `BitbucketRateLimitError` so
+the existing orchestrator path takes over and ends the entire tick.
+Visible in the log as:
+
+```
+"diff-stats sync: adaptive pacer saturated — yielding tick to next cron"
+```
+
+Without this guard, a heavy backfill (say a freshly opted-in repo
+with thousands of pending commits) would chew through dozens of
+ceiling-paced calls per tick — fixed in 2026-05; previously the
+walker treated each retry-exhausted call as a per-commit failure
+and continued.
+
 ### Layer 4 — Fair round-robin across ticks
 
 When a tick aborts, the deferred repos must surface before fresh ones on
@@ -885,6 +906,7 @@ lengthen in production if you want.
 | `GET /api/stats/repositories/:workspace/:slug/activity`      | Repo activity: 30-day daily sparkline + 30-day contributor list. (`recentCommits` dropped — see `/api/activity`.)               |
 | `GET /api/stats/repositories`                                | All tracked repositories with `project`, `commits30d`, `contributors30d`, and `lastCommitAt`.                                   |
 | `GET /api/activity`                                          | Phase 4 unified feed of commits + PRs, newest-first. See "Activity feed" below for filters, pagination, and the response shape. |
+| `GET /api/live`                                              | Server-Sent Events stream for live dashboard updates. See "Live updates" below for the event catalog + wire format.             |
 
 All `/api/stats/*` endpoints read from `commit_daily` joined to
 `repositories` / `users` and return 404 when a specific target entity doesn't
@@ -940,6 +962,123 @@ the same key the moment new commits land for that user, so the TTL is only a
 backstop for inactive users — fresh data is immediate after a sync. Project
 and repo endpoints read from the rollup table directly per CLAUDE.md's
 "Redis is user-summary only" rule.
+
+## Live updates (Server-Sent Events)
+
+The dashboard refreshes itself when sync ticks land. `GET /api/live` is
+the **only** server endpoint — one Server-Sent Events stream that the
+frontend opens once per browser tab via `new EventSource('/api/live')`.
+Push primary, polling fallback at 5-minute cadence when push goes stale.
+
+### Event catalog
+
+Payloads are slim summaries (not the full sync result objects) so they
+flush through the TLS write path even on busy ticks. Canonical types
+live in `apps/backend/src/events/bus.ts`; the frontend mirrors them in
+`apps/frontend/src/api/client.ts` (`LiveEventMap`).
+
+| Event                      | Fires when                                                   | Payload size |
+| -------------------------- | ------------------------------------------------------------ | ------------ |
+| `tick.commits.complete`    | End of `runCommitsSync` (every commits-cron firing)          | ~300 bytes   |
+| `tick.prs.complete`        | End of `runPullRequestsSync` (every PR-cron firing)          | ~250 bytes   |
+| `repository.sync-excluded` | Auto-trip on BB 404 / history-rewrite / empty-on-bitbucket   | ~120 bytes   |
+| `repository.included`      | Admin `POST /include` or `POST /rename` clears the exclusion | ~120 bytes   |
+| `repository.deleted`       | Admin `DELETE /repositories/:ws/:slug` hard-deletes a row    | ~80 bytes    |
+
+The frontend's Pinia stores subscribe to the events relevant to their
+surface and re-fetch their currently-cached data when an event arrives.
+`repository.deleted` is special-cased on the repo-activity store: it
+drops the cached row rather than re-fetching (the repo no longer
+exists).
+
+### Architecture — bus + bridge
+
+```
+┌──────────────────┐    publish (in-proc)    ┌──────────────────┐
+│ runCommitsSync   ├────────────────────────►│  EventBus        │
+│ (backend or sync │                         │  (subscribers:   │
+│  cron process)   │                         │   SSE route +    │
+└──────────────────┘                         │   Redis bridge)  │
+                                             └──────┬───────────┘
+                                                    │ publish
+                                                    ▼
+                                     ┌──────────────────────────┐
+                                     │ Redis channel            │
+                                     │ "bbstat:events"          │
+                                     └──┬───────────────────┬───┘
+                                        │ subscribe         │ subscribe
+                                        ▼                   ▼
+                                ┌────────────┐      ┌────────────┐
+                                │ Backend    │      │ Cron-host  │
+                                │ process    │      │ process    │
+                                │ EventBus   │      │ EventBus   │
+                                │ → SSE      │      │ (no SSE    │
+                                │ subscribers│      │  here)     │
+                                └────────────┘      └────────────┘
+```
+
+Two layers:
+
+1. **In-process bus** (`events/bus.ts`) — typed pub/sub. `publish()`
+   fans out synchronously to local subscribers (zero latency for
+   the same-process SSE route). The SSE route is just one of those
+   subscribers — there's no special-casing.
+
+2. **Redis pub/sub bridge** (`events/redis-bridge.ts`) — wraps the
+   bus so events fire across processes. The HTTPS API and the cron
+   host are separate Node processes; their in-memory buses can't
+   see each other directly. The bridge writes every published event
+   to the `bbstat:events` Redis channel and re-broadcasts incoming
+   channel messages to the local bus. Each process generates a
+   random `sourceId` at startup so echoes back to the publisher
+   process are deduped.
+
+   If Redis is unreachable at boot, both processes fall back to the
+   plain in-memory bus with a loud warn — the API still serves
+   traffic and same-process publishes (admin actions) still reach
+   SSE clients, but cron-host events don't cross over.
+
+### SSE wire format
+
+Standard Server-Sent Events:
+
+```
+retry: 5000
+\n
+event: tick.commits.complete
+data: {"trigger":"cron","startedAt":"2026-05-15T21:00:00Z", …}
+\n
+: keepalive 1747...
+\n
+event: repository.included
+data: {"repositoryId":47,"fullName":"tigerit/bbstat","source":"include"}
+\n
+```
+
+Connection mechanics:
+
+- `retry: 5000\n\n` at open — browser auto-reconnects after 5s on close.
+- `: keepalive\n\n` every 25 s — defeats reverse-proxy idle timeouts.
+- `Access-Control-Allow-Origin` echoes the request `Origin` (manual
+  header inject in the route since `reply.raw` bypasses Fastify's
+  `onSend` hook where `@fastify/cors` would normally fire).
+- Socket-level `'error'` listeners on both `reply.raw` and `request.raw`
+  swallow TLS hiccups and writes-to-closed-socket so they don't
+  escalate as unhandled stream errors.
+- Each connection logs `live: SSE connection opened` / `live: SSE
+connection closed` at info with a `connectionId` and close reason —
+  troubleshooting handle for "why did my curl die" questions.
+
+### Frontend polling fallback
+
+`apps/frontend/src/lib/live.ts` runs a 30-second tick-check timer
+alongside the EventSource. When no SSE event has arrived for ≥ 5
+minutes (matching the commits-cron cadence), it fires a synthetic
+`emitFallback()` on the local event bus. Pinia stores subscribe to
+both real events and the fallback channel with the same handler, so
+push-vs-pull doesn't leak into store logic. When push is healthy,
+real events keep the activity timestamp fresh and the fallback never
+fires.
 
 ## Reading sync logs
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useUserSummaryStore } from '../src/stores/userSummary';
+import { liveBus } from '../src/lib/live';
 
 vi.mock('../src/api/client', () => ({
   api: { userSummary: vi.fn() },
@@ -40,6 +41,10 @@ const sampleSummary: UserSummary = {
 
 describe('userSummary store', () => {
   beforeEach(() => {
+    // Reset the live bus first so prior tests' handler registrations
+    // don't pile up — each store setup registers fresh handlers on
+    // the global bus, and without reset the global state leaks.
+    liveBus.clear();
     setActivePinia(createPinia());
     vi.clearAllMocks();
   });
@@ -74,5 +79,66 @@ describe('userSummary store', () => {
     expect(store.byUserId[7]).toBeUndefined();
     expect(store.error[7]).toBe('boom');
     expect(store.loading[7]).toBe(false);
+  });
+
+  it('applyTickComplete re-fetches every currently-cached user', async () => {
+    vi.mocked(api.userSummary).mockResolvedValue(sampleSummary);
+    const store = useUserSummaryStore();
+    await store.fetch(7);
+    await store.fetch(13);
+    vi.mocked(api.userSummary).mockClear();
+
+    await store.applyTickComplete();
+
+    expect(api.userSummary).toHaveBeenCalledTimes(2);
+    expect(
+      vi
+        .mocked(api.userSummary)
+        .mock.calls.map((c) => c[0])
+        .sort((a, b) => a - b),
+    ).toEqual([7, 13]);
+  });
+
+  it('emits tick.commits.complete on the live bus → store re-fetches every cached user', async () => {
+    vi.mocked(api.userSummary).mockResolvedValue(sampleSummary);
+    const store = useUserSummaryStore();
+    await store.fetch(7);
+    vi.mocked(api.userSummary).mockClear();
+
+    liveBus.emit('tick.commits.complete', {
+      trigger: 'cron',
+      startedAt: '',
+      finishedAt: '',
+      attempted: 0,
+      deferred: 0,
+      errors: 0,
+      totalCommitsInserted: 0,
+      budgetRemainingAtEnd: 1000,
+      stoppedEarly: false,
+      deepenStoppedReason: null,
+      isMergeBackfillStoppedReason: null,
+      diffStatsBackfillStopReason: null,
+      diffStatsBackfillTotalUpdated: 0,
+      diffStatsAutoOptIn: null,
+    });
+    // applyTickComplete is fired off as a void-promise inside the
+    // bus handler; flush pending microtasks before asserting.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(api.userSummary).toHaveBeenCalledWith(7);
+  });
+
+  it('polling fallback (emitFallback) also triggers a re-fetch', async () => {
+    vi.mocked(api.userSummary).mockResolvedValue(sampleSummary);
+    const store = useUserSummaryStore();
+    await store.fetch(7);
+    vi.mocked(api.userSummary).mockClear();
+
+    liveBus.emitFallback();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(api.userSummary).toHaveBeenCalledWith(7);
   });
 });
