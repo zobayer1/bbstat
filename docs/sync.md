@@ -589,10 +589,17 @@ tick result's `attempted[]` array (zero-update entries add noise without
 signal); the `attemptedCount` field preserves the "did we even walk
 this repo?" count.
 
-**Self-paced rollout.** When the backfill tick finishes with zero work
-across every opted-in repo (`totalUpdated + totalFailed + totalDeferred
-=== 0`), `runCommitsSync` flips `diff_stats_enabled = true` on the next
-non-opted-in non-archived repo. Selection is ordered by
+**Self-paced rollout.** When the backfill tick drains cleanly —
+`stopReason === null` (neither budget nor rate-limit gate fired) AND
+`deferred`, `attempted`, and `errors` are all empty — `runCommitsSync`
+flips `diff_stats_enabled = true` on the next non-opted-in non-archived
+repo. All four conditions matter: the orchestrator suppresses
+fully-drained repos from `attempted[]` (zero-update entries are noise)
+and parks budget-/rate-limit-gated repos in `deferred[]` outside
+`attempted[]`, so the older totals-based check
+(`totalUpdated + totalFailed + totalDeferred === 0`) silently spuriously
+fired on ticks where the backfill never actually ran. Selection is
+ordered by
 `MAX(commits.authored_at) DESC NULLS LAST` (tie-broken on `id ASC`):
 hot repos are promoted first so the dashboard sees fresh diff-stat
 coverage for current work before it backfills dormant ones. One repo

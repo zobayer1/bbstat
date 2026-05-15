@@ -124,12 +124,13 @@ export interface CommitsSyncResult extends BaseResult {
   // Phase 5 prep: diff-stats backfill tick that runs after deepen. Null
   // when the step is disabled (diffStatsBackfillOptions not wired).
   diffStatsBackfill: DiffStatsBackfillTickResult | null;
-  // Self-paced diff-stats rollout. When the backfill tick finishes
-  // with zero work (totalUpdated + totalFailed + totalDeferred === 0),
-  // we flip diff_stats_enabled on the next non-opted-in non-archived
-  // repo (lowest id = seed order). One per tick max. Null when
-  // either the backfill is disabled, the tick had work to do, or every
-  // repo is already opted in / archived.
+  // Self-paced diff-stats rollout. When the backfill tick drains
+  // cleanly (stopReason === null AND attempted/deferred/errors all
+  // empty), we flip diff_stats_enabled on the next non-opted-in
+  // non-archived repo (most-recently-active first, see
+  // `findNextDiffStatsCandidate`). One per tick max. Null when the
+  // backfill is disabled, the tick had any work or any non-clean stop
+  // reason, or every repo is already opted in / archived.
   diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null;
 }
 
@@ -306,20 +307,30 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   }
 
   // Self-paced diff-stats rollout. Fires only when the backfill tick
-  // (a) ran at all, and (b) found nothing to do — i.e., every currently
-  // opted-in repo is fully drained. In that case we promote the next
-  // non-opted-in non-archived repo (lowest id, seed order) by flipping
-  // its diff_stats_enabled column. The natural drain time of the newly-
-  // opted-in repo's history paces the rollout: a busy repo with 5000
-  // pending commits takes ~100 ticks to drain, blocking the next
-  // auto-opt; an empty repo opts in immediately, so the rollout
+  // ran AND drained the queue cleanly — every opted-in repo was walked
+  // (no budget / rate-limit cutoff), every walked repo had zero pending
+  // work, and no per-repo errors occurred. The natural drain time of
+  // the newly-opted-in repo's history paces the rollout: a busy repo
+  // with thousands of pending commits blocks the next auto-opt for
+  // many ticks; an empty repo opts in immediately and the rollout
   // proceeds one repo per cron tick until the pool exhausts.
+  //
+  // The four-condition gate is load-bearing — an earlier revision
+  // checked totals reduced over `attempted[]`, but the orchestrator
+  // (a) suppresses fully-drained repos from `attempted[]` (zero-update
+  // entries are noise) and (b) parks budget-/rate-limit-gated repos
+  // in `deferred[]` outside `attempted[]`. So `totalUpdated +
+  // totalFailed + totalDeferred` went to zero on ticks where the
+  // backfill never actually ran — flipping repos on while work was
+  // still pending. The gate now reads the orchestrator's own
+  // "drained cleanly" invariants directly.
   let diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null = null;
   if (
     diffStatsBackfill !== null &&
-    diffStatsBackfill.totalUpdated === 0 &&
-    diffStatsBackfill.totalFailed === 0 &&
-    diffStatsBackfill.totalDeferred === 0
+    diffStatsBackfill.stopReason === null &&
+    diffStatsBackfill.deferred.length === 0 &&
+    diffStatsBackfill.attempted.length === 0 &&
+    diffStatsBackfill.errors.length === 0
   ) {
     try {
       const candidate = await deps.store.findNextDiffStatsCandidate();
