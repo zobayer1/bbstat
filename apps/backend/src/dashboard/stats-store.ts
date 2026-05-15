@@ -136,6 +136,12 @@ export interface ActivityCommit {
   message: string;
   additions: number;
   deletions: number;
+  // Distinct file paths touched by the commit (= rows in BB's /diffstat
+  // response). 0 when diff-stats haven't been fetched yet for the
+  // commit (diff_stats_synced_at IS NULL) — same as additions/deletions
+  // in that case. Rendered alongside the +X/−Y line counts in the
+  // activity feed for context.
+  filesChanged: number;
   // True when the underlying commit has more than one parent. Surfaced
   // here so the dashboard can flag merges (their additions/deletions
   // include the entire merged-branch delta and shouldn't be read as
@@ -738,6 +744,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         message: string | null;
         additions: number | null;
         deletions: number | null;
+        files_changed: number | null;
         is_merge: boolean | null;
         pr_id: number | null;
         title: string | null;
@@ -760,6 +767,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             c.message AS message,
             c.additions AS additions,
             c.deletions AS deletions,
+            c.files_changed AS files_changed,
             c.is_merge AS is_merge,
             NULL::int AS pr_id,
             NULL::text AS title,
@@ -791,6 +799,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             NULL::text AS message,
             NULL::int AS additions,
             NULL::int AS deletions,
+            NULL::int AS files_changed,
             NULL::boolean AS is_merge,
             pr.bitbucket_pr_id AS pr_id,
             pr.title AS title,
@@ -838,6 +847,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             message: r.message!,
             additions: r.additions!,
             deletions: r.deletions!,
+            filesChanged: r.files_changed ?? 0,
             isMerge: r.is_merge ?? false,
             repository,
             author,

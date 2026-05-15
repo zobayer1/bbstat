@@ -75,6 +75,18 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
     async listTrackedRepositories() {
       return Array.from(state.repositories.values()).filter((r) => !r.archived);
     },
+    async findNextDiffStatsCandidate() {
+      // Real impl orders by MAX(commits.authored_at) DESC NULLS LAST
+      // tie-broken on id ASC; this fake has no commits state, so it
+      // returns the lowest-id non-archived non-opted-in row as a
+      // deterministic proxy. Tests that need the activity ordering can
+      // override this method per-test.
+      const sorted = Array.from(state.repositories.values())
+        .filter((r) => !r.archived && !r.diffStatsEnabled)
+        .sort((a, b) => a.id - b.id);
+      const first = sorted[0];
+      return first ? { id: first.id, fullName: first.fullName } : null;
+    },
     async listRepositoriesForSync() {
       // Synthesize the activity timestamps to nulls; tests in this file
       // don't exercise the backoff path. The runner falls back to

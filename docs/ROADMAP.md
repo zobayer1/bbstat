@@ -98,7 +98,7 @@ Layer the "expensive" metrics in once cheap ones are stable.
 
 **API budget:** ~50 active repos × ~10 new commits/day average ≈ 500 diff-stat calls/day = 21/hour. Comfortable.
 
-**Status:** Landed across `27528fe`..`96a6256` (11 commits). Operator notes — diff-stats opt-in via YAML, PR-sync cadence + cursor mechanics, `/api/activity` query params, every new env knob — live in [`docs/sync.md`](sync.md); the per-stream design rationale is preserved in [`docs/phase-4-plan.md`](phase-4-plan.md). Dashboard now has a tabbed Top Contributors / Recent Activity panel with per-user 30-day sparklines and project/repo/user filter dropdowns; the activity feed is mounted on user / project / repo detail pages too. Backend pipeline now ingests PR state on a 30-minute cron and (opt-in per repo) per-commit diff stats inside the commit tick.
+**Status:** Landed across `27528fe`..`96a6256` (11 commits). Operator notes — diff-stats opt-in via YAML, PR-sync cadence + cursor mechanics, `/api/activity` query params, every new env knob — live in [`docs/sync.md`](sync.md); per-stream design rationale lives in those commits' messages. Dashboard now has a tabbed Top Contributors / Recent Activity panel with per-user 30-day sparklines and project/repo/user filter dropdowns; the activity feed is mounted on user / project / repo detail pages too. Backend pipeline ingests PR state on an hourly cron and (opt-in per repo) per-commit diff stats inside the commit tick.
 
 #### Phase 4 follow-ups — backpressure algorithm + dashboard polish ✅ Landed
 
@@ -113,7 +113,7 @@ Post-Phase-4 ops work driven by running the sync at 160-repo scale and hitting B
 - **Table improvements**: per-repo `contributors30d` column on the project detail page; First/Last buttons added to all paginated tables; project detail repos table paginated at size 10; sparkline + clickable row added to the repo detail page's contributors list.
 - **New stat cards**: dashboard "Commits last 30 days"; user detail "Repositories — all time" (distinct count).
 - **Project activity heatmap**: `CommitHeatmap` mounted on project detail pages with project-scoped `dailyCommits` aggregate.
-- **Algorithm doc** (`docs/sync.md`): new "Backpressure algorithm" section explaining the 4-layer rate-limit defense (self-counted budget, adaptive pacing, tick abort, fair round-robin) and a "Tuning playbook" mapping log symptoms to knobs.
+- **Algorithm doc** (`docs/sync.md`): "Backpressure algorithm" section explaining the 5-layer defense (self-counted budget, adaptive pacing, tick abort, fair round-robin, and adaptive per-repo backoff for quiet repos) plus a "Tick execution order" tree, and a "Tuning playbook" mapping log symptoms to knobs.
 
 ### Phase 5 — Webhook trigger + admin UI (~3–4 days, stretch)
 

@@ -82,6 +82,7 @@ function makeOkSyncOne(
     return {
       updated: spec.updated,
       failed: 0,
+      deferred: 0,
       hitBudgetGate: false,
       diffStatsRange: spec.range,
     };
@@ -118,7 +119,7 @@ describe('runDiffStatsBackfillTick', () => {
       _opts: DiffStatsSyncOptions,
     ): Promise<DiffStatsSyncResult> => {
       seen.push(repo.repositoryId);
-      return { updated: 0, failed: 0, hitBudgetGate: false, diffStatsRange: null };
+      return { updated: 0, failed: 0, deferred: 0, hitBudgetGate: false, diffStatsRange: null };
     };
     const repos = [makeRepo(1, 'r1', true), makeRepo(2, 'r2', false), makeRepo(3, 'r3', true)];
 
@@ -128,7 +129,11 @@ describe('runDiffStatsBackfillTick', () => {
     });
 
     expect(seen).toEqual([1, 3]);
-    expect(result.attempted.map((a) => a.repositoryId)).toEqual([1, 3]);
+    // Both opted-in repos were walked, but they returned all-zero
+    // results (drained); the tick suppresses zero entries from
+    // `attempted[]` so `attemptedCount` is the surviving signal.
+    expect(result.attempted).toEqual([]);
+    expect(result.attemptedCount).toBe(2);
   });
 
   it('stops scheduling when the budget gate fires; remaining repos roll over', async () => {
@@ -163,7 +168,7 @@ describe('runDiffStatsBackfillTick', () => {
       if (repo.repositoryId === 2) {
         throw new BitbucketRateLimitError('/diffstat/sha-repo-2', 1);
       }
-      return { updated: 0, failed: 0, hitBudgetGate: false, diffStatsRange: null };
+      return { updated: 0, failed: 0, deferred: 0, hitBudgetGate: false, diffStatsRange: null };
     };
     const repos = [makeRepo(1, 'r1'), makeRepo(2, 'r2'), makeRepo(3, 'r3')];
 
@@ -177,7 +182,10 @@ describe('runDiffStatsBackfillTick', () => {
 
     expect(result.stoppedEarly).toBe(true);
     expect(result.stopReason).toBe('rate-limited');
-    expect(result.attempted.map((a) => a.repositoryId)).toEqual([1]);
+    // Repo 1 was walked but returned zero work → suppressed from
+    // `attempted[]`; only `attemptedCount` reflects it.
+    expect(result.attempted).toEqual([]);
+    expect(result.attemptedCount).toBe(1);
     // Repo 2 (the one that 429'd) goes back at the head of the deferred
     // queue so the next tick retries it before any later repos.
     expect(result.deferred.map((r) => r.repositoryId)).toEqual([2, 3]);
@@ -195,6 +203,7 @@ describe('runDiffStatsBackfillTick', () => {
       return {
         updated: 1,
         failed: 0,
+        deferred: 0,
         hitBudgetGate: false,
         diffStatsRange: { sinceDay: '2026-05-03', untilDay: '2026-05-03' },
       };

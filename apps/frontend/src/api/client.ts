@@ -150,6 +150,7 @@ export interface ActivityCommit {
   message: string;
   additions: number;
   deletions: number;
+  filesChanged: number;
   isMerge: boolean;
   repository: ActivityRepository;
   author: ActivityAuthor | null;

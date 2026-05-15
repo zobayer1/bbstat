@@ -124,6 +124,13 @@ export interface CommitsSyncResult extends BaseResult {
   // Phase 5 prep: diff-stats backfill tick that runs after deepen. Null
   // when the step is disabled (diffStatsBackfillOptions not wired).
   diffStatsBackfill: DiffStatsBackfillTickResult | null;
+  // Self-paced diff-stats rollout. When the backfill tick finishes
+  // with zero work (totalUpdated + totalFailed + totalDeferred === 0),
+  // we flip diff_stats_enabled on the next non-opted-in non-archived
+  // repo (lowest id = seed order). One per tick max. Null when
+  // either the backfill is disabled, the tick had work to do, or every
+  // repo is already opted in / archived.
+  diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null;
 }
 
 export interface PrsSyncSummary {
@@ -298,8 +305,42 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
+  // Self-paced diff-stats rollout. Fires only when the backfill tick
+  // (a) ran at all, and (b) found nothing to do — i.e., every currently
+  // opted-in repo is fully drained. In that case we promote the next
+  // non-opted-in non-archived repo (lowest id, seed order) by flipping
+  // its diff_stats_enabled column. The natural drain time of the newly-
+  // opted-in repo's history paces the rollout: a busy repo with 5000
+  // pending commits takes ~100 ticks to drain, blocking the next
+  // auto-opt; an empty repo opts in immediately, so the rollout
+  // proceeds one repo per cron tick until the pool exhausts.
+  let diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null = null;
+  if (
+    diffStatsBackfill !== null &&
+    diffStatsBackfill.totalUpdated === 0 &&
+    diffStatsBackfill.totalFailed === 0 &&
+    diffStatsBackfill.totalDeferred === 0
+  ) {
+    try {
+      const candidate = await deps.store.findNextDiffStatsCandidate();
+      if (candidate !== null) {
+        await deps.store.updateRepositoryDiffStatsEnabled(candidate.id, true);
+        diffStatsAutoOptIn = { repositoryId: candidate.id, fullName: candidate.fullName };
+        deps.logger.info?.({ ...candidate }, 'diff-stats auto-opt-in');
+      }
+    } catch (err) {
+      deps.logger.warn?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        'diff-stats auto-opt-in: candidate lookup or update failed',
+      );
+    }
+  }
+
   const finishedAt = new Date().toISOString();
-  deps.logger.info?.({ trigger, ...summary, deepen, diffStatsBackfill, startedAt, finishedAt }, 'commit sync complete');
+  deps.logger.info?.(
+    { trigger, ...summary, deepen, diffStatsBackfill, diffStatsAutoOptIn, startedAt, finishedAt },
+    'commit sync complete',
+  );
 
   return {
     trigger,
@@ -307,6 +348,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     finishedAt,
     deepen,
     diffStatsBackfill,
+    diffStatsAutoOptIn,
     commits: summary,
     repoResults: tick.attempted,
     errors: tick.errors,

@@ -167,7 +167,12 @@ function formatTime(iso: string): string {
               <span v-else class="italic">anonymous</span>
               ·
               <span>{{ formatTime(entry.occurredAt) }}</span>
-              <span v-if="entry.kind === 'commit'"> · +{{ entry.additions }} −{{ entry.deletions }}</span>
+              <span v-if="entry.kind === 'commit'">
+                · +{{ entry.additions }} −{{ entry.deletions }}
+                <span v-if="entry.filesChanged > 0">
+                  · {{ entry.filesChanged }} file<span v-if="entry.filesChanged !== 1">s</span>
+                </span>
+              </span>
               <span v-else> · {{ entry.sourceBranch }} → {{ entry.destinationBranch }}</span>
             </p>
           </div>

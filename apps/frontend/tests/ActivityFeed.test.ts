@@ -30,6 +30,7 @@ const commit: ActivityEntry = {
   message: 'feat: add thing\nmore details',
   additions: 12,
   deletions: 3,
+  filesChanged: 4,
   isMerge: false,
   repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
   author: { userId: 1, displayName: 'Alice', bitbucketUuid: '{u1}' },

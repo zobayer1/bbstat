@@ -89,7 +89,7 @@ describe('syncRepositoryDiffStats', () => {
       budgetThreshold: 10,
     });
 
-    expect(result).toEqual({ updated: 0, failed: 0, hitBudgetGate: false, diffStatsRange: null });
+    expect(result).toEqual({ updated: 0, failed: 0, deferred: 0, hitBudgetGate: false, diffStatsRange: null });
     expect(state.updates).toHaveLength(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });

@@ -277,6 +277,15 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
     async listTrackedRepositories() {
       return Array.from(state.repositories.values()).filter((r) => !r.archived);
     },
+    async findNextDiffStatsCandidate() {
+      // Simplified proxy — see discovery.test.ts for rationale. Real
+      // impl orders by latest commit activity.
+      const sorted = Array.from(state.repositories.values())
+        .filter((r) => !r.archived && !r.diffStatsEnabled)
+        .sort((a, b) => a.id - b.id);
+      const first = sorted[0];
+      return first ? { id: first.id, fullName: first.fullName } : null;
+    },
     async listRepositoriesForSync() {
       // Admin tests don't seed activity history; default backoffOptions
       // is unset in makeSyncDeps (legacy behavior — every repo is due).

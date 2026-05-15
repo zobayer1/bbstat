@@ -111,6 +111,18 @@ export interface DiscoveryStore {
   // aggregates over the commit/PR tables — cheap at curated-set scale.
   // Archived repos are filtered out, same as listTrackedRepositories.
   listRepositoriesForSync(): Promise<RepositoryForSyncRow[]>;
+
+  // Pick the next candidate for self-paced diff-stats opt-in:
+  // most-recently-active non-archived repo (MAX(commits.authored_at)
+  // DESC NULLS LAST, tie-break on id ASC) that currently has
+  // `diff_stats_enabled = false`. Returns null when every repo is
+  // already opted in (or archived). Used by runCommitsSync after a
+  // fully-drained diff-stats backfill tick to automatically expand the
+  // opted-in set one repo per tick — rollout is self-throttled by the
+  // natural drain time of the prior batch, and prioritises hot repos
+  // (recently-active) so the dashboard sees fresh diff-stat data for
+  // current work before it backfills dormant repos.
+  findNextDiffStatsCandidate(): Promise<{ id: number; fullName: string } | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +215,26 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         await tx.insert(syncState).values({ repositoryId: row.id }).onConflictDoNothing();
         return { row, inserted: false };
       });
+    },
+
+    async findNextDiffStatsCandidate() {
+      // Raw SQL: ORM helpers don't compose well with the
+      // MAX(authored_at) DESC NULLS LAST ordering across a derived
+      // subquery. Single round-trip, LIMIT 1 — cheap even at
+      // ten-thousand-repo scale.
+      const rows = await db.execute<{ id: number; full_name: string }>(sql`
+        SELECT r.id, r.full_name
+        FROM repositories r
+        LEFT JOIN (
+          SELECT repository_id, MAX(authored_at) AS authored_at
+          FROM commits GROUP BY repository_id
+        ) latest ON latest.repository_id = r.id
+        WHERE r.diff_stats_enabled = false AND r.archived = false
+        ORDER BY latest.authored_at DESC NULLS LAST, r.id ASC
+        LIMIT 1
+      `);
+      const row = rows.rows[0];
+      return row === undefined ? null : { id: row.id, fullName: row.full_name };
     },
 
     async updateRepositoryDiffStatsEnabled(repositoryId, enabled) {

@@ -44,6 +44,11 @@ export interface DiffStatsSyncResult {
   updated: number;
   // Commits whose fetch failed and remain pending (diff_stats_synced_at IS NULL).
   failed: number;
+  // Commits that were pulled from the pickup query this tick but not
+  // processed before the walker bailed (budget gate hit mid-batch).
+  // = pending.length - updated - failed. Surfaced for log clarity:
+  // "this repo had work pending but couldn't drain it this tick."
+  deferred: number;
   // True iff the budget gate fired and we stopped before draining the pickup.
   hitBudgetGate: boolean;
   // UTC day range covering every commit whose diff stats just landed. Consumed
@@ -61,6 +66,7 @@ export interface DiffStatsSyncDeps {
 const EMPTY: DiffStatsSyncResult = {
   updated: 0,
   failed: 0,
+  deferred: 0,
   hitBudgetGate: false,
   diffStatsRange: null,
 };
@@ -148,16 +154,18 @@ async function walkAndPersist(
   }
 
   const diffStatsRange = sinceDay !== null && untilDay !== null ? { sinceDay, untilDay } : null;
+  const deferred = commits.length - updated - failed;
   deps.logger?.info?.(
     {
       repositoryId: repo.repositoryId,
       fullName: repo.fullName,
       updated,
       failed,
+      deferred,
       hitBudgetGate,
       diffStatsRange,
     },
     'diff-stats sync complete',
   );
-  return { updated, failed, hitBudgetGate, diffStatsRange };
+  return { updated, failed, deferred, hitBudgetGate, diffStatsRange };
 }

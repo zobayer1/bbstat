@@ -584,7 +584,28 @@ on the very next tick.
 Once a repo is fully drained (`deepen_complete = true` AND no rows with
 `diff_stats_synced_at IS NULL`), the backfill tick's cost per cron is
 **1 DB query, 0 BB calls** — `listPendingDiffStatCommits()` returns `[]`
-and the walker early-exits.
+and the walker early-exits. Drained repos are also suppressed from the
+tick result's `attempted[]` array (zero-update entries add noise without
+signal); the `attemptedCount` field preserves the "did we even walk
+this repo?" count.
+
+**Self-paced rollout.** When the backfill tick finishes with zero work
+across every opted-in repo (`totalUpdated + totalFailed + totalDeferred
+=== 0`), `runCommitsSync` flips `diff_stats_enabled = true` on the next
+non-opted-in non-archived repo. Selection is ordered by
+`MAX(commits.authored_at) DESC NULLS LAST` (tie-broken on `id ASC`):
+hot repos are promoted first so the dashboard sees fresh diff-stat
+coverage for current work before it backfills dormant ones. One repo
+per cron tick max. The natural drain time of the newly-opted-in repo's
+backlog paces the rollout: a busy repo with 5,000 pending commits
+blocks the next auto-opt for ~100 ticks (drain at the 50-per-tick cap);
+an empty / already-drained repo lets the rollout proceed to the next
+candidate on the very next tick. Eventually the whole tracked set is
+opted in, with no manual operator action and no risk of running over
+the hourly budget. Visible in logs as `diff-stats auto-opt-in` and on
+`CommitsSyncResult.diffStatsAutoOptIn`. To pause the rollout, manually
+flip a repo's flag back via SQL — the next tick's "all drained" check
+will keep moving forward unless every candidate has been processed.
 
 `is_merge` is captured at commit-insert time from BB's `parents.length >
 1`. The flag is independent of diff-stat fetch state: a merge commit

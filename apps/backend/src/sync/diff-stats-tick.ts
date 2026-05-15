@@ -68,7 +68,16 @@ export interface RepoDiffStatsBackfillResult extends DiffStatsSyncResult {
 }
 
 export interface DiffStatsBackfillTickResult {
+  // Per-repo results for **only** repos that had non-trivial activity
+  // this tick (updated + failed + deferred > 0). Fully-drained repos
+  // are deliberately omitted from this array to keep the log line
+  // signal-to-noise high; see `attemptedCount` for the total.
   attempted: RepoDiffStatsBackfillResult[];
+  // Total opted-in repos the orchestrator walked this tick, including
+  // those that had zero pending work (so were not included in
+  // `attempted[]`). Useful for "did we even consider this repo?" vs.
+  // "what work did it produce?" questions.
+  attemptedCount: number;
   deferred: RepositoryHandle[];
   errors: Array<{ repository: RepositoryHandle; error: string }>;
   // True iff something stopped the tick before draining `repos`. See
@@ -80,9 +89,12 @@ export interface DiffStatsBackfillTickResult {
   // and a BB call still 429'd; remaining repos roll over to next tick.
   stopReason: 'budget' | 'rate-limited' | null;
   budgetRemainingAtEnd: number;
-  // Totals across all attempted repos, for terse log lines.
+  // Totals across all attempted repos, for terse log lines. Fully-drained
+  // means totalUpdated + totalFailed + totalDeferred === 0 — the signal
+  // the auto-opt-in step looks for in runCommitsSync.
   totalUpdated: number;
   totalFailed: number;
+  totalDeferred: number;
 }
 
 const DEFAULTS = {
@@ -103,6 +115,7 @@ export async function runDiffStatsBackfillTick(
   // inside `syncRepositoryDiffStats` once the queue is large.
   const queue: RepositoryHandle[] = repos.filter((r) => r.diffStatsEnabled);
   const attempted: RepoDiffStatsBackfillResult[] = [];
+  let attemptedCount = 0;
   const errors: DiffStatsBackfillTickResult['errors'] = [];
   let stoppedEarly = false;
   let stopReason: 'budget' | 'rate-limited' | null = null;
@@ -129,7 +142,14 @@ export async function runDiffStatsBackfillTick(
       if (repo === undefined) return;
       try {
         const result = await syncOne(perRepoDeps, repo, opts);
-        attempted.push({ ...result, repositoryId: repo.repositoryId, fullName: repo.fullName });
+        attemptedCount++;
+        // Suppress fully-drained repos from the per-repo result array
+        // — they're 100% of the steady-state log and contribute no
+        // useful signal. `attemptedCount` preserves the "did we walk
+        // every opted-in repo?" answer separately.
+        if (result.updated > 0 || result.failed > 0 || result.deferred > 0) {
+          attempted.push({ ...result, repositoryId: repo.repositoryId, fullName: repo.fullName });
+        }
 
         // Rollup + cache invalidation when this repo's walk produced new
         // diff stats. Errors here are dashboard-freshness blips, not
@@ -163,9 +183,11 @@ export async function runDiffStatsBackfillTick(
 
   const totalUpdated = attempted.reduce((acc, r) => acc + r.updated, 0);
   const totalFailed = attempted.reduce((acc, r) => acc + r.failed, 0);
+  const totalDeferred = attempted.reduce((acc, r) => acc + r.deferred, 0);
 
   return {
     attempted,
+    attemptedCount,
     deferred: queue,
     errors,
     stoppedEarly,
@@ -173,6 +195,7 @@ export async function runDiffStatsBackfillTick(
     budgetRemainingAtEnd: deps.client.getBudgetRemaining(),
     totalUpdated,
     totalFailed,
+    totalDeferred,
   };
 }
 

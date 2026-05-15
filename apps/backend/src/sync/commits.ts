@@ -145,6 +145,7 @@ export async function syncRepositoryCommits(
     let diffStatsResult: DiffStatsSyncResult = {
       updated: 0,
       failed: 0,
+      deferred: 0,
       hitBudgetGate: false,
       diffStatsRange: null,
     };
