@@ -9,9 +9,12 @@
 //
 //   2. Backfill (backward path) — invoked by `runDiffStatsBackfillTick`
 //      after the deepen tick, lower priority than commit-list ingest.
-//      `syncRepositoryDiffStats` pulls pending commits from the DB
-//      (`commits.diff_stats_synced_at IS NULL`, newest-authored first)
-//      and feeds them to the same inner walker.
+//      That orchestrator does a single global newest-first pickup
+//      across every non-archived non-excluded repo
+//      (`commits.diff_stats_synced_at IS NULL`, ORDER BY
+//      `commits.authored_at DESC`) and walks the resulting queue
+//      directly — the per-repo `syncRepositoryDiffStats` wrapper that
+//      used to live here was removed in 2026-05.
 //
 // Resumability lives on `diff_stats_synced_at`: a successful fetch +
 // UPDATE stamps now(), so the next pickup query skips it. A transient
@@ -20,8 +23,9 @@
 // tick until investigated, but won't block others since the loop
 // continues past per-commit errors.
 //
-// Pure short-circuit when `repo.diffStatsEnabled === false` — no DB
-// read, no BB call. Cheap to call unconditionally.
+// Per-repo opt-in was removed in 2026-05; every non-archived
+// non-excluded repo participates by default. The walker's only gate
+// is now the empty-commits short-circuit in `fetchDiffStatsForCommits`.
 
 import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
@@ -30,10 +34,6 @@ import type { CommitStore, PendingDiffStatCommit } from './commit-store.js';
 import type { RepositoryHandle } from './commits.js';
 
 export interface DiffStatsSyncOptions {
-  // Max commits in flight per repo per tick. Caps both BB-call volume and
-  // worst-case per-tick work so a backlog of pending commits drains over
-  // multiple ticks rather than blowing the budget in one.
-  maxPerRepoPerTick: number;
   // Headroom below BITBUCKET_HOURLY_CALL_BUDGET. The loop stops scheduling
   // new commits once getBudgetRemaining() falls below this; remaining
   // pending commits are picked up on the next tick.
@@ -74,33 +74,18 @@ const EMPTY: DiffStatsSyncResult = {
 
 // Inline-eager forward path. Fetches diff stats for an explicit list of
 // commits (typically the ones just inserted by `syncRepositoryCommits`)
-// — no DB pickup, no `maxPerRepoPerTick` cap (caller decides how many
-// rows to pass in). Budget gate still applies so a fat batch can't blow
-// the hourly cap.
+// — no DB pickup, no per-tick cap (caller decides how many rows to
+// pass in). Budget gate still applies so a fat batch can't blow the
+// hourly cap. Backfill path lives in diff-stats-tick.ts which uses a
+// global newest-first pickup across the whole opted-in pool.
 export async function fetchDiffStatsForCommits(
   deps: DiffStatsSyncDeps,
   repo: RepositoryHandle,
   commits: PendingDiffStatCommit[],
   opts: { budgetThreshold: number },
 ): Promise<DiffStatsSyncResult> {
-  if (!repo.diffStatsEnabled || commits.length === 0) return EMPTY;
+  if (commits.length === 0) return EMPTY;
   return walkAndPersist(deps, repo, commits, opts.budgetThreshold);
-}
-
-// Backfill / backward path. Pulls up to `maxPerRepoPerTick` pending
-// commits (`diff_stats_synced_at IS NULL`) newest-first from the store
-// and feeds them to the same walker. Used by `runDiffStatsBackfillTick`.
-export async function syncRepositoryDiffStats(
-  deps: DiffStatsSyncDeps,
-  repo: RepositoryHandle,
-  opts: DiffStatsSyncOptions,
-): Promise<DiffStatsSyncResult> {
-  if (!repo.diffStatsEnabled) return EMPTY;
-
-  const pending = await deps.store.listPendingDiffStatCommits(repo.repositoryId, opts.maxPerRepoPerTick);
-  if (pending.length === 0) return EMPTY;
-
-  return walkAndPersist(deps, repo, pending, opts.budgetThreshold);
 }
 
 async function walkAndPersist(

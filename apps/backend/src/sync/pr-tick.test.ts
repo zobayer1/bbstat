@@ -15,7 +15,6 @@ function makeRepo(id: number): RepositoryHandle {
     workspace: 'tigerit',
     slug: `repo-${id}`,
     fullName: `tigerit/repo-${id}`,
-    diffStatsEnabled: false,
     diffStatsExcludePatterns: [],
   };
 }

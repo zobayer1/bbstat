@@ -49,7 +49,6 @@ export interface TickCommitsCompletePayload {
   isMergeBackfillStoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete' | null;
   diffStatsBackfillStopReason: 'budget' | 'rate-limited' | null;
   diffStatsBackfillTotalUpdated: number;
-  diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null;
 }
 
 export interface TickPrsCompletePayload {

@@ -19,7 +19,6 @@ function makeRepo(): RepositoryHandle {
     workspace: 'tigerit',
     slug: 'r',
     fullName: 'tigerit/r',
-    diffStatsEnabled: false,
     diffStatsExcludePatterns: [],
   };
 }

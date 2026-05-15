@@ -80,7 +80,6 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         workspace: row.workspace,
         slug: row.slug,
         fullName: row.fullName,
-        diffStatsEnabled: row.diffStatsEnabled,
         diffStatsExcludePatterns: row.diffStatsExcludePatterns,
       };
       return await syncRepositoryCommits(
@@ -110,7 +109,6 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         workspace: row.workspace,
         slug: row.slug,
         fullName: row.fullName,
-        diffStatsEnabled: row.diffStatsEnabled,
         diffStatsExcludePatterns: row.diffStatsExcludePatterns,
       };
       // The tick options carry concurrency/budget knobs that don't apply to

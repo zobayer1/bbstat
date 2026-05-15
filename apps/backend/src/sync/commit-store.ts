@@ -10,7 +10,7 @@
 
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
-import { commitDaily, commits, syncState, users } from '../db/schema.js';
+import { commitDaily, commits, repositories, syncState, users } from '../db/schema.js';
 
 export type SyncStatus = 'idle' | 'running' | 'success' | 'failed';
 
@@ -65,6 +65,19 @@ export interface PendingDiffStatCommit {
   authoredAt: Date;
 }
 
+// Same shape as PendingDiffStatCommit plus the repo identity needed
+// for the BB call. Returned by the global newest-first pickup the
+// diff-stats backfill tick consumes; the per-repo pickup
+// (`listPendingDiffStatCommits`) is used only by the inline-eager
+// path inside commit-sync where the repo is already known.
+export interface PendingDiffStatCommitWithRepo extends PendingDiffStatCommit {
+  repositoryId: number;
+  workspace: string;
+  slug: string;
+  fullName: string;
+  excludePatterns: string[];
+}
+
 export interface CommitStore {
   // Resolve a batch of BitBucket user UUIDs to local users.id values. Missing
   // UUIDs (anonymous commits, users not yet synced) are absent from the
@@ -80,13 +93,23 @@ export interface CommitStore {
   markSyncSuccess(repositoryId: number, update: SyncSuccessUpdate): Promise<void>;
   markSyncFailed(repositoryId: number, error: string): Promise<void>;
 
-  // Phase 4 T21: pickup query for the diff-stats worker. Returns commits in
-  // this repo whose `diff_stats_synced_at IS NULL`, ordered newest-authored
-  // first (so the most recently-landed commits get their diffs prioritized)
-  // and capped at `limit`. Backed by the partial index
-  // commits_pending_diff_stats_idx so the read is cheap regardless of
-  // total commit volume.
+  // Per-repo pickup. Returns commits in this repo whose
+  // `diff_stats_synced_at IS NULL`, ordered newest-authored first,
+  // capped at `limit`. Used only by the inline-eager forward path
+  // inside commit-sync — the global backfill tick uses
+  // `listPendingDiffStatCommitsGlobal` instead.
   listPendingDiffStatCommits(repositoryId: number, limit: number): Promise<PendingDiffStatCommit[]>;
+
+  // Global newest-first pickup across every non-archived non-excluded
+  // repo. Returns the `limit` newest-authored commits whose
+  // `diff_stats_synced_at IS NULL`, with each row carrying repo
+  // identity (workspace, slug, exclude patterns) so the diff-stat
+  // walker can fan out BB calls without further lookups. Powers the
+  // "freshness-first round-robin" backfill: a repo with 5000 pending
+  // commits no longer monopolizes a tick — its 50 most recent
+  // commits land in the global pool alongside every other repo's
+  // recent commits.
+  listPendingDiffStatCommitsGlobal(limit: number): Promise<PendingDiffStatCommitWithRepo[]>;
 
   // Phase 4 T21: persist BB-derived additions / deletions / files_changed
   // for one commit and stamp diff_stats_synced_at = now() so it's filtered
@@ -289,6 +312,41 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .select({ id: commits.id, sha: commits.sha, authoredAt: commits.authoredAt })
         .from(commits)
         .where(and(eq(commits.repositoryId, repositoryId), isNull(commits.diffStatsSyncedAt)))
+        .orderBy(desc(commits.authoredAt))
+        .limit(limit);
+      return rows;
+    },
+
+    async listPendingDiffStatCommitsGlobal(limit) {
+      // JOIN to repositories filters out archived + sync_excluded
+      // repos in one round-trip and includes the per-repo identity
+      // the diff-stat walker needs. ORDER BY authored_at DESC across
+      // the whole pool gives the "freshness first" semantics: a
+      // repo's recent commits all jump ahead of any repo's old
+      // commits, regardless of which repo is "next" by some other
+      // ordering. Backed by commits_pending_diff_stats_idx (partial
+      // index on diff_stats_synced_at IS NULL) so the scan stays
+      // sub-millisecond even at hundreds of thousands of commits.
+      const rows = await db
+        .select({
+          id: commits.id,
+          sha: commits.sha,
+          authoredAt: commits.authoredAt,
+          repositoryId: repositories.id,
+          workspace: repositories.workspace,
+          slug: repositories.slug,
+          fullName: repositories.fullName,
+          excludePatterns: repositories.diffStatsExcludePatterns,
+        })
+        .from(commits)
+        .innerJoin(repositories, eq(repositories.id, commits.repositoryId))
+        .where(
+          and(
+            isNull(commits.diffStatsSyncedAt),
+            eq(repositories.archived, false),
+            eq(repositories.syncExcluded, false),
+          ),
+        )
         .orderBy(desc(commits.authoredAt))
         .limit(limit);
       return rows;

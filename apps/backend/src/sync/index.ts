@@ -122,15 +122,20 @@ async function main(): Promise<void> {
     void runCommitsSync(deps, 'cron').catch((err) => logger.error(err, 'commits cron failed'));
   });
 
-  cron.schedule(config.SYNC_PRS_CRON, () => {
-    void runPullRequestsSync(deps, 'cron').catch((err) => logger.error(err, 'PRs cron failed'));
-  });
+  if (config.SYNC_PRS_ENABLED) {
+    cron.schedule(config.SYNC_PRS_CRON, () => {
+      void runPullRequestsSync(deps, 'cron').catch((err) => logger.error(err, 'PRs cron failed'));
+    });
+  } else {
+    logger.info('PR sync cron disabled (SYNC_PRS_ENABLED=false); admin manual trigger still available');
+  }
 
   logger.info(
     {
       membersCron: config.SYNC_MEMBERS_CRON,
       reposCron: config.SYNC_REPOS_CRON,
       commitsCron: config.SYNC_COMMITS_CRON,
+      prsEnabled: config.SYNC_PRS_ENABLED,
       prsCron: config.SYNC_PRS_CRON,
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
       minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,

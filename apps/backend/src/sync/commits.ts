@@ -30,16 +30,10 @@ export interface RepositoryHandle {
   workspace: string;
   slug: string;
   fullName: string;
-  // Phase 4 T21: when true, the per-repo sync also fetches /diffstat/:sha
-  // for newly-inserted commits and any leftover pending ones (those with
-  // commits.diff_stats_synced_at IS NULL). When false, the diff-stats step
-  // is skipped entirely — no extra BB calls, no extra DB work.
-  diffStatsEnabled: boolean;
   // Per-repo blacklist of file-path globs (picomatch syntax) that the
   // diff-stat aggregator skips. Sourced from
   // `repositories.diff_stats_exclude_patterns`. Empty array = no
-  // filtering. Used only when `diffStatsEnabled === true`; ignored
-  // otherwise.
+  // filtering.
   diffStatsExcludePatterns: string[];
 }
 
@@ -80,9 +74,9 @@ export interface RepoCommitSyncResult {
   // some may have lost the ON CONFLICT race). Consumed by the rollup hook
   // in dashboard/rollup-hook.ts to scope the commit_daily recompute.
   insertedRange: { sinceDay: string; untilDay: string } | null;
-  // Phase 4 T21: per-commit diff-stat ingest results. All zero / null when
-  // the repo's diffStatsEnabled flag is off or when opts.diffStats wasn't
-  // supplied. The rollup hook ORs `diffStatsRange` with `insertedRange` so
+  // Per-commit diff-stat ingest results from the inline-eager forward
+  // path. All zero / null when opts.diffStats wasn't supplied. The
+  // rollup hook ORs `diffStatsRange` with `insertedRange` so
   // commit_daily refreshes for diff-stat-only updates too.
   diffStatsUpdated: number;
   diffStatsFailed: number;
@@ -222,7 +216,7 @@ export async function syncRepositoryCommits(
       hitBudgetGate: false,
       diffStatsRange: null,
     };
-    if (repo.diffStatsEnabled && opts.diffStats && insertedRows.length > 0) {
+    if (opts.diffStats && insertedRows.length > 0) {
       const justInserted: PendingDiffStatCommit[] = insertedRows.map((r) => ({
         id: r.id,
         sha: r.sha,

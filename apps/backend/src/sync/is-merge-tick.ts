@@ -215,8 +215,9 @@ export interface IsMergeBackfillTickResult {
   // Per-repo results in the order processed.
   repos: IsMergeBackfillRepoResult[];
   // 'queue-empty' = every non-archived non-excluded repo has the flag
-  // set — the gate the diff-stats auto-opt-in waits on. Other values
-  // mean there's still incomplete work.
+  // set; the per-day aggregates can now safely exclude merges across
+  // the entire tracked set. Other values mean there's still incomplete
+  // work.
   stoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete';
   budgetRemainingAtEnd: number;
   totalUpdated: number;

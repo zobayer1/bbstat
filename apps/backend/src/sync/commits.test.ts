@@ -114,6 +114,11 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     async listPendingDiffStatCommits(_repositoryId, limit) {
       return Array.from(state.pendingDiffStatCommits.values()).slice(0, limit);
     },
+    async listPendingDiffStatCommitsGlobal() {
+      // Inline-eager path doesn't drive global pickup — tests in this
+      // file never exercise it.
+      return [];
+    },
     async updateCommitDiffStats(commitId, input) {
       state.diffStatsUpdates.push({ commitId, ...input });
       state.pendingDiffStatCommits.delete(commitId);
@@ -156,7 +161,6 @@ function makeRepo(repositoryId: number, slug = 'boing-server'): RepositoryHandle
     workspace: 'tigerit',
     slug,
     fullName: `tigerit/${slug}`,
-    diffStatsEnabled: false,
     diffStatsExcludePatterns: [],
   };
 }
@@ -475,7 +479,7 @@ describe('syncRepositoryCommits — inline-eager diff-stats', () => {
   });
 
   function repoWithDiffStats(): RepositoryHandle {
-    return { ...makeRepo(1), diffStatsEnabled: true };
+    return makeRepo(1);
   }
 
   it('fetches /diffstat for commits just inserted in this run', async () => {
@@ -526,27 +530,7 @@ describe('syncRepositoryCommits — inline-eager diff-stats', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('skips the diff-stats step on opt-out repos even when opts.diffStats is supplied', async () => {
-    fetchMock.mockImplementationOnce(() =>
-      Promise.resolve(commitsPage([makeCommit('sha-new', { date: '2026-05-04T12:00:00+00:00' })])),
-    );
-    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1, 'sha-cursor')] });
-    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
-
-    const result = await syncRepositoryCommits(
-      deps,
-      makeRepo(1), // diffStatsEnabled defaults to false
-      { diffStats: { budgetThreshold: 10 } },
-    );
-
-    expect(result.diffStatsUpdated).toBe(0);
-    expect(result.diffStatsRange).toBeNull();
-    expect(state.diffStatsUpdates).toHaveLength(0);
-    // Only the commits-list call was made; no /diffstat fetched.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips the diff-stats step when opts.diffStats is omitted, even on opt-in repos', async () => {
+  it('skips the diff-stats step when opts.diffStats is omitted (runner gate off)', async () => {
     fetchMock.mockImplementationOnce(() =>
       Promise.resolve(commitsPage([makeCommit('sha-new', { date: '2026-05-04T12:00:00+00:00' })])),
     );

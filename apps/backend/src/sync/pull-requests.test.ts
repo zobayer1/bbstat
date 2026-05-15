@@ -83,7 +83,6 @@ function makeRepo(repositoryId: number, slug = 'boing-server'): RepositoryHandle
     workspace: 'tigerit',
     slug,
     fullName: `tigerit/${slug}`,
-    diffStatsEnabled: false,
     diffStatsExcludePatterns: [],
   };
 }

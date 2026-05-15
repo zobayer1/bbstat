@@ -30,7 +30,6 @@ export interface RepositoryRow {
   project: string | null;
   slug: string;
   fullName: string;
-  diffStatsEnabled: boolean;
   archived: boolean;
   // True when an auto-trip detected a permanently-broken state and
   // pulled the repo out of sync. See schema.ts for the allowed
@@ -68,11 +67,6 @@ export interface RepositoryInsertInput {
   project: string | null;
   slug: string;
   fullName: string;
-  // Phase 4 T21: opt-in per-repo for /diffstat/:sha ingest. Defaults to
-  // false in `tracked-repos.yaml` (plain-string entries) — only the object
-  // form `{ name: ws/slug, diffStats: true }` flips it on. Seed-only: once
-  // the row exists, subsequent discovery syncs don't reconcile from YAML.
-  diffStatsEnabled: boolean;
   // Phase 4 follow-up: soft-retire flag. Defaults to false. Seed-only at
   // insert time (`{ name, archived: true }` lets an operator pre-archive a
   // newly-seeded repo). Flipped at runtime via the admin archive /
@@ -101,11 +95,6 @@ export interface DiscoveryStore {
   // conflicts: if the bitbucket_uuid already exists, the existing row is
   // returned with `inserted: false` (caller treats as already-tracked).
   insertRepositoryWithSyncState(input: RepositoryInsertInput): Promise<InsertRepositoryResult>;
-  // Update the diff-stats opt-in for an existing tracked repo. Used by
-  // admin / scripts / manual SQL; NOT called during YAML reconciliation
-  // (YAML is seed-only — see schema.ts comments on `repositories`).
-  updateRepositoryDiffStatsEnabled(repositoryId: number, enabled: boolean): Promise<void>;
-
   // Replace (not merge) the diff-stat exclude-pattern list for a repo.
   // Called by the admin PUT endpoint after validation. Cheap UPDATE —
   // does NOT trigger a recount; the operator runs POST
@@ -152,18 +141,6 @@ export interface DiscoveryStore {
   // aggregates over the commit/PR tables — cheap at curated-set scale.
   // Archived repos are filtered out, same as listTrackedRepositories.
   listRepositoriesForSync(): Promise<RepositoryForSyncRow[]>;
-
-  // Pick the next candidate for self-paced diff-stats opt-in:
-  // most-recently-active non-archived repo (MAX(commits.authored_at)
-  // DESC NULLS LAST, tie-break on id ASC) that currently has
-  // `diff_stats_enabled = false`. Returns null when every repo is
-  // already opted in (or archived). Used by runCommitsSync after a
-  // fully-drained diff-stats backfill tick to automatically expand the
-  // opted-in set one repo per tick — rollout is self-throttled by the
-  // natural drain time of the prior batch, and prioritises hot repos
-  // (recently-active) so the dashboard sees fresh diff-stat data for
-  // current work before it backfills dormant repos.
-  findNextDiffStatsCandidate(): Promise<{ id: number; fullName: string } | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +179,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           project: repositories.project,
           slug: repositories.slug,
           fullName: repositories.fullName,
-          diffStatsEnabled: repositories.diffStatsEnabled,
           archived: repositories.archived,
           syncExcluded: repositories.syncExcluded,
           syncExcludeReason: repositories.syncExcludeReason,
@@ -227,7 +203,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             project: repositories.project,
             slug: repositories.slug,
             fullName: repositories.fullName,
-            diffStatsEnabled: repositories.diffStatsEnabled,
             archived: repositories.archived,
             syncExcluded: repositories.syncExcluded,
             syncExcludeReason: repositories.syncExcludeReason,
@@ -252,7 +227,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
             project: repositories.project,
             slug: repositories.slug,
             fullName: repositories.fullName,
-            diffStatsEnabled: repositories.diffStatsEnabled,
             archived: repositories.archived,
             syncExcluded: repositories.syncExcluded,
             syncExcludeReason: repositories.syncExcludeReason,
@@ -265,32 +239,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         await tx.insert(syncState).values({ repositoryId: row.id }).onConflictDoNothing();
         return { row, inserted: false };
       });
-    },
-
-    async findNextDiffStatsCandidate() {
-      // Raw SQL: ORM helpers don't compose well with the
-      // MAX(authored_at) DESC NULLS LAST ordering across a derived
-      // subquery. Single round-trip, LIMIT 1 — cheap even at
-      // ten-thousand-repo scale.
-      const rows = await db.execute<{ id: number; full_name: string }>(sql`
-        SELECT r.id, r.full_name
-        FROM repositories r
-        LEFT JOIN (
-          SELECT repository_id, MAX(authored_at) AS authored_at
-          FROM commits GROUP BY repository_id
-        ) latest ON latest.repository_id = r.id
-        WHERE r.diff_stats_enabled = false
-          AND r.archived = false
-          AND r.sync_excluded = false
-        ORDER BY latest.authored_at DESC NULLS LAST, r.id ASC
-        LIMIT 1
-      `);
-      const row = rows.rows[0];
-      return row === undefined ? null : { id: row.id, fullName: row.full_name };
-    },
-
-    async updateRepositoryDiffStatsEnabled(repositoryId, enabled) {
-      await db.update(repositories).set({ diffStatsEnabled: enabled }).where(eq(repositories.id, repositoryId));
     },
 
     async updateRepositoryExcludePatterns(repositoryId, patterns) {
@@ -342,7 +290,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         project: string | null;
         slug: string;
         full_name: string;
-        diff_stats_enabled: boolean;
         archived: boolean;
         sync_excluded: boolean;
         sync_exclude_reason: string | null;
@@ -360,7 +307,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           r.project,
           r.slug,
           r.full_name,
-          r.diff_stats_enabled,
           r.archived,
           r.sync_excluded,
           r.sync_exclude_reason,
@@ -393,7 +339,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
         project: r.project,
         slug: r.slug,
         fullName: r.full_name,
-        diffStatsEnabled: r.diff_stats_enabled,
         archived: r.archived,
         syncExcluded: r.sync_excluded,
         syncExcludeReason: r.sync_exclude_reason,
@@ -430,7 +375,6 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
           project: repositories.project,
           slug: repositories.slug,
           fullName: repositories.fullName,
-          diffStatsEnabled: repositories.diffStatsEnabled,
           archived: repositories.archived,
           syncExcluded: repositories.syncExcluded,
           syncExcludeReason: repositories.syncExcludeReason,

@@ -33,9 +33,9 @@ const testConfig: AppConfig = {
   COMMIT_SYNC_CONCURRENCY: 3,
   COMMIT_SYNC_BUDGET_THRESHOLD: 20,
   DIFF_STATS_BUDGET_THRESHOLD: 10,
-  DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK: 50,
+  DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK: 50,
   DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: 20,
-  DIFF_STATS_BACKFILL_CONCURRENCY: 1,
+  SYNC_PRS_ENABLED: false,
   SYNC_PRS_CRON: '*/30 * * * *',
   PR_BACKFILL_MAX_PAGES: 5,
   PR_SYNC_CONCURRENCY: 3,
@@ -64,6 +64,7 @@ function noopCommitStore(): CommitStore {
     markSyncSuccess: fail,
     markSyncFailed: fail,
     listPendingDiffStatCommits: fail,
+    listPendingDiffStatCommitsGlobal: fail,
     updateCommitDiffStats: fail,
     getOldestCommitSha: fail,
     pickRepoForDeepening: fail,
@@ -211,9 +212,12 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
       }
     },
     async listPendingDiffStatCommits() {
-      // Tests in this file don't opt into diff_stats_enabled, so the worker
-      // never reaches the store. Return [] as a safe default for any future
-      // test that does opt in without seeding pending rows.
+      // Inline-eager path — tests in this file never insert commits with
+      // pending diff stats. Safe default for any future test that does.
+      return [];
+    },
+    async listPendingDiffStatCommitsGlobal() {
+      // Global newest-first pickup — not exercised by admin tests.
       return [];
     },
     async updateCommitDiffStats() {
@@ -290,14 +294,6 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       state.syncStateRepoIds.add(id);
       return { row, inserted: true };
     },
-    async updateRepositoryDiffStatsEnabled(repositoryId, enabled) {
-      for (const row of state.repositories.values()) {
-        if (row.id === repositoryId) {
-          row.diffStatsEnabled = enabled;
-          return;
-        }
-      }
-    },
     async updateRepositoryArchived(repositoryId, archived) {
       for (const row of state.repositories.values()) {
         if (row.id === repositoryId) {
@@ -351,15 +347,6 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
           return;
         }
       }
-    },
-    async findNextDiffStatsCandidate() {
-      // Simplified proxy — see discovery.test.ts for rationale. Real
-      // impl orders by latest commit activity.
-      const sorted = Array.from(state.repositories.values())
-        .filter((r) => !r.archived && !r.diffStatsEnabled)
-        .sort((a, b) => a.id - b.id);
-      const first = sorted[0];
-      return first ? { id: first.id, fullName: first.fullName } : null;
     },
     async listRepositoriesForSync() {
       // Admin tests don't seed activity history; default backoffOptions
@@ -460,7 +447,7 @@ describe('admin routes', () => {
           }),
         );
       const { deps, state } = makeSyncDeps(fetchMock, {
-        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false }],
+        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server', archived: false }],
       });
       appInstance = await buildApp({
         config: testConfig,
@@ -526,7 +513,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({
@@ -602,7 +589,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -630,7 +617,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: true,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -667,7 +654,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: true,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -706,7 +693,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       await deps.store.updateRepositorySyncExcluded(row.id, true, 'history-rewritten');
@@ -736,7 +723,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -771,7 +758,7 @@ describe('admin routes', () => {
         project: 'OLD',
         slug: 'old-name',
         fullName: 'tigerit/old-name',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       await deps.store.updateRepositorySyncExcluded(row.id, true, 'repo-404');
@@ -813,7 +800,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'old-name',
         fullName: 'tigerit/old-name',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       fetchMock.mockResolvedValueOnce(
@@ -847,7 +834,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'old-name',
         fullName: 'tigerit/old-name',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404));
@@ -871,7 +858,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'old-name',
         fullName: 'tigerit/old-name',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -894,7 +881,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'r',
         fullName: 'tigerit/r',
-        diffStatsEnabled: true,
+
         archived: false,
       });
     }
@@ -1026,7 +1013,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'doomed',
         fullName: 'tigerit/doomed',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -1086,7 +1073,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       commitState.syncStateByRepo.set(repo.id, {
@@ -1159,7 +1146,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       commitState.syncStateByRepo.set(repo.id, {
@@ -1216,7 +1203,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'a',
         fullName: 'tigerit/a',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       const { row: r2 } = await deps.store.insertRepositoryWithSyncState({
@@ -1225,7 +1212,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'b',
         fullName: 'tigerit/b',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       for (const id of [r1.id, r2.id]) {
@@ -1324,7 +1311,7 @@ describe('admin routes', () => {
         project: 'BOING',
         slug: 'boing-server',
         fullName: 'tigerit/boing-server',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       // Seed an empty PR sync_state row so getPrSyncState returns a cold row.
@@ -1380,7 +1367,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'a',
         fullName: 'tigerit/a',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       const { row: repo2 } = await deps.store.insertRepositoryWithSyncState({
@@ -1389,7 +1376,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'b',
         fullName: 'tigerit/b',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       for (const id of [repo1.id, repo2.id]) {
@@ -1481,7 +1468,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'fresh',
         fullName: 'tigerit/fresh',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
@@ -1534,7 +1521,7 @@ describe('admin routes', () => {
         project: null,
         slug: 'r1',
         fullName: 'tigerit/r1',
-        diffStatsEnabled: false,
+
         archived: false,
       });
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });

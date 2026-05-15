@@ -26,7 +26,6 @@ describe('liveBus', () => {
       isMergeBackfillStoppedReason: 'queue-empty' as const,
       diffStatsBackfillStopReason: 'rate-limited' as const,
       diffStatsBackfillTotalUpdated: 0,
-      diffStatsAutoOptIn: null,
     };
     liveBus.emit('tick.commits.complete', payload);
 
@@ -102,7 +101,6 @@ describe('liveBus', () => {
       isMergeBackfillStoppedReason: null,
       diffStatsBackfillStopReason: null,
       diffStatsBackfillTotalUpdated: 0,
-      diffStatsAutoOptIn: null,
     });
     expect(fallback).toHaveBeenCalledOnce();
     expect(regular).toHaveBeenCalledOnce();

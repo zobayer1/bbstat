@@ -67,6 +67,7 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     markSyncSuccess: unreachable,
     markSyncFailed: unreachable,
     listPendingDiffStatCommits: unreachable as () => Promise<PendingDiffStatCommit[]>,
+    listPendingDiffStatCommitsGlobal: unreachable as () => Promise<never[]>,
     updateCommitDiffStats: unreachable as () => Promise<void>,
     async getOldestCommitSha(repositoryId) {
       return state.oldestShaByRepo.get(repositoryId) ?? null;

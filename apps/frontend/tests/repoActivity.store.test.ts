@@ -15,10 +15,9 @@ const sample: RepoActivity = {
     slug: 'r1',
     fullName: 'tigerit/r1',
     syncStatus: 'ok',
-    diffStatsEnabled: false,
   },
   dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
-  diffStats: null,
+  diffStats: { additions7d: 0, deletions7d: 0, additions30d: 0, deletions30d: 0 },
   contributors: [
     {
       userId: 1,

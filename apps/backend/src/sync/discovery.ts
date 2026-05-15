@@ -81,31 +81,31 @@ export async function syncWorkspaceMembers(deps: DiscoveryDeps, workspace: strin
 export interface RepoSeed {
   workspace: string;
   slug: string;
-  // Phase 4 T21: per-repo opt-in for /diffstat/:sha ingest. Plain-string
-  // entries default to false. The object form `{ name: ws/slug, diffStats:
-  // true }` seeds the column on insert. Seed-only: subsequent discovery
-  // syncs do NOT reconcile this flag from YAML — once a row exists, the
-  // DB is canonical. Operators flip it via SQL or future admin endpoint.
-  diffStatsEnabled: boolean;
-  // Phase 4 follow-up: soft-retire seed. Same seed-only semantics —
-  // `{ name, archived: true }` will pre-archive a repo on first insert,
-  // but flipping this on an existing repo via YAML is a no-op. Use the
-  // archive / unarchive admin endpoints for runtime control.
+  // Soft-retire seed. Same seed-only semantics — `{ name, archived: true }`
+  // will pre-archive a repo on first insert, but flipping this on an
+  // existing repo via YAML is a no-op. Use the archive / unarchive
+  // admin endpoints for runtime control.
   archived: boolean;
 }
 
 // One entry in the seed file's `repos:` list. Accepts either a plain
-// `<workspace>/<slug>` string (back-compat, all flags default false) or
-// an object `{ name: <workspace>/<slug>, diffStats?, archived? }`.
-// Anything else fails the schema check and surfaces as a malformed-file
-// error at parse time.
+// `<workspace>/<slug>` string (back-compat, archived defaults to false)
+// or an object `{ name: <workspace>/<slug>, archived? }`. Anything else
+// fails the schema check at parse time.
+//
+// A previous schema also carried a `diffStats: true|false` opt-in flag.
+// That column was dropped in 2026-05 (diff-stat ingest is now automatic
+// for every non-archived non-excluded repo via a global newest-first
+// pickup). YAML entries that still carry `diffStats:` are tolerated for
+// back-compat (z.passthrough below) but the value is ignored.
 const seedEntrySchema = z.union([
   z.string(),
-  z.object({
-    name: z.string(),
-    diffStats: z.boolean().optional().default(false),
-    archived: z.boolean().optional().default(false),
-  }),
+  z
+    .object({
+      name: z.string(),
+      archived: z.boolean().optional().default(false),
+    })
+    .passthrough(),
 ]);
 
 // Shape of the seed file: a top-level `repos:` list of either bare strings
@@ -126,8 +126,8 @@ export function parseSeedRepoFile(text: string): RepoSeed[] {
     throw new Error(`Seed repo file is malformed: ${issues}`);
   }
   return parsed.data.repos
-    .map((entry) => (typeof entry === 'string' ? { name: entry, diffStats: false, archived: false } : entry))
-    .map((entry) => ({ name: entry.name.trim(), diffStats: entry.diffStats, archived: entry.archived }))
+    .map((entry) => (typeof entry === 'string' ? { name: entry, archived: false } : entry))
+    .map((entry) => ({ name: entry.name.trim(), archived: entry.archived }))
     .filter((entry) => entry.name.length > 0)
     .map((entry) => {
       const parts = entry.name.split('/');
@@ -137,7 +137,6 @@ export function parseSeedRepoFile(text: string): RepoSeed[] {
       return {
         workspace: parts[0],
         slug: parts[1],
-        diffStatsEnabled: entry.diffStats,
         archived: entry.archived,
       };
     });
@@ -163,14 +162,9 @@ export interface AddTrackedRepoResult {
 }
 
 export interface AddTrackedRepoOptions {
-  // Phase 4 T21: per-repo opt-in for /diffstat/:sha ingest. Defaults to
-  // false. On insert, written to repositories.diff_stats_enabled. On
-  // already-tracked, this method does NOT update the stored flag —
-  // YAML and admin add are seed-only.
-  diffStatsEnabled?: boolean;
-  // Phase 4 follow-up: pre-archive on insert. Defaults to false. On
-  // already-tracked, this method does NOT update the stored flag — use
-  // the archive / unarchive admin endpoints instead.
+  // Pre-archive on insert. Defaults to false. On already-tracked, this
+  // method does NOT update the stored flag — use the archive /
+  // unarchive admin endpoints instead.
   archived?: boolean;
 }
 
@@ -191,7 +185,6 @@ export async function addTrackedRepository(
   opts: AddTrackedRepoOptions = {},
 ): Promise<AddTrackedRepoResult> {
   const inputFullName = `${workspace}/${slug}`;
-  const diffStatsEnabled = opts.diffStatsEnabled ?? false;
   const archived = opts.archived ?? false;
 
   const existing = await deps.store.findRepositoryByFullName(inputFullName);
@@ -216,12 +209,11 @@ export async function addTrackedRepository(
     project: repo.project?.key ?? null,
     slug: repo.slug,
     fullName: repo.full_name,
-    diffStatsEnabled,
     archived,
   });
 
   if (inserted) {
-    deps.logger?.info?.({ fullName: row.fullName, diffStatsEnabled, archived }, 'tracked-repo added');
+    deps.logger?.info?.({ fullName: row.fullName, archived }, 'tracked-repo added');
     return { fullName: row.fullName, status: 'inserted' };
   }
   deps.logger?.info?.(
@@ -245,7 +237,7 @@ export interface BootstrapReposResult {
 }
 
 // Bootstrap is a **seed-only** operation. New rows pick up
-// `diff_stats_enabled` / `archived` values from the YAML entry; existing
+// `archived` (and other supported flags) from the YAML entry; existing
 // rows are NOT reconciled — once a repo is in the DB, the DB is
 // canonical. Operators flip flags via admin endpoints (archive /
 // unarchive) or direct SQL, and those changes survive every subsequent
@@ -268,7 +260,6 @@ export async function bootstrapTrackedRepositories(
     const inputFullName = `${seed.workspace}/${seed.slug}`;
     try {
       const r = await addTrackedRepository(deps, seed.workspace, seed.slug, {
-        diffStatsEnabled: seed.diffStatsEnabled,
         archived: seed.archived,
       });
       if (r.status === 'inserted') result.inserted++;

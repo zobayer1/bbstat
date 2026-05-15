@@ -90,7 +90,7 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
                     :height="16"
                     class="shrink-0 text-slate-400 transition-colors group-hover:text-blue-600"
                   />
-                  <div v-if="activity.repository.diffStatsEnabled" class="flex items-center gap-1">
+                  <div class="flex items-center gap-1">
                     <span class="w-20 shrink-0 text-right text-xs tabular-nums text-emerald-700">
                       +{{ c.additions30d.toLocaleString() }}
                     </span>

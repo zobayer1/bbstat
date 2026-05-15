@@ -76,7 +76,6 @@ export interface UserSummary {
     project: string | null;
     commits: number;
     syncStatus: RepoSyncStatus;
-    diffStatsEnabled: boolean;
     additions30d: number;
     deletions30d: number;
   }>;
@@ -118,23 +117,23 @@ export interface RepoActivity {
     slug: string;
     fullName: string;
     syncStatus: RepoSyncStatus;
-    diffStatsEnabled: boolean;
   };
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
-  // Per-window code-change summary, null when diff_stats_enabled = false.
-  // Excludes merge commits. Used by the two "Code changes" stat cards
-  // on the repo detail page.
+  // Per-window code-change summary, excluding merge commits. Always
+  // returned now that per-repo opt-in is gone; reads zero on rows
+  // whose diff-stats haven't been ingested yet (transient — the
+  // backfill tick chases freshness first).
   diffStats: {
     additions7d: number;
     deletions7d: number;
     additions30d: number;
     deletions30d: number;
-  } | null;
+  };
   // Sparkline `last30Days` is scoped to this repo (this user's commits in
   // this repo, day-by-day over the trailing 30 days). Same shape as the
   // dashboard's top-contributors list so the Sparkline component renders
   // unchanged. Diff-stat fields are 30-day, exclude merges, read zero
-  // when diff_stats_enabled = false (frontend hides the column).
+  // when no diff-stat fetch has landed for any of this user's commits.
   contributors: RepoContributor[];
 }
 
@@ -257,7 +256,6 @@ export interface TickCommitsCompletePayload {
   isMergeBackfillStoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete' | null;
   diffStatsBackfillStopReason: 'budget' | 'rate-limited' | null;
   diffStatsBackfillTotalUpdated: number;
-  diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null;
 }
 
 export interface TickPrsCompletePayload {

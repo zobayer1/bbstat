@@ -1,246 +1,291 @@
-// Diff-stats backfill tick. Runs after the deepen-backfill tick and
-// drains pending diff-stat work (commits with
-// `diff_stats_synced_at IS NULL`) across all opted-in repos.
+// Diff-stats backfill tick — global newest-first pickup.
 //
-// Priority placement:
-//   commit tick → deepen tick → diff-stats backfill tick
+// Drains pending diff-stat work (`commits.diff_stats_synced_at IS NULL`)
+// across every non-archived non-excluded repo as a single ordered queue.
+// Replaces the previous per-repo iteration: a repo with 5000 pending
+// commits no longer monopolizes a tick by burning its 50-per-tick cap
+// before any other repo gets attention. Recent commits everywhere
+// land first.
 //
-// All three share the same hourly BB-call budget. By running last, this
-// tick yields to commit-list ingest and history deepening — fresh
-// commits and history coverage take precedence over filling in adds /
-// dels / files_changed on older commits. The inline-eager forward path
-// inside `syncRepositoryCommits` already covers stats for commits that
-// land in the current cron tick, so the backfill here is mostly:
+// Priority placement in `runCommitsSync`:
 //
-//   - one-time historical catch-up after enabling `diffStatsEnabled` on
-//     a repo that already has ingested history, and
-//   - commits whose inline-eager fetch failed transiently and stayed
-//     pending for the next tick.
+//   commit tick → deepen tick → IS-MERGE BACKFILL → diff-stats backfill
 //
-// Errors in a single repo never abort the tick; they're collected per-
-// repo so a transient 500 on one repo can't starve the others. Tick-wide
-// abort is reserved for BitbucketRateLimitError (the adaptive pacer's
-// hard ceiling — same pattern as commits-tick and deepen-backfill).
+// All four share the hourly BB-call budget. Running last, this step
+// yields to commit-list ingest, history deepening, and merge-flag
+// correction.
+//
+// Failure modes:
+//   * BitbucketRateLimitError — tick-wide stop. The remaining pending
+//     pool waits for the next cron firing (5 min) by which time BB's
+//     rolling window has rotated and the pacer has decayed.
+//   * BB 4xx / 5xx for a single commit — failed++, continue. The row
+//     stays `diff_stats_synced_at IS NULL` and gets retried next tick.
+//   * Adaptive pacer saturated — pre-emptive yield via RateLimitError,
+//     same recovery path as above.
+//
+// Rollups: as commits land their diff stats, we accumulate a
+// per-repo day-range map; at end of tick we fire one
+// `commit_daily` recompute per affected repo. Same pattern as the
+// commit-sync rollup hook.
 
+import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { BitbucketRateLimitError } from '../bitbucket/errors.js';
 import type { CommitStore } from './commit-store.js';
-import type { RepositoryHandle } from './commits.js';
-import {
-  syncRepositoryDiffStats,
-  type DiffStatsSyncDeps,
-  type DiffStatsSyncOptions,
-  type DiffStatsSyncResult,
-} from './diff-stats.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
 
-export interface DiffStatsBackfillTickOptions extends DiffStatsSyncOptions {
-  // Max repos in flight at once. Defaults to 1 (serial). Lower than
-  // commits-tick because the inner walker already paces BB calls, and
-  // because this tick is the last consumer of the hourly budget.
-  concurrency?: number;
+export interface DiffStatsBackfillTickOptions {
+  // Maximum commits processed per tick — total across all repos, not
+  // per-repo. Caps burst size and per-tick wall-clock (~maxCommits ×
+  // pacing). Default 100 in `config.ts`. Long-term throughput is
+  // budget-limited (DIFF_STATS_BACKFILL_BUDGET_THRESHOLD yields the
+  // tick when the rolling 1000/hr cap is approached), so the cap
+  // mostly controls burst size, not steady-state drain rate.
+  maxCommitsPerTick: number;
+  // Headroom required under BITBUCKET_HOURLY_CALL_BUDGET. When
+  // `getBudgetRemaining()` falls below this the loop bails and the
+  // remaining pool waits for the next tick.
+  budgetThreshold: number;
 }
 
 export interface DiffStatsBackfillTickDeps {
   client: BitbucketClient;
   store: CommitStore;
   logger?: BitbucketLogger;
-  // When present, after each repo's diff-stats walk yields a non-empty
-  // range, recompute commit_daily for that range and invalidate user-
-  // summary cache entries for affected users. Absent in unit tests that
-  // don't care about rollups.
   rollupStore?: RollupStore;
   userSummaryCache?: UserSummaryCache;
-  // Per-repo sync function. Defaults to syncRepositoryDiffStats;
-  // injectable so the orchestrator can be tested without standing up
-  // the full BB client + store + fetch fixture stack.
-  syncOne?: (
-    deps: DiffStatsSyncDeps,
-    repo: RepositoryHandle,
-    opts: DiffStatsSyncOptions,
-  ) => Promise<DiffStatsSyncResult>;
 }
 
-export interface RepoDiffStatsBackfillResult extends DiffStatsSyncResult {
+// Per-repo summary of work done this tick. Only repos that had at
+// least one commit processed appear — drained-clean repos are
+// silently absent. Surfaced for log line clarity and for the rollup
+// recompute step which fires once per non-empty entry.
+export interface PerRepoDiffStatsResult {
   repositoryId: number;
   fullName: string;
+  updated: number;
+  failed: number;
+  range: { sinceDay: string; untilDay: string } | null;
 }
 
 export interface DiffStatsBackfillTickResult {
-  // Per-repo results for **only** repos that had non-trivial activity
-  // this tick (updated + failed + deferred > 0). Fully-drained repos
-  // are deliberately omitted from this array to keep the log line
-  // signal-to-noise high; see `attemptedCount` for the total.
-  attempted: RepoDiffStatsBackfillResult[];
-  // Total opted-in repos the orchestrator walked this tick, including
-  // those that had zero pending work (so were not included in
-  // `attempted[]`). Useful for "did we even consider this repo?" vs.
-  // "what work did it produce?" questions.
-  attemptedCount: number;
-  deferred: RepositoryHandle[];
-  errors: Array<{ repository: RepositoryHandle; error: string }>;
-  // True iff something stopped the tick before draining `repos`. See
-  // `stopReason` for the cause. Pure "ran out of repos" finishes are
-  // stoppedEarly=false even if `deferred` is empty.
-  stoppedEarly: boolean;
-  // `null` = drained the queue cleanly. `'budget'` = the BB-call budget
-  // gate fired. `'rate-limited'` = the adaptive pacer hit its ceiling
-  // and a BB call still 429'd; remaining repos roll over to next tick.
+  // Total commits whose diff stats landed this tick.
+  totalUpdated: number;
+  // Per-commit failures that did NOT abort the tick (transient
+  // 4xx/5xx, malformed responses). Per-row remains pending.
+  totalFailed: number;
+  // Per-repo breakdown of work done. Empty when the tick had nothing
+  // to do (queue drained) — also empty when the very first call
+  // saturated the pacer.
+  perRepo: PerRepoDiffStatsResult[];
+  // null = drained cleanly. 'budget' = BB-call budget gate fired.
+  // 'rate-limited' = BB pushed back hard (retry budget exhausted OR
+  // adaptive pacer saturated).
   stopReason: 'budget' | 'rate-limited' | null;
   budgetRemainingAtEnd: number;
-  // Totals across all attempted repos, for terse log lines. Fully-drained
-  // means totalUpdated + totalFailed + totalDeferred === 0 — the signal
-  // the auto-opt-in step looks for in runCommitsSync.
-  totalUpdated: number;
-  totalFailed: number;
-  totalDeferred: number;
 }
-
-const DEFAULTS = {
-  concurrency: 1,
-} as const;
 
 export async function runDiffStatsBackfillTick(
   deps: DiffStatsBackfillTickDeps,
-  repos: RepositoryHandle[],
   opts: DiffStatsBackfillTickOptions,
 ): Promise<DiffStatsBackfillTickResult> {
-  const concurrency = opts.concurrency ?? DEFAULTS.concurrency;
-  const syncOne = deps.syncOne ?? syncRepositoryDiffStats;
+  // Single round-trip global pickup. Returns up to `maxCommitsPerTick`
+  // newest-authored pending commits with their repo identity attached.
+  const queue = await deps.store.listPendingDiffStatCommitsGlobal(opts.maxCommitsPerTick);
+  if (queue.length === 0) {
+    // Matches the deepen / is-merge ticks' "queue drained" log so an
+    // operator scanning dev-sync output can confirm the step ran.
+    deps.logger?.info?.(
+      { budgetRemaining: deps.client.getBudgetRemaining() },
+      'diff-stats backfill: queue drained — nothing pending across tracked repos',
+    );
+    return {
+      totalUpdated: 0,
+      totalFailed: 0,
+      perRepo: [],
+      stopReason: null,
+      budgetRemainingAtEnd: deps.client.getBudgetRemaining(),
+    };
+  }
 
-  // Opt-out repos are filtered before workers see them so the deferred
-  // list reflects "could have run but the tick stopped first" rather
-  // than "never eligible." Cheaper than the per-repo short-circuit
-  // inside `syncRepositoryDiffStats` once the queue is large.
-  const queue: RepositoryHandle[] = repos.filter((r) => r.diffStatsEnabled);
-  const attempted: RepoDiffStatsBackfillResult[] = [];
-  let attemptedCount = 0;
-  const errors: DiffStatsBackfillTickResult['errors'] = [];
-  let stoppedEarly = false;
+  // One-line start signal so the operator knows the tick is running
+  // and has a rough ETA — without it, dev-sync goes quiet for tens of
+  // seconds (50 commits × 400ms pacing floor) while /diffstat
+  // fetches stream through.
+  deps.logger?.info?.(
+    { queueSize: queue.length, budgetRemaining: deps.client.getBudgetRemaining() },
+    'diff-stats backfill: starting',
+  );
+
+  // Per-repo accumulators for the rollup step. Keyed by repositoryId
+  // so a commit that arrives later in the queue for an earlier-seen
+  // repo extends the existing day range correctly.
+  const perRepo = new Map<number, PerRepoDiffStatsResult & { workspace: string; slug: string }>();
+  let totalUpdated = 0;
+  let totalFailed = 0;
   let stopReason: 'budget' | 'rate-limited' | null = null;
 
-  const perRepoDeps = {
-    client: deps.client,
-    store: deps.store,
-    ...(deps.logger ? { logger: deps.logger } : {}),
-  };
-
-  const work = async (): Promise<void> => {
-    while (queue.length > 0) {
-      if (stopReason === 'rate-limited') return;
-      if (deps.client.getBudgetRemaining() < opts.budgetThreshold) {
-        stoppedEarly = true;
-        stopReason = 'budget';
-        deps.logger?.warn?.(
-          { remaining: deps.client.getBudgetRemaining(), threshold: opts.budgetThreshold, deferred: queue.length },
-          'diff-stats backfill tick: budget gate — deferring remaining repos',
-        );
-        return;
-      }
-      const repo = queue.shift();
-      if (repo === undefined) return;
-      try {
-        const result = await syncOne(perRepoDeps, repo, opts);
-        attemptedCount++;
-        // Suppress fully-drained repos from the per-repo result array
-        // — they're 100% of the steady-state log and contribute no
-        // useful signal. `attemptedCount` preserves the "did we walk
-        // every opted-in repo?" answer separately.
-        if (result.updated > 0 || result.failed > 0 || result.deferred > 0) {
-          attempted.push({ ...result, repositoryId: repo.repositoryId, fullName: repo.fullName });
-        }
-
-        // Rollup + cache invalidation when this repo's walk produced new
-        // diff stats. Errors here are dashboard-freshness blips, not
-        // data-integrity issues — log and move on.
-        if (result.diffStatsRange !== null && deps.rollupStore !== undefined) {
-          await applyRollup(deps, repo, result.diffStatsRange);
-        }
-      } catch (err) {
-        if (err instanceof BitbucketRateLimitError) {
-          queue.unshift(repo);
-          stoppedEarly = true;
-          stopReason = 'rate-limited';
-          deps.logger?.warn?.(
-            {
-              repository: repo.fullName,
-              pacingMs: deps.client.getCurrentPacingMs(),
-              deferred: queue.length,
-            },
-            'diff-stats backfill tick: BB rate-limited at max pacing — yielding remaining queue to next tick',
-          );
-          return;
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        errors.push({ repository: repo, error: message });
-        deps.logger?.error?.(err, `diff-stats backfill tick: ${repo.fullName} failed`);
-      }
-    }
-  };
-
-  await Promise.all(Array.from({ length: concurrency }, () => work()));
-
-  const totalUpdated = attempted.reduce((acc, r) => acc + r.updated, 0);
-  const totalFailed = attempted.reduce((acc, r) => acc + r.failed, 0);
-  const totalDeferred = attempted.reduce((acc, r) => acc + r.deferred, 0);
-
-  return {
-    attempted,
-    attemptedCount,
-    deferred: queue,
-    errors,
-    stoppedEarly,
-    stopReason,
-    budgetRemainingAtEnd: deps.client.getBudgetRemaining(),
-    totalUpdated,
-    totalFailed,
-    totalDeferred,
-  };
-}
-
-async function applyRollup(
-  deps: DiffStatsBackfillTickDeps,
-  repo: RepositoryHandle,
-  range: { sinceDay: string; untilDay: string },
-): Promise<void> {
-  if (deps.rollupStore === undefined) return;
-  try {
-    const { rowsAffected } = await deps.rollupStore.recomputeCommitDailyForRepo(repo.repositoryId, range);
-    deps.logger?.info?.(
-      { repositoryId: repo.repositoryId, fullName: repo.fullName, range, rowsAffected },
-      'diff-stats backfill: rollup recompute complete',
-    );
-  } catch (err) {
-    deps.logger?.warn?.(
-      {
-        repositoryId: repo.repositoryId,
-        fullName: repo.fullName,
-        range,
-        err: err instanceof Error ? err.message : String(err),
-      },
-      'diff-stats backfill: rollup recompute failed — will recover on next sync',
-    );
-    return;
-  }
-  if (deps.userSummaryCache !== undefined) {
-    try {
-      const userIds = await deps.rollupStore.listAffectedUserIdsForRepo(repo.repositoryId, range);
-      await Promise.all(userIds.map((id) => deps.userSummaryCache!.invalidate(id)));
-      deps.logger?.info?.(
-        { repositoryId: repo.repositoryId, fullName: repo.fullName, invalidatedUserCount: userIds.length },
-        'diff-stats backfill: user-summary cache invalidated',
-      );
-    } catch (err) {
+  for (const commit of queue) {
+    if (deps.client.getBudgetRemaining() < opts.budgetThreshold) {
+      stopReason = 'budget';
       deps.logger?.warn?.(
         {
-          repositoryId: repo.repositoryId,
-          fullName: repo.fullName,
-          range,
+          remaining: deps.client.getBudgetRemaining(),
+          threshold: opts.budgetThreshold,
+          processed: totalUpdated + totalFailed,
+          remainingInQueue: queue.length - (totalUpdated + totalFailed),
+        },
+        'diff-stats backfill: budget gate — deferring remaining commits to next tick',
+      );
+      break;
+    }
+    if (deps.client.isPacingSaturated()) {
+      stopReason = 'rate-limited';
+      deps.logger?.warn?.(
+        {
+          pacingMs: deps.client.getCurrentPacingMs(),
+          processed: totalUpdated + totalFailed,
+          remainingInQueue: queue.length - (totalUpdated + totalFailed),
+        },
+        'diff-stats backfill: pacer saturated — yielding tick to next cron',
+      );
+      break;
+    }
+
+    const bucket = perRepo.get(commit.repositoryId) ?? {
+      repositoryId: commit.repositoryId,
+      fullName: commit.fullName,
+      workspace: commit.workspace,
+      slug: commit.slug,
+      updated: 0,
+      failed: 0,
+      range: null,
+    };
+    try {
+      const stat = await getCommitDiffStat(
+        deps.client,
+        commit.workspace,
+        commit.slug,
+        commit.sha,
+        commit.excludePatterns,
+      );
+      await deps.store.updateCommitDiffStats(commit.id, stat);
+      bucket.updated++;
+      totalUpdated++;
+      const day = commit.authoredAt.toISOString().slice(0, 10);
+      if (bucket.range === null) {
+        bucket.range = { sinceDay: day, untilDay: day };
+      } else {
+        if (day < bucket.range.sinceDay) bucket.range.sinceDay = day;
+        if (day > bucket.range.untilDay) bucket.range.untilDay = day;
+      }
+    } catch (err) {
+      if (err instanceof BitbucketRateLimitError) {
+        // In-request retry budget exhausted. Yield the tick — same
+        // recovery path as the pacer-saturated case.
+        stopReason = 'rate-limited';
+        deps.logger?.warn?.(
+          {
+            fullName: commit.fullName,
+            sha: commit.sha,
+            processed: totalUpdated + totalFailed,
+            remainingInQueue: queue.length - (totalUpdated + totalFailed),
+          },
+          'diff-stats backfill: BB rate-limited after retry — yielding tick',
+        );
+        // Save bucket state for the rollup step before bailing.
+        perRepo.set(commit.repositoryId, bucket);
+        break;
+      }
+      bucket.failed++;
+      totalFailed++;
+      deps.logger?.warn?.(
+        {
+          repositoryId: commit.repositoryId,
+          fullName: commit.fullName,
+          sha: commit.sha,
           err: err instanceof Error ? err.message : String(err),
         },
-        'diff-stats backfill: user-summary cache invalidation failed — entries will fall out via TTL',
+        'diff-stats fetch failed — leaving commit pending for next tick',
       );
     }
+    perRepo.set(commit.repositoryId, bucket);
   }
+
+  // Rollup recompute per affected repo. Each non-null range scopes the
+  // commit_daily refresh; user-summary cache entries for affected
+  // users are DEL'd so the next read repopulates from fresh data.
+  // Failures here are dashboard-freshness blips, not data-integrity
+  // issues — log and continue.
+  if (deps.rollupStore !== undefined) {
+    for (const bucket of perRepo.values()) {
+      if (bucket.range === null) continue;
+      try {
+        const { rowsAffected } = await deps.rollupStore.recomputeCommitDailyForRepo(bucket.repositoryId, bucket.range);
+        deps.logger?.info?.(
+          { repositoryId: bucket.repositoryId, fullName: bucket.fullName, range: bucket.range, rowsAffected },
+          'diff-stats backfill: rollup recompute complete',
+        );
+      } catch (err) {
+        deps.logger?.warn?.(
+          {
+            repositoryId: bucket.repositoryId,
+            fullName: bucket.fullName,
+            range: bucket.range,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'diff-stats backfill: rollup recompute failed — will recover on next sync',
+        );
+        continue;
+      }
+      if (deps.userSummaryCache !== undefined) {
+        try {
+          const userIds = await deps.rollupStore.listAffectedUserIdsForRepo(bucket.repositoryId, bucket.range);
+          await Promise.all(userIds.map((id) => deps.userSummaryCache!.invalidate(id)));
+        } catch (err) {
+          deps.logger?.warn?.(
+            {
+              repositoryId: bucket.repositoryId,
+              fullName: bucket.fullName,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            'diff-stats backfill: user-summary cache invalidation failed — TTL backstop will catch up',
+          );
+        }
+      }
+    }
+  }
+
+  // Strip the internal workspace/slug fields before returning.
+  const perRepoResult: PerRepoDiffStatsResult[] = [];
+  for (const bucket of perRepo.values()) {
+    perRepoResult.push({
+      repositoryId: bucket.repositoryId,
+      fullName: bucket.fullName,
+      updated: bucket.updated,
+      failed: bucket.failed,
+      range: bucket.range,
+    });
+  }
+
+  deps.logger?.info?.(
+    {
+      totalUpdated,
+      totalFailed,
+      repos: perRepoResult.length,
+      stopReason,
+      budgetRemaining: deps.client.getBudgetRemaining(),
+    },
+    'diff-stats backfill tick complete',
+  );
+
+  return {
+    totalUpdated,
+    totalFailed,
+    perRepo: perRepoResult,
+    stopReason,
+    budgetRemainingAtEnd: deps.client.getBudgetRemaining(),
+  };
 }

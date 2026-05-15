@@ -80,29 +80,27 @@ const envSchema = z.object({
   SYNC_BACKOFF_MIN_INTERVAL_MIN: z.coerce.number().nonnegative().default(5),
   SYNC_BACKOFF_MAX_INTERVAL_MIN: z.coerce.number().int().positive().default(1440),
 
-  // Phase 4 T21: per-repo diff-stat ingest (1 BB call per file-page of a
-  // commit's /diffstat). Opt-in via tracked-repos.yaml. Two parallel
-  // paths share the inner walker:
+  // Per-commit diff-stat ingest (1 BB call per file-page of a commit's
+  // /diffstat). Two parallel paths share the inner walker:
   //
   //   * Inline-eager (forward) — runs inside the per-repo commit sync
-  //     against the commits *just inserted* on this tick. BUDGET_THRESHOLD
-  //     is the headroom below the hourly cap before the loop bails.
-  //     Lower than the commit-tick threshold because this runs after the
-  //     commit batch has already consumed budget.
+  //     against the commits *just inserted* on this tick.
+  //     `DIFF_STATS_BUDGET_THRESHOLD` is the headroom below the hourly
+  //     cap before the loop bails. Lower than the commit-tick threshold
+  //     because this runs after the commit batch has already consumed
+  //     budget.
   //
-  //   * Backfill (backward) — runs as its own tick after deepen, drains
-  //     pending commits across all opted-in repos. MAX_PER_REPO_PER_TICK
-  //     caps per-repo work so one large backlog can't monopolize the
-  //     tick. CONCURRENCY=1 by default (serial repo walk): the inner
-  //     loop's pacing already paces BB calls, and this tick is the last
-  //     consumer of the hourly budget so parallelism mostly steals from
-  //     the buffer. BUDGET_THRESHOLD is the safety margin against running
-  //     to zero — slightly above the commit-tick threshold so we never
-  //     starve the next cron tick's commit ingest.
+  //   * Backfill (backward) — own tick after deepen + is-merge. Uses a
+  //     global newest-first pickup across every non-archived
+  //     non-excluded repo (no per-repo iteration; freshness rules).
+  //     `MAX_COMMITS_PER_TICK` caps total work per tick (was
+  //     per-repo before the 2026-05 rewrite). `BUDGET_THRESHOLD` is
+  //     the safety margin against running to zero — slightly above
+  //     the commit-tick threshold so we never starve the next cron
+  //     tick's commit ingest.
   DIFF_STATS_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
-  DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK: z.coerce.number().int().positive().default(50),
+  DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK: z.coerce.number().int().positive().default(100),
   DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
-  DIFF_STATS_BACKFILL_CONCURRENCY: z.coerce.number().int().positive().default(1),
 
   // Retroactive is_merge backfill tick. Drains the pre-V1_7 backlog of
   // `commits.is_merge = false` rows that should have been true (the
@@ -122,6 +120,17 @@ const envSchema = z.object({
   // ~160 BB calls, so spending 30 min cadence on a low-PR-traffic
   // workspace is wasteful). Cold-mode cap is 5 pages × 100 = 500 PRs per
   // repo on first sync; subsequent runs walk delta.
+  //
+  // `SYNC_PRS_ENABLED` is a kill switch on the cron registration only —
+  // the admin manual trigger (`POST /api/admin/sync/prs`) always works,
+  // so an operator can run a one-shot tick without touching env. Default
+  // is `false`: at TigerIT scale the PR backlog has been ingested and
+  // mutations are rare, so the hourly tick burns budget for near-zero
+  // delta. Set to `true` to re-enable scheduled ingest.
+  SYNC_PRS_ENABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
   SYNC_PRS_CRON: z.string().default('0 * * * *'),
   PR_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   PR_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),

@@ -62,14 +62,6 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       state.syncStateRepoIds.add(id);
       return { row, inserted: true };
     },
-    async updateRepositoryDiffStatsEnabled(repositoryId, enabled) {
-      for (const row of state.repositories.values()) {
-        if (row.id === repositoryId) {
-          row.diffStatsEnabled = enabled;
-          return;
-        }
-      }
-    },
     async updateRepositoryArchived(repositoryId, archived) {
       for (const row of state.repositories.values()) {
         if (row.id === repositoryId) {
@@ -118,18 +110,6 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
           return;
         }
       }
-    },
-    async findNextDiffStatsCandidate() {
-      // Real impl orders by MAX(commits.authored_at) DESC NULLS LAST
-      // tie-broken on id ASC; this fake has no commits state, so it
-      // returns the lowest-id non-archived non-opted-in row as a
-      // deterministic proxy. Tests that need the activity ordering can
-      // override this method per-test.
-      const sorted = Array.from(state.repositories.values())
-        .filter((r) => !r.archived && !r.diffStatsEnabled)
-        .sort((a, b) => a.id - b.id);
-      const first = sorted[0];
-      return first ? { id: first.id, fullName: first.fullName } : null;
     },
     async listRepositoriesForSync() {
       // Synthesize the activity timestamps to nulls; tests in this file
@@ -183,8 +163,8 @@ repos:
   - tigerit/boing-relay
 `;
     expect(parseSeedRepoFile(text)).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
-      { workspace: 'tigerit', slug: 'boing-relay', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'boing-server', archived: false },
+      { workspace: 'tigerit', slug: 'boing-relay', archived: false },
     ]);
   });
 
@@ -199,11 +179,11 @@ repos:
   - name: tigerit/no-explicit-flag
 `;
     expect(parseSeedRepoFile(text)).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
-      { workspace: 'tigerit', slug: 'boing-relay', diffStatsEnabled: true, archived: false },
-      { workspace: 'tigerit', slug: 'comm-adm', diffStatsEnabled: false, archived: true },
+      { workspace: 'tigerit', slug: 'boing-server', archived: false },
+      { workspace: 'tigerit', slug: 'boing-relay', archived: false },
+      { workspace: 'tigerit', slug: 'comm-adm', archived: true },
       // Both flags omitted on the object form default to false.
-      { workspace: 'tigerit', slug: 'no-explicit-flag', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'no-explicit-flag', archived: false },
     ]);
   });
 
@@ -249,7 +229,7 @@ describe('loadSeedTrackedRepos', () => {
     const path = join(dir, 'seeds.yaml');
     writeFileSync(path, 'repos:\n  - tigerit/boing-server\n');
     expect(loadSeedTrackedRepos(path, { required: false })).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'boing-server', archived: false },
     ]);
   });
 });
@@ -356,7 +336,6 @@ describe('addTrackedRepository', () => {
       project: 'BOING',
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
-      diffStatsEnabled: false,
       archived: false,
     });
   });
@@ -369,7 +348,6 @@ describe('addTrackedRepository', () => {
       project: 'BOING',
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
-      diffStatsEnabled: false,
       archived: false,
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
@@ -422,7 +400,6 @@ describe('addTrackedRepository', () => {
       project: 'BOING',
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
-      diffStatsEnabled: false,
       archived: false,
     });
     fetchMock.mockResolvedValueOnce(
@@ -460,7 +437,6 @@ describe('bootstrapTrackedRepositories', () => {
       project: null,
       slug: 'b',
       fullName: 'tigerit/b',
-      diffStatsEnabled: false,
       archived: false,
     });
 
@@ -478,9 +454,9 @@ describe('bootstrapTrackedRepositories', () => {
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'a', diffStatsEnabled: false, archived: false },
-      { workspace: 'tigerit', slug: 'b', diffStatsEnabled: false, archived: false },
-      { workspace: 'tigerit', slug: 'c', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'a', archived: false },
+      { workspace: 'tigerit', slug: 'b', archived: false },
+      { workspace: 'tigerit', slug: 'c', archived: false },
     ]);
 
     expect(result).toEqual({
@@ -524,8 +500,8 @@ describe('bootstrapTrackedRepositories', () => {
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'a', diffStatsEnabled: false, archived: false },
-      { workspace: 'tigerit', slug: 'b', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'a', archived: false },
+      { workspace: 'tigerit', slug: 'b', archived: false },
     ]);
 
     expect(result.requested).toBe(2);
@@ -540,9 +516,9 @@ describe('bootstrapTrackedRepositories', () => {
   });
 
   it('does NOT reconcile per-repo flags from YAML on existing rows (DB is canonical)', async () => {
-    // Pre-existing row reflects operator intent: diff_stats_enabled flipped
-    // on, repo archived after a rename. The seed YAML happens to disagree
-    // on both — bootstrap should leave the DB untouched.
+    // Pre-existing row was archived after a rename. The seed YAML
+    // happens to disagree (archived: false) — bootstrap should leave
+    // the DB untouched.
     const { store } = createFakeStore();
     await store.insertRepositoryWithSyncState({
       bitbucketUuid: '{r1}',
@@ -550,27 +526,25 @@ describe('bootstrapTrackedRepositories', () => {
       project: 'BOING',
       slug: 'boing-server',
       fullName: 'tigerit/boing-server',
-      diffStatsEnabled: true,
       archived: true,
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'boing-server', diffStatsEnabled: false, archived: false },
+      { workspace: 'tigerit', slug: 'boing-server', archived: false },
     ]);
 
     expect(result.alreadyTracked).toBe(1);
     const row = await store.findRepositoryByFullName('tigerit/boing-server');
-    // DB values preserved — YAML did not write through.
-    expect(row?.diffStatsEnabled).toBe(true);
+    // DB value preserved — YAML did not write through.
     expect(row?.archived).toBe(true);
     // No HTTP call either — already-tracked short-circuits before BB lookup.
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('seeds per-repo flags from YAML on first insert', async () => {
-    // Brand-new repo: YAML's diffStats / archived values become the
-    // initial column values.
+    // Brand-new repo: YAML's `archived` value becomes the initial
+    // column value.
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
         uuid: '{r-new}',
@@ -583,12 +557,9 @@ describe('bootstrapTrackedRepositories', () => {
     const { store } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'fresh', diffStatsEnabled: true, archived: true },
-    ]);
+    await bootstrapTrackedRepositories(deps, [{ workspace: 'tigerit', slug: 'fresh', archived: true }]);
 
     const row = await store.findRepositoryByFullName('tigerit/fresh');
-    expect(row?.diffStatsEnabled).toBe(true);
     expect(row?.archived).toBe(true);
   });
 });

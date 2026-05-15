@@ -77,20 +77,14 @@ export interface UserSummary {
     project: string | null;
     commits: number;
     syncStatus: RepoSyncStatus;
-    // True iff the repo is opted into per-commit diff-stat ingest.
-    // When false, the adds/dels/files columns below are 0 — the
-    // frontend renders them as muted em-dashes to flag "no data here
-    // yet" vs. "actually zero contribution".
-    diffStatsEnabled: boolean;
     // This user's last-30-day per-repo code-change footprint, excluding
-    // merge commits. Always present in the response shape; zero when
-    // diff_stats_enabled is false OR the user genuinely made no
-    // non-merge changes in this repo over the window. Note: file count
-    // is intentionally NOT aggregated here — SUM(files_changed) across
-    // many commits double-counts the same path edited repeatedly, which
-    // doesn't carry meaningful authorship signal. Per-commit file count
-    // still appears in the activity feed where it's the actual count
-    // for that single commit.
+    // merge commits. Zero when diff-stats haven't landed yet for any
+    // commits in this window (rare in steady state — the backfill
+    // tick chases freshness first) or when the user genuinely made
+    // no non-merge changes here. File count is intentionally NOT
+    // aggregated — SUM(files_changed) across many commits
+    // double-counts paths edited repeatedly. Per-commit file count
+    // still appears in the activity feed.
     additions30d: number;
     deletions30d: number;
   }>;
@@ -128,30 +122,28 @@ export interface RepoActivity {
     slug: string;
     fullName: string;
     syncStatus: RepoSyncStatus;
-    // Mirrors `repositories.diff_stats_enabled`. The frontend gates the
-    // code-changes cards + per-contributor diff-stat column on this flag.
-    diffStatsEnabled: boolean;
   };
   // Last 365 calendar days, oldest first. Zero-commit days omitted —
   // the frontend backfills gaps when rendering the contribution heatmap.
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
-  // Per-window code-change summary (additions / deletions / files
-  // changed) for the repo, excluding merge commits. Null when
-  // `diff_stats_enabled = false` — the column is meaningless until
-  // /diffstat ingestion has run for this repo. Day windows match the
-  // commit cards: 7d = last 7 calendar days, 30d = last 30.
+  // Per-window code-change summary, excluding merge commits. Day
+  // windows match the commit cards: 7d = last 7 calendar days, 30d =
+  // last 30. Always returned (no longer gated on a per-repo opt-in
+  // flag); reads zero when no diff-stat ingest has landed yet, which
+  // is a transient state the backfill tick chases by freshness-first
+  // global pickup.
   diffStats: {
     additions7d: number;
     deletions7d: number;
     additions30d: number;
     deletions30d: number;
-  } | null;
+  };
   // All contributors active in the last 30 days, ordered by commit count desc.
   // `last30Days` is repo-scoped (this user's commits in THIS repo, day-by-day)
   // so the repo-detail sparkline reflects the contributor's activity here,
   // not their workspace-wide pattern. Diff-stat fields are 30-day,
-  // exclude merges, and read zero when `diff_stats_enabled = false` —
-  // the frontend hides the column in that case.
+  // exclude merges, read zero when no diff-stat ingest has landed
+  // yet for this repo (transient — the backfill tick will fill in).
   contributors: RepoContributor[];
 }
 
@@ -458,7 +450,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           slug: string;
           full_name: string;
           project: string | null;
-          diff_stats_enabled: boolean;
           commits: number;
           last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
           last_synced_at: string | Date | null;
@@ -467,7 +458,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           deletions_30d: number;
         }>(sql`
           SELECT
-            r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
+            r.workspace, r.slug, r.full_name, r.project,
             sum(cd.commit_count)::int AS commits,
             ss.last_sync_status, ss.last_synced_at,
             r.sync_excluded,
@@ -488,7 +479,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             GROUP BY repository_id
           ) ds ON ds.repository_id = r.id
           WHERE cd.author_user_id = ${userId} AND cd.day >= current_date - 29
-          GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project, r.diff_stats_enabled,
+          GROUP BY r.id, r.workspace, r.slug, r.full_name, r.project,
                    ss.last_sync_status, ss.last_synced_at, r.sync_excluded,
                    ds.additions_30d, ds.deletions_30d
           ORDER BY sum(cd.commit_count) DESC
@@ -517,7 +508,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           project: r.project,
           commits: r.commits,
           syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
-          diffStatsEnabled: r.diff_stats_enabled,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
         })),
@@ -710,7 +700,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           workspace: repositories.workspace,
           slug: repositories.slug,
           fullName: repositories.fullName,
-          diffStatsEnabled: repositories.diffStatsEnabled,
           syncExcluded: repositories.syncExcluded,
           lastSyncStatus: syncState.lastSyncStatus,
           lastSyncedAt: syncState.lastSyncedAt,
@@ -795,11 +784,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           LEFT JOIN diff_summary ON diff_summary.author_user_id = t.user_id
           ORDER BY t.commits DESC
         `),
-        // Per-window code-change summary for the repo. Runs unconditionally
-        // (cheap — sub-50ms even on the biggest opted-in repo) but the
-        // result is only included in the response when diff_stats_enabled
-        // is true; otherwise we return null below to make the "opt in to
-        // see this" semantic explicit to the frontend.
+        // Per-window code-change summary for the repo. Always returned —
+        // the per-repo opt-in flag was removed in 2026-05; every
+        // non-archived non-excluded repo participates in diff-stat
+        // ingest by default. Reads zero on rows whose diff-stats
+        // haven't been ingested yet (transient state).
         db.execute<{
           additions_7d: number;
           deletions_7d: number;
@@ -819,22 +808,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       ]);
 
       const diffStatsAgg = diffStatsRows.rows[0];
-      const diffStats =
-        repo.diffStatsEnabled && diffStatsAgg !== undefined
-          ? {
-              additions7d: diffStatsAgg.additions_7d,
-              deletions7d: diffStatsAgg.deletions_7d,
-              additions30d: diffStatsAgg.additions_30d,
-              deletions30d: diffStatsAgg.deletions_30d,
-            }
-          : null;
+      const diffStats = {
+        additions7d: diffStatsAgg?.additions_7d ?? 0,
+        deletions7d: diffStatsAgg?.deletions_7d ?? 0,
+        additions30d: diffStatsAgg?.additions_30d ?? 0,
+        deletions30d: diffStatsAgg?.deletions_30d ?? 0,
+      };
       return {
         repository: {
           workspace: repo.workspace,
           slug: repo.slug,
           fullName: repo.fullName,
           syncStatus: deriveSyncStatus(repo.lastSyncStatus ?? null, repo.lastSyncedAt ?? null, repo.syncExcluded),
-          diffStatsEnabled: repo.diffStatsEnabled,
         },
         dailyCommits: dailyRows.rows.map((r) => ({
           date: r.date,

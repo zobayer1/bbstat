@@ -35,6 +35,7 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     markSyncSuccess: fail,
     markSyncFailed: fail,
     listPendingDiffStatCommits: fail,
+    listPendingDiffStatCommitsGlobal: fail,
     updateCommitDiffStats: fail,
     getOldestCommitSha: fail,
     pickRepoForDeepening: fail,

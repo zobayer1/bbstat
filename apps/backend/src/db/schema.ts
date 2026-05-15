@@ -36,16 +36,11 @@ export const users = pgTable('users', {
 // `repositories` represents the curated *tracked* set — rows here that
 // are not archived are what sync workers walk. `tracked-repos.yaml` is a
 // **seed file**, not a live config source: it controls which repos get
-// inserted on first discovery, and seeds the initial values of
-// per-repo flags (`diff_stats_enabled`, `archived`). Once a row exists,
-// the DB is canonical — admin endpoints / scripts / ad-hoc SQL update
-// the flags, and subsequent discovery syncs do NOT overwrite them from
-// YAML. See docs/ROADMAP.md "Curated list growth".
-//
-// `diff_stats_enabled` — Phase 4 opt-in for fetching per-commit
-// additions / deletions / files_changed via /diffstat/:sha. Seeded from
-// `{ name, diffStats: true }` in YAML; flipped at runtime via direct
-// SQL (no admin endpoint for this flag yet).
+// inserted on first discovery, and seeds the initial value of
+// `archived`. Once a row exists, the DB is canonical — admin endpoints
+// / scripts / ad-hoc SQL update the flags, and subsequent discovery
+// syncs do NOT overwrite them from YAML. See docs/ROADMAP.md
+// "Curated list growth".
 //
 // `archived` — Phase 4 follow-up. Soft-retire flag for repos that
 // should keep their historical data but stop appearing in sync work.
@@ -72,6 +67,13 @@ export const users = pgTable('users', {
 // separately from operator-initiated retirement, and so admin recovery
 // (rename, include-back-into-sync, delete) has its own lifecycle. NULL
 // reason on a non-excluded row, populated string on an excluded row.
+//
+// `diff_stats_enabled` was removed in 2026-05. Diff-stat ingest is no
+// longer per-repo opt-in — every non-archived non-excluded repo
+// participates automatically and the backfill tick uses a global
+// freshness-first pickup across the entire pool. Operator opt-out
+// goes through `archived` (full retirement) or per-file
+// `diff_stats_exclude_patterns` (skip specific paths).
 export const repositories = pgTable('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
@@ -79,7 +81,6 @@ export const repositories = pgTable('repositories', {
   project: text('project'),
   slug: text('slug').notNull(),
   fullName: text('full_name').notNull(),
-  diffStatsEnabled: boolean('diff_stats_enabled').notNull().default(false),
   archived: boolean('archived').notNull().default(false),
   syncExcluded: boolean('sync_excluded').notNull().default(false),
   syncExcludeReason: text('sync_exclude_reason'),
@@ -114,10 +115,12 @@ export const repositories = pgTable('repositories', {
 // commit regardless of diff-stat opt-in.
 //
 // `files_changed` is the count of file entries in /diffstat/:sha. Filled
-// alongside additions/deletions when the diff-stats step lands. Repos
-// with `repositories.diff_stats_enabled = false` simply never have the
-// fetch happen — their rows stay at additions=0, deletions=0,
-// files_changed=0, diff_stats_synced_at=NULL.
+// alongside additions/deletions when the diff-stats step lands. Per-repo
+// opt-in was removed in 2026-05; every non-archived non-excluded repo
+// participates. Until /diffstat lands for a commit, all three columns
+// stay at their defaults (additions=0, deletions=0, files_changed=0,
+// diff_stats_synced_at=NULL) — the partial index keys the backfill
+// pickup on that NULL stamp.
 export const commits = pgTable(
   'commits',
   {

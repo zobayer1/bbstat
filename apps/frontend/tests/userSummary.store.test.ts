@@ -31,7 +31,6 @@ const sampleSummary: UserSummary = {
       project: 'COMM',
       commits: 8,
       syncStatus: 'ok',
-      diffStatsEnabled: false,
       additions30d: 0,
       deletions30d: 0,
     },
@@ -118,7 +117,6 @@ describe('userSummary store', () => {
       isMergeBackfillStoppedReason: null,
       diffStatsBackfillStopReason: null,
       diffStatsBackfillTotalUpdated: 0,
-      diffStatsAutoOptIn: null,
     });
     // applyTickComplete is fired off as a void-promise inside the
     // bus handler; flush pending microtasks before asserting.

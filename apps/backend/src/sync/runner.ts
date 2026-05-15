@@ -139,22 +139,12 @@ export interface CommitsSyncResult extends BaseResult {
   // whether the budget gate fired or the queue drained.
   deepen: DeepenTickResult | null;
   // Retroactive is_merge backfill outcome. Null when the step is
-  // disabled (isMergeBackfillOptions not wired). When present and
-  // `stoppedReason === 'queue-empty'`, every tracked repo's
-  // is_merge backfill is complete — the diff-stats auto-opt-in gate
-  // additionally requires this signal to be true.
+  // disabled (isMergeBackfillOptions not wired).
   isMergeBackfill: IsMergeBackfillTickResult | null;
-  // Phase 5 prep: diff-stats backfill tick that runs after deepen. Null
-  // when the step is disabled (diffStatsBackfillOptions not wired).
+  // Diff-stats backfill tick that runs after is-merge. Uses a global
+  // newest-first pickup across every non-archived non-excluded repo —
+  // see src/sync/diff-stats-tick.ts. Null when the step is disabled.
   diffStatsBackfill: DiffStatsBackfillTickResult | null;
-  // Self-paced diff-stats rollout. When the backfill tick drains
-  // cleanly (stopReason === null AND attempted/deferred/errors all
-  // empty), we flip diff_stats_enabled on the next non-opted-in
-  // non-archived repo (most-recently-active first, see
-  // `findNextDiffStatsCandidate`). One per tick max. Null when the
-  // backfill is disabled, the tick had any work or any non-clean stop
-  // reason, or every repo is already opted in / archived.
-  diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null;
 }
 
 export interface PrsSyncSummary {
@@ -206,18 +196,17 @@ export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigge
 export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<CommitsSyncResult> {
   const startedAt = new Date().toISOString();
   const rows = await deps.store.listRepositoriesForSync();
-  // `handles` is the full curated set — used by the diff-stats backfill
-  // tick (which is independent of commit-list staleness; it drains
-  // pending /diffstat fetches for any opted-in repo as long as budget
-  // allows). `dueHandles` is the subset whose commit-list interval has
-  // elapsed under the backoff formula — used by the commit-tick. When
-  // backoffOptions is unset, dueHandles == handles (legacy behavior).
+  // `handles` is the full curated set, used only for the start-of-tick
+  // log line that reports total vs due counts. The diff-stats backfill
+  // tick no longer consumes a handles list — it does its own global
+  // pickup. `dueHandles` is the subset whose commit-list interval has
+  // elapsed under the backoff formula and is the only list passed to
+  // the commit tick. When backoffOptions is unset, dueHandles == handles.
   const handles: RepositoryHandle[] = rows.map((r) => ({
     repositoryId: r.id,
     workspace: r.workspace,
     slug: r.slug,
     fullName: r.fullName,
-    diffStatsEnabled: r.diffStatsEnabled,
     diffStatsExcludePatterns: r.diffStatsExcludePatterns,
   }));
   const now = new Date();
@@ -238,7 +227,6 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
             workspace: r.workspace,
             slug: r.slug,
             fullName: r.fullName,
-            diffStatsEnabled: r.diffStatsEnabled,
             diffStatsExcludePatterns: r.diffStatsExcludePatterns,
           }));
   deps.logger.info?.(
@@ -336,13 +324,14 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Diff-stats backfill tick — runs after deepen so it consumes whatever
+  // Diff-stats backfill tick — runs last so it consumes whatever
   // budget is left over. Inline-eager fetch inside the commit sync
-  // already covers stats for commits that landed in this tick; this step
-  // catches up on (a) pending commits whose inline fetch transiently
-  // failed and (b) one-time historical backlog after enabling
-  // diffStatsEnabled on a repo with already-ingested history. Errors
-  // here never abort the commit-sync result.
+  // already covers stats for commits that landed in this tick; this
+  // step catches up on (a) pending commits whose inline fetch
+  // transiently failed and (b) historical backlog for repos whose
+  // commits pre-date diff-stat ingest. Global newest-first pickup
+  // (no per-repo iteration) — see src/sync/diff-stats-tick.ts.
+  // Errors here never abort the commit-sync result.
   let diffStatsBackfill: DiffStatsBackfillTickResult | null = null;
   if (deps.diffStatsBackfillOptions !== undefined) {
     try {
@@ -354,7 +343,6 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
           ...(deps.rollupStore ? { rollupStore: deps.rollupStore } : {}),
           ...(deps.userSummaryCache ? { userSummaryCache: deps.userSummaryCache } : {}),
         },
-        handles,
         deps.diffStatsBackfillOptions,
       );
     } catch (err) {
@@ -365,54 +353,9 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Self-paced diff-stats rollout. Fires only when the diff-stats
-  // backfill drained cleanly AND the retroactive is_merge backfill
-  // also reports queue-empty. Both gates matter: opting another repo
-  // into diff-stats while is_merge correctness is still in flight
-  // would let merge-inflated rows leak into the per-day aggregates
-  // before they get corrected. The natural drain time of the
-  // newly-opted-in repo's history paces the rollout: a busy repo
-  // with thousands of pending commits blocks the next auto-opt for
-  // many ticks; an empty repo opts in immediately and the rollout
-  // proceeds one repo per cron tick until the pool exhausts.
-  //
-  // The diff-stats gate is intentionally strict — an earlier revision
-  // checked totals reduced over `attempted[]`, but the orchestrator
-  // (a) suppresses fully-drained repos from `attempted[]` (zero-update
-  // entries are noise) and (b) parks budget-/rate-limit-gated repos
-  // in `deferred[]` outside `attempted[]`. So `totalUpdated +
-  // totalFailed + totalDeferred` went to zero on ticks where the
-  // backfill never actually ran — flipping repos on while work was
-  // still pending. The gate now reads the orchestrator's own
-  // "drained cleanly" invariants directly.
-  let diffStatsAutoOptIn: { repositoryId: number; fullName: string } | null = null;
-  if (
-    diffStatsBackfill !== null &&
-    diffStatsBackfill.stopReason === null &&
-    diffStatsBackfill.deferred.length === 0 &&
-    diffStatsBackfill.attempted.length === 0 &&
-    diffStatsBackfill.errors.length === 0 &&
-    isMergeBackfill !== null &&
-    isMergeBackfill.stoppedReason === 'queue-empty'
-  ) {
-    try {
-      const candidate = await deps.store.findNextDiffStatsCandidate();
-      if (candidate !== null) {
-        await deps.store.updateRepositoryDiffStatsEnabled(candidate.id, true);
-        diffStatsAutoOptIn = { repositoryId: candidate.id, fullName: candidate.fullName };
-        deps.logger.info?.({ ...candidate }, 'diff-stats auto-opt-in');
-      }
-    } catch (err) {
-      deps.logger.warn?.(
-        { err: err instanceof Error ? err.message : String(err) },
-        'diff-stats auto-opt-in: candidate lookup or update failed',
-      );
-    }
-  }
-
   const finishedAt = new Date().toISOString();
   deps.logger.info?.(
-    { trigger, ...summary, deepen, isMergeBackfill, diffStatsBackfill, diffStatsAutoOptIn, startedAt, finishedAt },
+    { trigger, ...summary, deepen, isMergeBackfill, diffStatsBackfill, startedAt, finishedAt },
     'commit sync complete',
   );
 
@@ -423,7 +366,6 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     deepen,
     isMergeBackfill,
     diffStatsBackfill,
-    diffStatsAutoOptIn,
     commits: summary,
     repoResults: tick.attempted,
     errors: tick.errors,
@@ -431,11 +373,10 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   };
   // Slim payload for the SSE wire: drop the per-repo arrays
   // (repoResults / deepen.repos / isMergeBackfill.repos /
-  // diffStatsBackfill.attempted+deferred+errors). At ~20+ repos × ~500
-  // bytes each across four sub-ticks, the full result is large enough
-  // to overrun the SSE response's write buffers and kill the TLS
-  // connection. Callers in-process still see the full `result` via
-  // the return value.
+  // diffStatsBackfill.perRepo). At ~20+ repos × ~500 bytes each
+  // across four sub-ticks the full result can overrun the SSE
+  // response's write buffers; callers in-process still see the full
+  // `result` via the return value.
   deps.bus?.publish({
     event: 'tick.commits.complete',
     payload: {
@@ -452,7 +393,6 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
       isMergeBackfillStoppedReason: isMergeBackfill?.stoppedReason ?? null,
       diffStatsBackfillStopReason: diffStatsBackfill?.stopReason ?? null,
       diffStatsBackfillTotalUpdated: diffStatsBackfill?.totalUpdated ?? 0,
-      diffStatsAutoOptIn,
     },
   });
   return result;
@@ -472,7 +412,6 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
           workspace: r.workspace,
           slug: r.slug,
           fullName: r.fullName,
-          diffStatsEnabled: r.diffStatsEnabled,
           diffStatsExcludePatterns: r.diffStatsExcludePatterns,
         }))
       : rows
@@ -489,7 +428,6 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
             workspace: r.workspace,
             slug: r.slug,
             fullName: r.fullName,
-            diffStatsEnabled: r.diffStatsEnabled,
             diffStatsExcludePatterns: r.diffStatsExcludePatterns,
           }));
   deps.logger.info?.(
@@ -578,9 +516,8 @@ export function deepenOptionsFromConfig(config: AppConfig): { maxPages: number; 
 
 export function diffStatsBackfillOptionsFromConfig(config: AppConfig): DiffStatsBackfillTickOptions {
   return {
-    maxPerRepoPerTick: config.DIFF_STATS_BACKFILL_MAX_PER_REPO_PER_TICK,
+    maxCommitsPerTick: config.DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK,
     budgetThreshold: config.DIFF_STATS_BACKFILL_BUDGET_THRESHOLD,
-    concurrency: config.DIFF_STATS_BACKFILL_CONCURRENCY,
   };
 }
 
