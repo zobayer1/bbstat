@@ -12,6 +12,7 @@ import type {
   StatsStore,
   TopContributorWithSparkline,
   UserSummary,
+  WorkspaceMember,
 } from '../src/dashboard/stats-store.js';
 import type { UserSummaryCache } from '../src/dashboard/user-summary-cache.js';
 
@@ -69,6 +70,7 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     getProjectStats: vi.fn(),
     getRepositoryActivity: vi.fn(),
     listTrackedRepositoriesWithStats: vi.fn(),
+    listWorkspaceMembers: vi.fn(),
     getActivity: vi.fn(),
     ...overrides,
   };
@@ -212,6 +214,80 @@ describe('GET /api/stats/top-contributors', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toEqual({ error: 'invalid_window', allowed: ['7d', '30d'] });
     expect(statsStore.getTopContributors).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/stats/members', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  const sampleMembers: WorkspaceMember[] = [
+    {
+      userId: 1,
+      bitbucketUuid: '{u1}',
+      displayName: 'Alice',
+      username: 'alice',
+      commitsWindow: 12,
+      commitsAllTime: 200,
+      additionsWindow: 540,
+      deletionsWindow: 120,
+      reposWindow: 3,
+      reposAllTime: 7,
+      lastActiveAt: '2026-05-15T10:00:00.000Z',
+      last30Days: Array.from({ length: 30 }, (_, i) => (i === 29 ? 4 : 0)),
+    },
+    {
+      userId: 2,
+      bitbucketUuid: '{u2}',
+      displayName: 'Bob',
+      username: null,
+      commitsWindow: 0,
+      commitsAllTime: 18,
+      additionsWindow: 0,
+      deletionsWindow: 0,
+      reposWindow: 0,
+      reposAllTime: 2,
+      lastActiveAt: '2026-04-02T08:00:00.000Z',
+      last30Days: new Array(30).fill(0),
+    },
+  ];
+
+  it('defaults to a 7-day window when no query param is given', async () => {
+    const listWorkspaceMembers = vi.fn().mockResolvedValue(sampleMembers);
+    const statsStore = makeStatsStore({ listWorkspaceMembers });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/members' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(sampleMembers);
+    expect(listWorkspaceMembers).toHaveBeenCalledWith(7);
+  });
+
+  it('forwards a 30-day window when window=30d', async () => {
+    const listWorkspaceMembers = vi.fn().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ listWorkspaceMembers });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/members?window=30d' });
+
+    expect(res.statusCode).toBe(200);
+    expect(listWorkspaceMembers).toHaveBeenCalledWith(30);
+  });
+
+  it('rejects invalid window with 400', async () => {
+    const statsStore = makeStatsStore();
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/members?window=ever' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'invalid_window', allowed: ['7d', '30d'] });
+    expect(statsStore.listWorkspaceMembers).not.toHaveBeenCalled();
   });
 });
 

@@ -142,6 +142,23 @@ export interface RepoContributor extends TopContributorWithSparkline {
   deletions30d: number;
 }
 
+// One row on the /members page. Mirror of WorkspaceMember in
+// apps/backend/src/dashboard/stats-store.ts — keep in lockstep.
+export interface WorkspaceMember {
+  userId: number;
+  bitbucketUuid: string;
+  displayName: string;
+  username: string | null;
+  commitsWindow: number;
+  commitsAllTime: number;
+  additionsWindow: number;
+  deletionsWindow: number;
+  reposWindow: number;
+  reposAllTime: number;
+  lastActiveAt: string | null;
+  last30Days: number[];
+}
+
 export interface TrackedRepositorySummary {
   workspace: string;
   slug: string;
@@ -221,6 +238,7 @@ export const api = {
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/activity`,
     ),
   listRepositories: () => request<TrackedRepositorySummary[]>('/api/stats/repositories'),
+  members: (window: ContributorWindow = '7d') => request<WorkspaceMember[]>(`/api/stats/members?window=${window}`),
   activity: (query: ActivityQuery = {}) => {
     const params = new URLSearchParams();
     if (query.actor !== undefined) params.set('actor', String(query.actor));

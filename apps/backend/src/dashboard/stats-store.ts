@@ -230,6 +230,37 @@ export interface ActivityFilters {
 // recovery is a specific admin action, not a wait-and-retry.
 export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded';
 
+// One row per workspace member with at least one ingested commit. Powers
+// the standalone /members page (Members.vue). Anonymous / unmatched-author
+// commits are excluded — they have no user to attribute and the page is a
+// roster, not a commit log. Window-zero rows still appear (a quiet week
+// shouldn't empty the list); never-committed users are filtered out at the
+// SQL level.
+export interface WorkspaceMember {
+  userId: number;
+  bitbucketUuid: string;
+  displayName: string;
+  username: string | null;
+  // Per-window aggregates. Additions / deletions read from commit_daily
+  // and so carry the same merge semantics as getUserSummary's totals — the
+  // dashboard treats them the same way.
+  commitsWindow: number;
+  commitsAllTime: number;
+  additionsWindow: number;
+  deletionsWindow: number;
+  // Distinct repos this member committed to in the active window vs ever.
+  reposWindow: number;
+  reposAllTime: number;
+  // MAX(commits.authored_at) across all this member's commits. Null is
+  // theoretically unreachable (the filter requires commitsAllTime > 0) but
+  // typed to match the underlying source.
+  lastActiveAt: string | null;
+  // Length 30, oldest-first, zeros for days with no commits. Same shape as
+  // TopContributorWithSparkline.last30Days so the Sparkline component
+  // renders unchanged.
+  last30Days: number[];
+}
+
 export interface TrackedRepositorySummary {
   workspace: string;
   slug: string;
@@ -270,6 +301,15 @@ export interface StatsStore {
   // activity. The dashboard renders this directly as the Repositories panel
   // and groups by `project` client-side to drive the Projects panel.
   listTrackedRepositoriesWithStats(): Promise<TrackedRepositorySummary[]>;
+  // Workspace member roster for the /members page. One row per user with at
+  // least one ingested commit (commitsAllTime > 0) — window-zero rows still
+  // appear so a quiet week doesn't empty the page. Anonymous / unmatched-
+  // author commits are excluded. Ordered server-side by commitsWindow DESC,
+  // displayName ASC so the default render lands "most-active first" without
+  // a client sort. Pagination + fuzzy-search run on the frontend over this
+  // list (org-scale dataset, full payload fits in one round-trip).
+  listWorkspaceMembers(windowDays: number): Promise<WorkspaceMember[]>;
+
   // Phase 4 T23 — unified activity feed. UNION ALL of commits + PRs with
   // per-branch filter predicates, ordered by `occurredAt DESC` then by
   // `kind, id DESC` so ties break deterministically (otherwise pagination
@@ -838,6 +878,123 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           deletions30d: r.deletions_30d,
         })),
       };
+    },
+
+    async listWorkspaceMembers(windowDays) {
+      // Single round-trip, four CTEs:
+      //   base        — per-user aggregates from commit_daily, filtered to
+      //                 users who've ever landed a commit (commits_all_time > 0
+      //                 via the GROUP BY HAVING). Window-zero rows still pass.
+      //   last_active — MAX(authored_at) per user from `commits` (not
+      //                 commit_daily, which has no timestamp — only day).
+      //   daily       — last-30-day per-(user, day) commit counts, restricted
+      //                 to the eligible user set so the cross-join below is
+      //                 bounded by member count, not by user-id space.
+      //   spark       — array_agg into a 30-element commit sparkline per user,
+      //                 oldest-first, zeros for missing days. Same shape as
+      //                 TopContributorWithSparkline.last30Days so the
+      //                 frontend's Sparkline component renders unchanged.
+      //
+      // Window is windowDays UTC day buckets ending today — e.g. windowDays=7
+      // → day >= current_date - 6 covers 7 days. The ::int cast on the bound
+      // param is load-bearing (see getTopContributors for the same note —
+      // without it, current_date - $1 falls back to the date-date overload).
+      //
+      // Order: commits_window DESC, display_name ASC. The frontend resorts
+      // client-side when the user picks a different sort column.
+      const rows = await db.execute<{
+        user_id: number;
+        bitbucket_uuid: string;
+        display_name: string;
+        username: string | null;
+        commits_window: number;
+        commits_all_time: number;
+        additions_window: number;
+        deletions_window: number;
+        repos_window: number;
+        repos_all_time: number;
+        last_active_at: string | Date | null;
+        last_30_days: number[];
+      }>(sql`
+        WITH base AS (
+          SELECT
+            cd.author_user_id AS user_id,
+            COALESCE(sum(cd.commit_count) FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int), 0)::int
+              AS commits_window,
+            sum(cd.commit_count)::int AS commits_all_time,
+            COALESCE(sum(cd.additions) FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int), 0)::int
+              AS additions_window,
+            COALESCE(sum(cd.deletions) FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int), 0)::int
+              AS deletions_window,
+            count(DISTINCT cd.repository_id)
+              FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int)::int
+              AS repos_window,
+            count(DISTINCT cd.repository_id)::int AS repos_all_time
+          FROM commit_daily cd
+          WHERE cd.author_user_id IS NOT NULL
+          GROUP BY cd.author_user_id
+          HAVING sum(cd.commit_count) > 0
+        ),
+        last_active AS (
+          SELECT c.author_user_id AS user_id, max(c.authored_at) AS last_active_at
+          FROM commits c
+          WHERE c.author_user_id IN (SELECT user_id FROM base)
+          GROUP BY c.author_user_id
+        ),
+        daily AS (
+          SELECT cd.author_user_id, cd.day, sum(cd.commit_count)::int AS commits
+          FROM commit_daily cd
+          WHERE cd.day >= current_date - 29
+            AND cd.author_user_id IN (SELECT user_id FROM base)
+          GROUP BY cd.author_user_id, cd.day
+        ),
+        spark AS (
+          SELECT
+            b.user_id,
+            array_agg(COALESCE(daily.commits, 0) ORDER BY sd.day) AS last_30_days
+          FROM base b
+          CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval) AS sd(day)
+          LEFT JOIN daily ON daily.author_user_id = b.user_id AND daily.day = sd.day::date
+          GROUP BY b.user_id
+        )
+        SELECT
+          u.id AS user_id,
+          u.bitbucket_uuid,
+          u.display_name,
+          u.username,
+          b.commits_window,
+          b.commits_all_time,
+          b.additions_window,
+          b.deletions_window,
+          b.repos_window,
+          b.repos_all_time,
+          la.last_active_at,
+          s.last_30_days
+        FROM base b
+        JOIN users u ON u.id = b.user_id
+        LEFT JOIN last_active la ON la.user_id = b.user_id
+        JOIN spark s ON s.user_id = b.user_id
+        ORDER BY b.commits_window DESC, u.display_name ASC
+      `);
+      return rows.rows.map((r) => ({
+        userId: r.user_id,
+        bitbucketUuid: r.bitbucket_uuid,
+        displayName: r.display_name,
+        username: r.username,
+        commitsWindow: r.commits_window,
+        commitsAllTime: r.commits_all_time,
+        additionsWindow: r.additions_window,
+        deletionsWindow: r.deletions_window,
+        reposWindow: r.repos_window,
+        reposAllTime: r.repos_all_time,
+        lastActiveAt:
+          r.last_active_at === null
+            ? null
+            : typeof r.last_active_at === 'string'
+              ? new Date(r.last_active_at).toISOString()
+              : r.last_active_at.toISOString(),
+        last30Days: r.last_30_days,
+      }));
     },
 
     async getActivity(filters) {

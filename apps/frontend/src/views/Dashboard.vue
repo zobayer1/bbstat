@@ -160,7 +160,12 @@ const pagedRepositories = computed(() => {
     <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
       <StatCard label="Tracked repositories" :value="repos" />
       <StatCard label="Projects" :value="projects" />
-      <StatCard label="Developers" :value="developers" hint="Workspace members" />
+      <RouterLink
+        :to="{ name: 'members' }"
+        class="block rounded-lg transition hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+      >
+        <StatCard label="Workspace Members" :value="developers" hint="Browse all →" />
+      </RouterLink>
       <StatCard label="Commits (all-time)" :value="totalCommits" />
       <StatCard label="Commits last 7 days" :value="commitsLast7Days" hint="Recent activity" />
       <StatCard label="Commits last 30 days" :value="commitsLast30Days" hint="Trailing month" />
