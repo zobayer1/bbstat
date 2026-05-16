@@ -157,14 +157,36 @@ const pagedRepositories = computed(() => {
       </div>
     </header>
 
-    <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <!-- `perspective-[1200px]` sets the vanishing point depth for the 3D
+         hover transform on the Workspace Members card below — other cards
+         are unaffected since they don't apply any 3D rotation. -->
+    <section class="grid grid-cols-1 gap-4 [perspective:1200px] sm:grid-cols-2 lg:grid-cols-3">
       <StatCard label="Tracked repositories" :value="repos" />
       <StatCard label="Projects" :value="projects" />
       <RouterLink
         :to="{ name: 'members' }"
-        class="block rounded-lg transition hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+        class="group relative block rounded-lg shadow-sm transition-all duration-200 ease-out [transform-style:preserve-3d] hover:-translate-y-1 hover:scale-[1.02] hover:shadow-xl hover:[transform:translateY(-4px)_scale(1.02)_rotateX(6deg)_rotateY(-4deg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
       >
         <StatCard label="Workspace Members" :value="developers" hint="Browse all →" />
+        <!-- "users" glyph (Heroicons-style) anchored to the card's right
+             edge, vertically centered, behind the text in z-order so the
+             value never collides with it. Resting color slate-300; flips
+             to blue on card hover via the `group` ancestor. -->
+        <svg
+          class="pointer-events-none absolute top-1/2 right-4 size-14 -translate-y-1/2 text-slate-300 transition-colors group-hover:text-blue-500 group-focus-visible:text-blue-500"
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke-width="1.5"
+          stroke="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z"
+          />
+        </svg>
       </RouterLink>
       <StatCard label="Commits (all-time)" :value="totalCommits" />
       <StatCard label="Commits last 7 days" :value="commitsLast7Days" hint="Recent activity" />

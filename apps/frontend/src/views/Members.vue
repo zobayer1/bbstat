@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import Fuse from 'fuse.js';
+import ActivityStatusDonut, { type ActivityBucket } from '@/components/ActivityStatusDonut.vue';
+import LorenzCurve from '@/components/LorenzCurve.vue';
 import { useMembersStore } from '@/stores/members';
 import type { ContributorWindow, WorkspaceMember } from '@/api/client';
 
@@ -125,6 +127,53 @@ const sortIndicator = (key: SortKey): string => {
   if (sortKey.value !== key) return '';
   return sortDir.value === 'asc' ? ' ▲' : ' ▼';
 };
+
+// Activity-status donut: buckets every member by how recently they last
+// committed, relative to now. Bucket boundaries are window-independent
+// (the 7d/30d toggle drives the table, not this chart) — the donut is
+// always answering "is the team alive *right now*?" across the same
+// 7/30/90-day recency ramp.
+//
+// Buckets are mutually exclusive (Active-30d here means active within
+// 30 days but NOT within 7) so the slices sum to total members and the
+// donut reads as a partition, not nested rings.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const ACTIVITY_COLORS = {
+  active7d: '#10b981', // emerald-500
+  active30d: '#3b82f6', // blue-500
+  active90d: '#f59e0b', // amber-500
+  dormant: '#94a3b8', // slate-400
+};
+
+const activityBuckets = computed<ActivityBucket[]>(() => {
+  const now = Date.now();
+  const counts = { a7: 0, a30: 0, a90: 0, dormant: 0 };
+  for (const m of store.members) {
+    if (m.lastActiveAt === null) {
+      counts.dormant++;
+      continue;
+    }
+    const ageDays = (now - new Date(m.lastActiveAt).getTime()) / DAY_MS;
+    if (ageDays < 7) counts.a7++;
+    else if (ageDays < 30) counts.a30++;
+    else if (ageDays < 90) counts.a90++;
+    else counts.dormant++;
+  }
+  return [
+    { label: 'Active · 7d', count: counts.a7, color: ACTIVITY_COLORS.active7d },
+    { label: 'Active · 30d', count: counts.a30, color: ACTIVITY_COLORS.active30d },
+    { label: 'Active · 90d', count: counts.a90, color: ACTIVITY_COLORS.active90d },
+    { label: 'Dormant', count: counts.dormant, color: ACTIVITY_COLORS.dormant },
+  ];
+});
+
+// Lorenz curve values are window-scoped — the curve answers "how
+// concentrated is contribution in the active window?" so it should
+// retract/expand as the user toggles 7d ↔ 30d. The component itself
+// filters zeros (a member who didn't commit in the window doesn't
+// inform concentration; including them would flatten the left tail
+// and visually understate the inequality).
+const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
 </script>
 
 <template>
@@ -134,6 +183,43 @@ const sortIndicator = (key: SortKey): string => {
       <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">Workspace Members</h1>
       <p class="mt-1 text-sm text-slate-500">Every contributor we've ingested at least one commit for.</p>
     </header>
+
+    <!-- Charts run above the filter row because they aggregate the entire
+         roster — they don't respond to the search query, so placing them
+         after the search input would mislead the user into thinking the
+         filter applies here too.
+         Captions live at the CARD level (not inside the chart components)
+         so they sit flush at each card's bottom edge. Grid's default
+         `items-stretch` equalizes card heights, which lines the two
+         captions up horizontally regardless of how much vertical space
+         the donut vs the Lorenz plot consume. -->
+    <section class="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+        <h2 class="mb-4 text-xs font-medium uppercase tracking-wider text-slate-500">Activity status</h2>
+        <div class="flex flex-1 items-center justify-center">
+          <ActivityStatusDonut
+            :buckets="activityBuckets"
+            center-label="Members"
+            :outer-radius="120"
+            :inner-radius="76"
+          />
+        </div>
+        <p class="mt-4 text-center text-[10px] text-slate-400">
+          Members grouped by last-commit recency — green is most active, slate is dormant
+        </p>
+      </div>
+      <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+        <h2 class="mb-4 text-xs font-medium uppercase tracking-wider text-slate-500">
+          Commit concentration · {{ store.window }}
+        </h2>
+        <div class="flex flex-1 items-center">
+          <LorenzCurve :values="lorenzValues" :width="480" :height="260" class="w-full" />
+        </div>
+        <p class="mt-4 text-center text-[10px] text-slate-400">
+          Cumulative commits vs members — closer to the diagonal = flatter distribution
+        </p>
+      </div>
+    </section>
 
     <section class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-3">
@@ -169,6 +255,14 @@ const sortIndicator = (key: SortKey): string => {
 
     <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
+        <!-- Column layout:
+               [ Member | Commits (win) | +/- (win) | Repos (win) ‖ Last active | All-time ]
+             The double-bar marks where the trailing window-independent
+             columns begin — `Last active` and `All-time` aren't affected
+             by the 7d/30d toggle, so they're grouped together at the far
+             right with a visible left border on the first column of the
+             group. Same border lives on the matching header cell and on
+             every body cell to draw an unbroken vertical rule. -->
         <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
           <tr>
             <th class="px-4 py-2 text-left font-medium">
@@ -181,11 +275,6 @@ const sortIndicator = (key: SortKey): string => {
                 Commits{{ sortIndicator('commitsWindow') }}
               </button>
             </th>
-            <th class="px-4 py-2 text-right font-medium">
-              <button type="button" class="hover:text-slate-700" @click="toggleSort('commitsAllTime')">
-                All-time{{ sortIndicator('commitsAllTime') }}
-              </button>
-            </th>
             <!-- Same 3-column grid template as the cells below so the `/`
                  in the header lines up with the `/` in every row. -->
             <th class="px-4 py-2 font-medium">
@@ -195,14 +284,19 @@ const sortIndicator = (key: SortKey): string => {
                 <span class="text-left text-rose-600">−</span>
               </div>
             </th>
-            <th class="px-4 py-2 text-right font-medium">
+            <th class="py-2 pr-6 text-right font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('reposWindow')">
                 Repos{{ sortIndicator('reposWindow') }}
               </button>
             </th>
-            <th class="px-4 py-2 text-right font-medium">
+            <th class="border-l-2 border-slate-200 py-2 pr-4 text-right font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('lastActiveAt')">
                 Last active{{ sortIndicator('lastActiveAt') }}
+              </button>
+            </th>
+            <th class="px-4 py-2 text-right font-medium">
+              <button type="button" class="hover:text-slate-700" @click="toggleSort('commitsAllTime')">
+                All-time{{ sortIndicator('commitsAllTime') }}
               </button>
             </th>
           </tr>
@@ -219,7 +313,6 @@ const sortIndicator = (key: SortKey): string => {
               </RouterLink>
             </td>
             <td class="px-4 py-2 text-right text-slate-900">{{ m.commitsWindow }}</td>
-            <td class="px-4 py-2 text-right text-slate-500">{{ m.commitsAllTime }}</td>
             <!-- 3-column grid with the `/` in a fixed center column so the
                  separator lines up vertically down the table — additions
                  right-justify into the gap, deletions left-justify out of
@@ -232,10 +325,11 @@ const sortIndicator = (key: SortKey): string => {
                 <span class="text-left text-rose-600">−{{ m.deletionsWindow }}</span>
               </div>
             </td>
-            <td class="px-4 py-2 text-right text-slate-900">{{ m.reposWindow }}</td>
-            <td class="px-4 py-2 text-right text-slate-500" :title="m.lastActiveAt ?? ''">
+            <td class="py-2 pr-6 text-right text-slate-900">{{ m.reposWindow }}</td>
+            <td class="border-l-2 border-slate-200 py-2 pr-4 text-right text-slate-500" :title="m.lastActiveAt ?? ''">
               {{ relativeTime(m.lastActiveAt) }}
             </td>
+            <td class="px-4 py-2 text-right text-slate-500">{{ m.commitsAllTime }}</td>
           </tr>
         </tbody>
       </table>
