@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
 import type { ContributorWindow, WorkspaceMember } from '@/api/client';
+import { liveBus } from '@/lib/live';
 
 // Client-side cache for the /members page. Hydrates from
 // /api/stats/members and persists across reloads so the page renders
@@ -9,11 +10,6 @@ import type { ContributorWindow, WorkspaceMember } from '@/api/client';
 // the background. Fuzzy search, sort, and pagination all run on the
 // frontend over `members.value` — the backend ships the full eligible
 // roster (commitsAllTime > 0) in one round-trip.
-//
-// SSE wiring (refetch on tick.commits.complete / tick.prs.complete /
-// repository.deleted) lands in a subsequent commit alongside the
-// per-row sparkline integration. The store shape is already
-// SSE-ready; the next commit just adds `liveBus.on(...)` handlers.
 export const useMembersStore = defineStore(
   'members',
   () => {
@@ -48,7 +44,29 @@ export const useMembersStore = defineStore(
       error.value = null;
     }
 
-    return { members, window, lastFetchedAt, loading, error, fetch, setWindow, clear };
+    // Re-fetch when a sync tick lands or push goes stale. Skip if nothing
+    // has ever been loaded — the next navigation to /members will trigger
+    // the first fetch on its own, no point waking a sleeping tab into
+    // network work. Subscribes to the same events as `useUserSummaryStore`
+    // since both stores derive their numbers from `commit_daily` aggregates
+    // (PR ticks don't move any field in the WorkspaceMember payload, so
+    // we deliberately skip `tick.prs.complete`).
+    async function applyTickComplete(): Promise<void> {
+      if (lastFetchedAt.value === null) return;
+      await fetch();
+    }
+
+    liveBus.on('tick.commits.complete', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.deleted', () => {
+      void applyTickComplete();
+    });
+    liveBus.onFallback(() => {
+      void applyTickComplete();
+    });
+
+    return { members, window, lastFetchedAt, loading, error, fetch, setWindow, clear, applyTickComplete };
   },
   { persist: { pick: ['members', 'window', 'lastFetchedAt'] } },
 );

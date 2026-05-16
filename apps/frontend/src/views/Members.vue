@@ -4,6 +4,7 @@ import { RouterLink } from 'vue-router';
 import Fuse from 'fuse.js';
 import ActivityStatusDonut, { type ActivityBucket } from '@/components/ActivityStatusDonut.vue';
 import LorenzCurve from '@/components/LorenzCurve.vue';
+import Sparkline from '@/components/Sparkline.vue';
 import { useMembersStore } from '@/stores/members';
 import type { ContributorWindow, WorkspaceMember } from '@/api/client';
 
@@ -224,8 +225,11 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
     <section class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-3">
         <input
+          id="members-search"
           v-model="search"
           type="search"
+          name="members-search"
+          autocomplete="off"
           placeholder="Search by name or username…"
           class="w-64 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400"
           aria-label="Search workspace members"
@@ -256,13 +260,14 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
     <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
         <!-- Column layout:
-               [ Member | Commits (win) | +/- (win) | Repos (win) ‖ Last active | All-time ]
+               [ Member | Commits (win) | +/- (win) | Repos (win) ‖ Trend 30d | Last active | All-time ]
              The double-bar marks where the trailing window-independent
-             columns begin — `Last active` and `All-time` aren't affected
-             by the 7d/30d toggle, so they're grouped together at the far
-             right with a visible left border on the first column of the
-             group. Same border lives on the matching header cell and on
-             every body cell to draw an unbroken vertical rule. -->
+             columns begin — `Trend (30d)`, `Last active` and `All-time`
+             aren't affected by the 7d/30d toggle, so they're grouped
+             together at the far right with a visible left border on the
+             first column of the group. Same border lives on the matching
+             header cell and on every body cell to draw an unbroken
+             vertical rule. -->
         <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
           <tr>
             <th class="px-4 py-2 text-left font-medium">
@@ -289,7 +294,15 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
                 Repos{{ sortIndicator('reposWindow') }}
               </button>
             </th>
-            <th class="border-l-2 border-slate-200 py-2 pr-4 text-right font-medium">
+            <!-- Sparkline column carries the 2px left border that marks
+                 the start of the window-independent column group. Header
+                 is a plain label — no sort comparator makes sense for a
+                 30-day shape — and the `(30d)` suffix calls out that this
+                 column stays at 30 days regardless of the 7d/30d toggle. -->
+            <th class="border-l-2 border-slate-200 px-4 py-2 text-right font-medium">
+              Trend <span class="text-slate-400">(30d)</span>
+            </th>
+            <th class="py-2 pr-4 text-right font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('lastActiveAt')">
                 Last active{{ sortIndicator('lastActiveAt') }}
               </button>
@@ -326,7 +339,10 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
               </div>
             </td>
             <td class="py-2 pr-6 text-right text-slate-900">{{ m.reposWindow }}</td>
-            <td class="border-l-2 border-slate-200 py-2 pr-4 text-right text-slate-500" :title="m.lastActiveAt ?? ''">
+            <td class="border-l-2 border-slate-200 px-4 py-2">
+              <Sparkline :points="m.last30Days" :width="96" :height="18" class="ml-auto block text-slate-400" />
+            </td>
+            <td class="py-2 pr-4 text-right text-slate-500" :title="m.lastActiveAt ?? ''">
               {{ relativeTime(m.lastActiveAt) }}
             </td>
             <td class="px-4 py-2 text-right text-slate-500">{{ m.commitsAllTime }}</td>
