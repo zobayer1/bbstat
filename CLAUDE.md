@@ -31,6 +31,8 @@ Three layers — keep them separate; don't collapse them into a single tier.
 
 **Cache layering, in one line:** Postgres = truth, Redis = pre-computed user summaries on the server, Pinia = the browser's working copy. Don't blur these.
 
+**When you change a persisted-store shape** (add/rename/remove a field on a Pinia store's persisted state, or alter a shared type like `WorkspaceMember` / `UserSummary` that flows into one), **bump `CACHE_VERSION` in `apps/frontend/src/lib/cache-version.ts`**. The boot-time bust in `lib/cache-bust.ts` wipes every `bbstat-*` localStorage key on version mismatch — users who already have the page open get fresh data on next reload instead of rendering the old shape against new components. Redis caches (`bbstat:*` keys) are separate: keep manually flushing those with `docker compose exec redis redis-cli FLUSHDB` when the same kind of shape change reaches a Redis-cached payload (today: `UserSummary`).
+
 When in doubt about where logic belongs: aggregation/rollup work goes in the sync layer or backend, not the client.
 
 ## Authentication
