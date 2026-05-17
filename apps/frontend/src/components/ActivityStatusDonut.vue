@@ -24,11 +24,31 @@ const props = withDefaults(
     innerRadius?: number;
     // Optional overline shown above the centered total — e.g. "MEMBERS".
     centerLabel?: string;
+    // Where the legend sits relative to the donut. `right` (default)
+    // keeps the historical side-by-side layout; `left` flips them so
+    // the legend leads (handy for left-anchored panels where the
+    // labels read first); `below` stacks the donut over the legend
+    // for narrow columns.
+    legendPosition?: 'left' | 'right' | 'below';
+    // Toggle the trailing percentage column in each legend row.
+    // Default `true` keeps the existing display; set `false` to
+    // shrink the legend to swatch + label + count when percentages
+    // would crowd a narrow layout.
+    showPercent?: boolean;
+    // Apply a subtle 3D presentation: the donut tilts back via CSS
+    // perspective, a soft drop-shadow grounds it, and each slice
+    // carries a radial gloss highlight so the surface reads as a
+    // physical disc rather than a flat chart. Opt-in (default
+    // false) so callers like Members.vue stay flat.
+    tilt3d?: boolean;
   }>(),
   {
     outerRadius: 64,
     innerRadius: 40,
     centerLabel: '',
+    legendPosition: 'right',
+    showPercent: true,
+    tilt3d: false,
   },
 );
 
@@ -96,18 +116,60 @@ const pct = (count: number): string => {
   if (t <= 0) return '0%';
   return `${Math.round((count / t) * 100)}%`;
 };
+
+// Full-annulus path used as a gloss overlay when tilt3d is on.
+// Two subpaths (outer then inner) combined with fill-rule="evenodd"
+// punches the hole through the disc so the gradient only paints the
+// donut surface, not the centre.
+const annulusPath = computed(() => {
+  const ro = props.outerRadius;
+  const ri = props.innerRadius;
+  const cxv = cx.value;
+  const cyv = cy.value;
+  return [
+    `M ${cxv} ${cyv - ro}`,
+    `A ${ro} ${ro} 0 1 1 ${cxv} ${cyv + ro}`,
+    `A ${ro} ${ro} 0 1 1 ${cxv} ${cyv - ro}`,
+    'Z',
+    `M ${cxv} ${cyv - ri}`,
+    `A ${ri} ${ri} 0 1 0 ${cxv} ${cyv + ri}`,
+    `A ${ri} ${ri} 0 1 0 ${cxv} ${cyv - ri}`,
+    'Z',
+  ].join(' ');
+});
+
+// Unique gradient id per instance so two donuts on the same page
+// don't share `<defs>` IDs and clobber each other's gloss overlay.
+const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
 </script>
 
 <template>
-  <div class="flex items-center gap-8">
+  <div
+    :class="[
+      'flex',
+      legendPosition === 'below' ? 'flex-col items-center gap-4' : 'items-center',
+      legendPosition === 'left' ? 'flex-row-reverse justify-end gap-4' : '',
+      legendPosition === 'right' ? 'gap-8' : '',
+    ]"
+  >
     <svg
       :width="size"
       :height="size"
       :viewBox="`0 0 ${size} ${size}`"
       role="img"
       aria-label="Member activity status"
-      class="shrink-0"
+      :class="['shrink-0', tilt3d ? 'donut-tilt' : '']"
     >
+      <defs v-if="tilt3d">
+        <!-- Top-down highlight: brighter near 12 o'clock, fading to
+             transparent past the equator. Acts as overhead lighting
+             so the tilted disc reads as a physical surface. -->
+        <radialGradient :id="glossId" cx="50%" cy="25%" r="65%">
+          <stop offset="0%" stop-color="white" stop-opacity="0.45" />
+          <stop offset="55%" stop-color="white" stop-opacity="0.08" />
+          <stop offset="100%" stop-color="white" stop-opacity="0" />
+        </radialGradient>
+      </defs>
       <!-- Empty-state ring — drawn when total = 0 so the donut placeholder
            still has visual mass instead of disappearing. -->
       <circle
@@ -126,6 +188,16 @@ const pct = (count: number): string => {
         :fill="slice.bucket.color"
         stroke="white"
         stroke-width="1"
+      />
+      <!-- Gloss overlay — full annulus filled with the radial gradient
+           defined above. fill-rule=evenodd punches the hole so only
+           the donut surface gets the highlight. -->
+      <path
+        v-if="tilt3d && total > 0"
+        :d="annulusPath"
+        :fill="`url(#${glossId})`"
+        fill-rule="evenodd"
+        pointer-events="none"
       />
       <!-- Type scales with outerRadius so the center stays legible at any
            caller-chosen donut size: ~10% of radius for the overline, ~28%
@@ -154,17 +226,42 @@ const pct = (count: number): string => {
         {{ total }}
       </text>
     </svg>
-    <ul class="min-w-0 flex-1 space-y-2 text-sm">
-      <li v-for="b in buckets" :key="b.label" class="flex items-center gap-3">
-        <span
-          class="inline-block size-3 shrink-0 rounded-sm"
-          :style="{ backgroundColor: b.color }"
-          aria-hidden="true"
-        />
+    <!-- Legend grid. Each row contributes its swatch, label, count
+         (and optional percent) as four direct grid children via
+         `display: contents` on the <li>. The count column is `auto`
+         (= widest count across rows) with `text-right` inside, so
+         digits right-align without expanding the legend's overall
+         width: the legend stays content-sized and only the count's
+         own column anchors to its right edge. -->
+    <ul
+      :class="[
+        'grid items-center gap-x-3 gap-y-2 text-sm',
+        legendPosition === 'below' ? 'w-full max-w-xs' : '',
+        showPercent ? 'grid-cols-[auto_auto_auto_auto]' : 'grid-cols-[auto_auto_auto]',
+      ]"
+    >
+      <li v-for="b in buckets" :key="b.label" class="contents">
+        <span class="inline-block size-3 rounded-sm" :style="{ backgroundColor: b.color }" aria-hidden="true" />
         <span class="truncate text-slate-600">{{ b.label }}</span>
-        <span class="ml-auto tabular-nums text-slate-900">{{ b.count }}</span>
-        <span class="w-12 text-right tabular-nums text-slate-400">{{ pct(b.count) }}</span>
+        <span class="text-right tabular-nums text-slate-900">{{ b.count }}</span>
+        <span v-if="showPercent" class="w-12 text-right tabular-nums text-slate-400">{{ pct(b.count) }}</span>
       </li>
     </ul>
   </div>
 </template>
+
+<style scoped>
+/* 3D presentation for the donut. Tilts the SVG back ~22° via CSS
+   perspective so the disc reads as a tilted record on a turntable,
+   and grounds it with a soft drop-shadow. The gloss highlight
+   inside the SVG (radial gradient overlay) does the actual surface
+   modelling — without it, the tilt alone reads as a squashed
+   ellipse. Disabled under prefers-reduced-motion-style preferences
+   isn't necessary here because the transform is static, not
+   animated. */
+.donut-tilt {
+  transform: perspective(640px) rotateX(22deg);
+  transform-origin: center center;
+  filter: drop-shadow(0 10px 14px rgba(15, 23, 42, 0.22));
+}
+</style>
