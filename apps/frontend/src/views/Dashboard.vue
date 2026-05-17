@@ -487,6 +487,16 @@ const topRepos = computed(() =>
                   :height="16"
                   class="shrink-0 text-slate-400 transition-colors group-hover:text-blue-600"
                 />
+                <!-- Window-scoped adds / dels — same 3-column grid as
+                     the Members table, with the `/` centered in a
+                     fixed column so the separator lines up vertically
+                     down the panel. Adds right-justify into the gap,
+                     dels left-justify out of it. -->
+                <div class="grid w-32 shrink-0 grid-cols-[1fr_auto_1fr] items-baseline gap-1 text-xs tabular-nums">
+                  <span class="text-right text-emerald-600">+{{ c.additionsWindow.toLocaleString() }}</span>
+                  <span class="text-slate-300">/</span>
+                  <span class="text-left text-rose-600">−{{ c.deletionsWindow.toLocaleString() }}</span>
+                </div>
                 <span class="w-24 shrink-0 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
               </RouterLink>
             </li>

@@ -48,6 +48,12 @@ export interface TopContributor {
 export interface TopContributorWithSparkline extends TopContributor {
   // Length 30, oldest-first, zeros for days with no commits.
   last30Days: number[];
+  // Adds / dels for the same window as `commits`. Sourced from
+  // commit_daily, which already excludes merge commits, so these
+  // match the per-repo / per-member adds/dels conventions used
+  // elsewhere on the dashboard.
+  additionsWindow: number;
+  deletionsWindow: number;
 }
 
 export interface UserSummary {
@@ -505,10 +511,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         bitbucket_uuid: string;
         display_name: string;
         commits: number;
+        additions_window: number;
+        deletions_window: number;
         last_30_days: number[];
       }>(sql`
         WITH top AS (
-          SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
+          SELECT
+            u.id AS user_id,
+            u.bitbucket_uuid,
+            u.display_name,
+            sum(cd.commit_count)::int AS commits,
+            sum(cd.additions)::int AS additions_window,
+            sum(cd.deletions)::int AS deletions_window
           FROM commit_daily cd
           JOIN users u ON u.id = cd.author_user_id
           WHERE cd.day >= current_date - ${windowDays - 1}::int
@@ -533,7 +547,14 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
           GROUP BY t.user_id
         )
-        SELECT t.user_id, t.bitbucket_uuid, t.display_name, t.commits, spark.last_30_days
+        SELECT
+          t.user_id,
+          t.bitbucket_uuid,
+          t.display_name,
+          t.commits,
+          t.additions_window,
+          t.deletions_window,
+          spark.last_30_days
         FROM top t
         JOIN spark ON spark.user_id = t.user_id
         ORDER BY t.commits DESC
@@ -544,6 +565,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         displayName: r.display_name,
         commits: r.commits,
         last30Days: r.last_30_days,
+        additionsWindow: r.additions_window,
+        deletionsWindow: r.deletions_window,
       }));
     },
 
@@ -826,6 +849,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last30Days: r.last_30_days,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
+          // Window is always 30d in the project / repo context, so
+          // the parent TopContributorWithSparkline window fields just
+          // mirror the explicit 30d values.
+          additionsWindow: r.additions_30d,
+          deletionsWindow: r.deletions_30d,
         })),
         repositories: repoRows.rows.map((r) => ({
           workspace: r.workspace,
@@ -1052,6 +1080,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last30Days: r.last_30_days,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
+          // 30d-context mirror — see project topContributors for the
+          // same alias.
+          additionsWindow: r.additions_30d,
+          deletionsWindow: r.deletions_30d,
         })),
       };
     },

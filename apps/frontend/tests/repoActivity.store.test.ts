@@ -27,6 +27,8 @@ const sample: RepoActivity = {
       last30Days: [0, 1, 0, 3],
       additions30d: 0,
       deletions30d: 0,
+      additionsWindow: 0,
+      deletionsWindow: 0,
     },
   ],
 };

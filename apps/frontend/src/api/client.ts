@@ -49,6 +49,9 @@ export interface TopContributor {
 // base shape.
 export interface TopContributorWithSparkline extends TopContributor {
   last30Days: number[];
+  // Adds / dels for the same window as `commits` (merges excluded).
+  additionsWindow: number;
+  deletionsWindow: number;
 }
 
 export type ContributorWindow = '7d' | '30d';
