@@ -1,20 +1,45 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import StatCard3D from '@/components/StatCard3D.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useStatsStore } from '@/stores/stats';
 import { useActivityFilters } from '@/composables/useActivityFilters';
-import type { ContributorWindow } from '@/api/client';
+import { api, type ContributorWindow } from '@/api/client';
+import { liveBus } from '@/lib/live';
 
 const stats = useStatsStore();
 const route = useRoute();
 const router = useRouter();
 
+// Workspace-wide 365-day daily aggregate for the dashboard heatmap.
+// Reads from /api/activity-daily with no filters so the chart is the
+// org-level cadence picture. SSE-refreshes whenever a commits-tick
+// lands so the most-recent day's cell fills in without a page reload.
+const dailyCommits = ref<{ date: string; commits: number }[]>([]);
+async function loadDailyCommits(): Promise<void> {
+  try {
+    dailyCommits.value = await api.activityDaily();
+  } catch {
+    dailyCommits.value = [];
+  }
+}
+const liveCleanups: Array<() => void> = [];
+
 onMounted(() => {
   void stats.fetchOverview();
+  void loadDailyCommits();
+  liveCleanups.push(liveBus.on('tick.commits.complete', () => void loadDailyCommits()));
+  liveCleanups.push(liveBus.on('repository.deleted', () => void loadDailyCommits()));
+  liveCleanups.push(liveBus.onFallback(() => void loadDailyCommits()));
+});
+
+onUnmounted(() => {
+  for (const off of liveCleanups) off();
+  liveCleanups.length = 0;
 });
 
 // Filter state is URL-synced (router.replace, no history entries) so deep
@@ -95,11 +120,6 @@ function localDateString(d: Date): string {
 const activitySinceSevenDays = computed(() => localDateString(new Date(Date.now() - 7 * DAY_MS)));
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
-const lastSyncLabel = computed(() => {
-  if (!stats.lastSyncedAt) return 'never';
-  return new Date(stats.lastSyncedAt).toLocaleString();
-});
-
 const windows: ContributorWindow[] = ['7d', '30d'];
 const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Last 30 days');
 
@@ -153,45 +173,79 @@ const projectsPanel = computed(() => {
 
 const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
 
-// Collapsed by default — tracked-set listings can be long. Pagination lives
-// in component state (not the store) so it resets per visit; 10 rows per
-// page keeps the panels visually compact even when fully expanded.
-const PAGE_SIZE = 10;
-const projectsExpanded = ref(false);
-const repositoriesExpanded = ref(false);
-const projectsPage = ref(1);
-const repositoriesPage = ref(1);
-
-const projectsPageCount = computed(() => Math.max(1, Math.ceil(projectsPanel.value.length / PAGE_SIZE)));
-const repositoriesPageCount = computed(() => Math.max(1, Math.ceil(stats.repositories.length / PAGE_SIZE)));
-
-// Clamp current page when the underlying list shrinks (e.g., a re-sync drops
-// a repo). Use computed-with-write semantics so the template doesn't have to
-// worry about out-of-range indices mid-render.
-const projectsPageClamped = computed(() => Math.min(projectsPage.value, projectsPageCount.value));
-const repositoriesPageClamped = computed(() => Math.min(repositoriesPage.value, repositoriesPageCount.value));
-
-const pagedProjects = computed(() => {
-  const start = (projectsPageClamped.value - 1) * PAGE_SIZE;
-  return projectsPanel.value.slice(start, start + PAGE_SIZE);
-});
-
-const pagedRepositories = computed(() => {
-  const start = (repositoriesPageClamped.value - 1) * PAGE_SIZE;
-  return stats.repositories.slice(start, start + PAGE_SIZE);
-});
+// Top 10 repositories by 30-day commit volume. Always-visible
+// leaderboard on the dashboard — the full searchable / paginated
+// repository list lives on the Projects page.
+const topRepos = computed(() =>
+  stats.repositories
+    .slice()
+    .sort((a, b) => b.commits30d - a.commits30d)
+    .slice(0, 10),
+);
 </script>
 
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
-    <header class="mb-6 flex items-baseline justify-between">
-      <div>
-        <h1 class="text-3xl font-bold tracking-tight text-slate-900">ShipShow!</h1>
-        <p class="mt-1 text-sm text-slate-500">Part show, part shitshow.</p>
-      </div>
-      <div class="text-xs text-slate-400">
-        <span v-if="stats.loading">Refreshing…</span>
-        <span v-else>Last synced: {{ lastSyncLabel }}</span>
+    <header class="relative mb-6 h-24 overflow-hidden rounded-lg">
+      <!-- Full-width water. Two layered paths fan across any
+           viewport via preserveAspectRatio="none": a higher cyan
+           layer with sharply irregular peaks, and a softer sky
+           layer rolling underneath. The boat + title sit over
+           this background. -->
+      <svg
+        class="absolute inset-x-0 bottom-0 h-11 w-full"
+        viewBox="0 0 1200 80"
+        preserveAspectRatio="none"
+        xmlns="http://www.w3.org/2000/svg"
+        aria-hidden="true"
+      >
+        <path
+          d="M0 26 L60 14 L120 32 L180 12 L240 26 L300 18 L360 34 L420 14 L480 28 L540 18 L600 22 L660 32 L720 14 L780 26 L840 20 L900 32 L960 14 L1020 28 L1080 14 L1140 24 L1200 18 L1200 80 L0 80 Z"
+          fill="#7dd3fc"
+        />
+        <path
+          d="M0 48 L100 42 L200 50 L300 40 L400 48 L500 42 L600 52 L700 44 L800 50 L900 40 L1000 48 L1100 42 L1200 48 L1200 80 L0 80 Z"
+          fill="#38bdf8"
+          opacity="0.85"
+        />
+      </svg>
+      <!-- Sheen sweep over the water — translucent white gradient
+           translating left-to-right on a slow ease-in-out loop,
+           same trick as the Repositories top-5 bar wave. Pinned to
+           the water layer's bounds so it never leaks onto the boat
+           or title above. Disabled under prefers-reduced-motion. -->
+      <div
+        class="water-sheen pointer-events-none absolute inset-x-0 bottom-0 h-11 overflow-hidden"
+        aria-hidden="true"
+      />
+      <!-- Boat carrying the poop emoji. Bottom-left, sized to sit
+           with hull straddling the wave-line — top half over the
+           transparent area, hull in the water. -->
+      <svg
+        class="absolute bottom-2 left-2 size-20"
+        viewBox="0 0 80 80"
+        xmlns="http://www.w3.org/2000/svg"
+        role="img"
+        aria-label="A boat carrying the poop emoji"
+      >
+        <path d="M38 16 Q40 12 42 16 L42 22 L38 22 Z" fill="#ca8a04" />
+        <ellipse cx="40" cy="26" rx="6" ry="5" fill="#ca8a04" />
+        <ellipse cx="40" cy="36" rx="11" ry="6" fill="#a16207" />
+        <ellipse cx="40" cy="50" rx="18" ry="9" fill="#92400e" />
+        <circle cx="34" cy="48" r="2.6" fill="white" />
+        <circle cx="46" cy="48" r="2.6" fill="white" />
+        <circle cx="34.5" cy="48.5" r="1.4" fill="#1f2937" />
+        <circle cx="46.5" cy="48.5" r="1.4" fill="#1f2937" />
+        <path d="M34 54 Q40 57 46 54" stroke="#1f2937" stroke-width="1.5" fill="none" stroke-linecap="round" />
+        <path d="M8 60 L72 60 L62 72 L18 72 Z" fill="#1d4ed8" />
+      </svg>
+      <!-- Title + subtitle. Pinned to the bottom of the hero so the
+           subtitle's baseline sits just inside the water's bottom
+           edge — the block reads as a caption floating on the wave.
+           Padded left to clear the boat. -->
+      <div class="absolute inset-x-0 bottom-3 pl-24">
+        <h1 class="text-4xl font-bold tracking-tight text-slate-900">ShipShow!</h1>
+        <p class="mt-1 text-base font-bold text-slate-600">Part show, part shitshow.</p>
       </div>
     </header>
 
@@ -216,6 +270,7 @@ const pagedRepositories = computed(() => {
         :glyph-path="GLYPHS.folder"
         tone="cyan"
         :tilt="{ x: 5, y: -3 }"
+        :to="{ name: 'repositories' }"
       />
       <StatCard3D
         label="Projects"
@@ -224,6 +279,7 @@ const pagedRepositories = computed(() => {
         :glyph-path="GLYPHS.rectangleStack"
         tone="fuchsia"
         :tilt="{ x: 3, y: 5 }"
+        :to="{ name: 'projects' }"
       />
       <StatCard3D
         label="Workspace Members"
@@ -261,6 +317,15 @@ const pagedRepositories = computed(() => {
         :tilt="{ x: 6, y: 4 }"
         :to="{ name: 'activity' }"
       />
+    </section>
+
+    <!-- Workspace-wide 365-day commit heatmap. Sits between the stat
+         cards and the tabbed Contributors / Activity panel — the same
+         year-grid component used on user / repo / project detail
+         pages, fed by the unfiltered /api/activity-daily aggregate. -->
+    <section class="mt-8">
+      <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity — last 365 days</h2>
+      <CommitHeatmap :data="dailyCommits" />
     </section>
 
     <section class="mt-8">
@@ -460,97 +525,14 @@ const pagedRepositories = computed(() => {
       </div>
     </section>
 
+    <!-- Top 10 repositories by recent commit volume. Always visible —
+         a workspace-wide leaderboard belongs above the fold rather
+         than behind a collapsible row. The dedicated Projects page
+         carries the full searchable / paginated list. -->
     <section class="mt-8">
-      <button
-        type="button"
-        class="mb-3 flex w-full items-center gap-2 text-left"
-        :aria-expanded="projectsExpanded"
-        aria-controls="projects-panel"
-        @click="projectsExpanded = !projectsExpanded"
-      >
-        <span class="inline-block w-4 text-slate-400" aria-hidden="true">{{ projectsExpanded ? '▾' : '▸' }}</span>
-        <h2 class="text-lg font-semibold text-slate-900">Projects</h2>
-        <span class="text-sm text-slate-400">({{ projectsPanel.length }})</span>
-      </button>
-
-      <div
-        v-show="projectsExpanded"
-        id="projects-panel"
-        class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
-      >
-        <table v-if="projectsPanel.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
-          <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-            <tr>
-              <th class="px-4 py-2 text-left font-medium">Project</th>
-              <th class="px-4 py-2 text-right font-medium">Repos</th>
-              <th class="px-4 py-2 text-right font-medium">Commits 30d</th>
-              <th class="px-4 py-2 text-right font-medium">Last activity</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-100">
-            <tr v-for="p in pagedProjects" :key="p.projectKey">
-              <td class="px-4 py-2">
-                <RouterLink
-                  :to="{ name: 'project', params: { projectKey: p.projectKey } }"
-                  class="font-medium text-slate-900 hover:text-slate-600"
-                >
-                  {{ p.projectKey }}
-                </RouterLink>
-              </td>
-              <td class="px-4 py-2 text-right text-slate-900">{{ p.repoCount }}</td>
-              <td class="px-4 py-2 text-right text-slate-900">{{ p.commits30d }}</td>
-              <td class="px-4 py-2 text-right text-slate-500">{{ formatLastCommit(p.lastActivity) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No projects with tracked repositories.</p>
-
-        <div
-          v-if="projectsPanel.length > PAGE_SIZE"
-          class="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-4 py-2 text-xs text-slate-500"
-        >
-          <span>Page {{ projectsPageClamped }} of {{ projectsPageCount }}</span>
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="rounded px-2 py-1 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="projectsPageClamped <= 1"
-              @click="projectsPage = projectsPageClamped - 1"
-            >
-              Prev
-            </button>
-            <button
-              type="button"
-              class="rounded px-2 py-1 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="projectsPageClamped >= projectsPageCount"
-              @click="projectsPage = projectsPageClamped + 1"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="mt-8">
-      <button
-        type="button"
-        class="mb-3 flex w-full items-center gap-2 text-left"
-        :aria-expanded="repositoriesExpanded"
-        aria-controls="repositories-panel"
-        @click="repositoriesExpanded = !repositoriesExpanded"
-      >
-        <span class="inline-block w-4 text-slate-400" aria-hidden="true">{{ repositoriesExpanded ? '▾' : '▸' }}</span>
-        <h2 class="text-lg font-semibold text-slate-900">Tracked repositories</h2>
-        <span class="text-sm text-slate-400">({{ stats.repositories.length }})</span>
-      </button>
-
-      <div
-        v-show="repositoriesExpanded"
-        id="repositories-panel"
-        class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
-      >
-        <table v-if="stats.repositories.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
+      <h2 class="mb-3 text-lg font-semibold text-slate-900">Top 10 repositories · last 30 days</h2>
+      <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <table v-if="topRepos.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
           <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
             <tr>
               <th class="w-8 px-2 py-2 text-center font-medium"><span class="sr-only">Sync state</span></th>
@@ -562,7 +544,7 @@ const pagedRepositories = computed(() => {
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            <tr v-for="r in pagedRepositories" :key="r.fullName">
+            <tr v-for="r in topRepos" :key="r.fullName" class="hover:bg-slate-50">
               <td class="px-2 py-2 text-center align-middle">
                 <SyncStateIcon :status="r.syncStatus" />
               </td>
@@ -591,47 +573,15 @@ const pagedRepositories = computed(() => {
           </tbody>
         </table>
         <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No tracked repositories.</p>
-
-        <div
-          v-if="stats.repositories.length > PAGE_SIZE"
-          class="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-4 py-2 text-xs text-slate-500"
+        <!-- "More →" footer matches the contributors / activity tab
+             footers — pinned to the bottom edge of the card, lands on
+             the dedicated /repositories index. -->
+        <RouterLink
+          :to="{ name: 'repositories' }"
+          class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
         >
-          <span>Page {{ repositoriesPageClamped }} of {{ repositoriesPageCount }}</span>
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="rounded px-2 py-1 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="repositoriesPageClamped <= 1"
-              @click="repositoriesPage = 1"
-            >
-              First
-            </button>
-            <button
-              type="button"
-              class="rounded px-2 py-1 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="repositoriesPageClamped <= 1"
-              @click="repositoriesPage = repositoriesPageClamped - 1"
-            >
-              Prev
-            </button>
-            <button
-              type="button"
-              class="rounded px-2 py-1 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="repositoriesPageClamped >= repositoriesPageCount"
-              @click="repositoriesPage = repositoriesPageClamped + 1"
-            >
-              Next
-            </button>
-            <button
-              type="button"
-              class="rounded px-2 py-1 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="repositoriesPageClamped >= repositoriesPageCount"
-              @click="repositoriesPage = repositoriesPageCount"
-            >
-              Last
-            </button>
-          </div>
-        </div>
+          More →
+        </RouterLink>
       </div>
     </section>
 
@@ -661,5 +611,43 @@ const pagedRepositories = computed(() => {
 
 .group:hover .share-bar-sheen {
   animation: share-bar-wave 0.9s ease-out 1 both;
+}
+
+/* Slow left→right shimmer over the hero water. Same idea as the
+ * Repositories top-5 bar sweep — a soft translucent gradient
+ * translating from one edge to the other on a long ease-in-out
+ * loop. Lives in the .water-sheen overlay div pinned to the water
+ * layer's bounds so the boat / text above stay untouched. */
+@keyframes water-sheen-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  55% {
+    transform: translateX(110%);
+  }
+  100% {
+    transform: translateX(110%);
+  }
+}
+
+.water-sheen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: translateX(-100%);
+  animation: water-sheen-sweep 6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .water-sheen::after {
+    animation: none;
+    display: none;
+  }
 }
 </style>
