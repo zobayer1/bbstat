@@ -32,6 +32,14 @@ const store = useActivityPageStore();
 const liveCleanups: Array<() => void> = [];
 
 onMounted(() => {
+  // Snapshot the URL filters once on entry so the title chips can
+  // disappear when the user later touches a dropdown. Re-mounts (back
+  // button, fresh deep link) re-snapshot naturally.
+  initialFilters.value = {
+    actor: typeof route.query.actor === 'string' ? route.query.actor : undefined,
+    repo: typeof route.query.repo === 'string' ? route.query.repo : undefined,
+    project: typeof route.query.project === 'string' ? route.query.project : undefined,
+  };
   void stats.fetchOverview();
   reload();
   void loadCharts();
@@ -145,6 +153,92 @@ const rangePreset = computed<RangePreset>(() => {
   if (after === localDateStringFor(new Date(Date.now() - 30 * DAY_MS_LOCAL))) return '30d';
   return null;
 });
+
+// Title chips for the structural filters (actor / repo / project).
+// Snapshot the URL values at mount so the chips stick around for
+// filters that arrived from a deep link or a "See all activities →"
+// footer; the snapshot is burned (set to undefined) the moment the
+// user diverges from it via the dropdown. Burning rather than
+// equality-comparing means re-picking the original value later
+// doesn't resurrect the chip — once a filter is user-controlled, it
+// stays user-controlled for the rest of this mount. Time-range chip
+// uses preset-matching (yellow / green / red labels aren't tied to
+// any one user pick) and doesn't share this snapshot.
+interface InitialFilters {
+  actor: string | undefined;
+  repo: string | undefined;
+  project: string | undefined;
+}
+const initialFilters = ref<InitialFilters>({ actor: undefined, repo: undefined, project: undefined });
+
+// Burn snapshots on first divergence. Watch covers all three axes in
+// one pass — the URL goes through `router.replace` so changes flow
+// through `route.query` deterministically and the watcher fires
+// before the chip computeds re-evaluate.
+watch(
+  () => [route.query.actor, route.query.repo, route.query.project] as const,
+  ([nextActor, nextRepo, nextProject]) => {
+    const actor = typeof nextActor === 'string' ? nextActor : undefined;
+    const repo = typeof nextRepo === 'string' ? nextRepo : undefined;
+    const project = typeof nextProject === 'string' ? nextProject : undefined;
+    if (initialFilters.value.actor !== undefined && actor !== initialFilters.value.actor) {
+      initialFilters.value.actor = undefined;
+    }
+    if (initialFilters.value.repo !== undefined && repo !== initialFilters.value.repo) {
+      initialFilters.value.repo = undefined;
+    }
+    if (initialFilters.value.project !== undefined && project !== initialFilters.value.project) {
+      initialFilters.value.project = undefined;
+    }
+  },
+);
+
+// Each chip carries both the rendered label AND the route target for
+// the detail page it represents, so the chip doubles as a quick-jump
+// link back to the surface that pre-applied the filter.
+interface Chip {
+  label: string;
+  to: { name: string; params: Record<string, string | number> };
+}
+function chipFor(
+  current: string | undefined,
+  initial: string | undefined,
+  build: (v: string) => Chip | undefined,
+): Chip | undefined {
+  if (initial === undefined) return undefined;
+  if (current !== initial) return undefined;
+  return build(current);
+}
+
+const chipActor = computed<Chip | undefined>(() =>
+  chipFor(typeof route.query.actor === 'string' ? route.query.actor : undefined, initialFilters.value.actor, (v) => {
+    const id = Number(v);
+    if (!Number.isFinite(id) || id <= 0) return undefined;
+    const contrib = stats.topContributors.find((c) => c.userId === id);
+    return {
+      label: contrib?.displayName ?? `User #${v}`,
+      to: { name: 'user', params: { userId: id } },
+    };
+  }),
+);
+const chipRepo = computed<Chip | undefined>(() =>
+  chipFor(typeof route.query.repo === 'string' ? route.query.repo : undefined, initialFilters.value.repo, (v) => {
+    const [workspace, slug] = v.split('/');
+    if (workspace === undefined || slug === undefined || workspace === '' || slug === '') return undefined;
+    const repo = stats.repositories.find((r) => r.fullName === v);
+    return {
+      label: repo?.slug ?? slug,
+      to: { name: 'repository', params: { workspace, slug } },
+    };
+  }),
+);
+const chipProject = computed<Chip | undefined>(() =>
+  chipFor(
+    typeof route.query.project === 'string' ? route.query.project : undefined,
+    initialFilters.value.project,
+    (v) => ({ label: v, to: { name: 'project', params: { projectKey: v } } }),
+  ),
+);
 
 // Search input is auto-detected: a hex-only string (1–40 chars) → hash
 // mode, anything else → message mode. URL carries them in distinct keys
@@ -395,6 +489,8 @@ function nextCommit(): void {
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
       <h1 class="mt-1 flex flex-wrap items-baseline gap-x-2 text-3xl font-bold tracking-tight text-slate-900">
         <span>Activity</span>
+        <!-- Time-range chip (preset-matched against the URL). Resets
+             automatically when the user picks a custom date. -->
         <span
           v-if="rangePreset === '7d'"
           class="text-base font-medium text-yellow-600"
@@ -416,6 +512,36 @@ function nextCommit(): void {
         >
           [All time]
         </span>
+        <!-- Structural-filter chips. Each one's gate is initial-vs-
+             current; touching the dropdown drifts the current value
+             away from the snapshot and the chip hides. Colours mirror
+             the matching Dashboard stat-card tones (blue / cyan /
+             fuchsia) for a quick visual link back to the landing
+             surface. -->
+        <RouterLink
+          v-if="chipActor !== undefined"
+          :to="chipActor.to"
+          class="text-base font-medium text-blue-600 hover:underline"
+          :aria-label="`Open user detail for ${chipActor.label}`"
+        >
+          [{{ chipActor.label }}]
+        </RouterLink>
+        <RouterLink
+          v-if="chipRepo !== undefined"
+          :to="chipRepo.to"
+          class="text-base font-medium text-cyan-600 hover:underline"
+          :aria-label="`Open repository detail for ${chipRepo.label}`"
+        >
+          [{{ chipRepo.label }}]
+        </RouterLink>
+        <RouterLink
+          v-if="chipProject !== undefined"
+          :to="chipProject.to"
+          class="text-base font-medium text-fuchsia-600 hover:underline"
+          :aria-label="`Open project detail for ${chipProject.label}`"
+        >
+          [{{ chipProject.label }}]
+        </RouterLink>
       </h1>
       <p class="mt-1 text-sm text-slate-500">Every commit and pull request across the workspace, freshest first.</p>
     </header>

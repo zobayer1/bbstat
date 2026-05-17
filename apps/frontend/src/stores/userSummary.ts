@@ -44,6 +44,17 @@ export const useUserSummaryStore = defineStore(
     liveBus.on('tick.commits.complete', () => {
       void applyTickComplete();
     });
+    // Sync-state transitions matter here because the user-detail
+    // "Top repos" table renders the SyncStateIcon — when a repo
+    // auto-trips into the excluded state, the icon's colour should
+    // flip without waiting for a fallback poll. Same on the
+    // operator-driven un-exclude side.
+    liveBus.on('repository.sync-excluded', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('repository.included', () => {
+      void applyTickComplete();
+    });
     liveBus.on('repository.deleted', () => {
       void applyTickComplete();
     });

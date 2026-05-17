@@ -30,6 +30,18 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
 // the repo's own contributors so we only list people who've actually
 // committed to this repo.
 const userOptions = computed(() => activity.value?.contributors ?? []);
+
+// 30-day cutoff as YYYY-MM-DD for the "See all activities →" link.
+// Matches the Activity page's range-preset detection so the title chip
+// lights up "[Last 30 days]" on landing.
+const DAY_MS = 86_400_000;
+function localDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 const filterActor = computed<number | undefined>({
   get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
   set: (v) => {
@@ -45,11 +57,36 @@ const filterActor = computed<number | undefined>({
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
-      <h1 class="mt-1 flex items-center gap-2 text-3xl font-bold tracking-tight text-slate-900">
-        <span>{{ slug }}</span>
-        <SyncStateIcon v-if="activity" :status="activity.repository.syncStatus" />
-      </h1>
+      <div class="mt-1 flex items-baseline justify-between gap-4">
+        <h1 class="flex items-center gap-2 text-3xl font-bold tracking-tight text-slate-900">
+          <span>{{ slug }}</span>
+          <SyncStateIcon v-if="activity" :status="activity.repository.syncStatus" />
+        </h1>
+        <!-- Thin external link to the canonical BB repo page. Sits
+             flush right on the title row so it stays out of the way
+             of the slug + sync-icon group on the left. -->
+        <a
+          :href="`https://bitbucket.org/${workspace}/${slug}`"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="shrink-0 text-xs text-slate-500 hover:text-blue-600"
+          title="View on BitBucket"
+        >
+          View on BitBucket ↗
+        </a>
+      </div>
       <p v-if="activity" class="mt-1 text-sm text-slate-500">
+        <!-- Parent project breadcrumb. Lives in the subtitle so it
+             stays subdued; full repo title above is the headline. -->
+        <template v-if="activity.repository.project">
+          <RouterLink
+            :to="{ name: 'project', params: { projectKey: activity.repository.project } }"
+            class="font-medium text-slate-700 hover:text-slate-900"
+          >
+            {{ activity.repository.project }}
+          </RouterLink>
+          ·
+        </template>
         {{ commits365d }} commits · {{ activity.contributors.length }} contributors
       </p>
     </header>
@@ -66,20 +103,18 @@ const filterActor = computed<number | undefined>({
             <span class="text-emerald-700">+{{ activity.diffStats.additions7d.toLocaleString() }}</span>
             <span class="ml-2 text-rose-700">−{{ activity.diffStats.deletions7d.toLocaleString() }}</span>
           </template>
-          <template #hint>excludes merges</template>
         </StatCard>
         <StatCard v-if="activity.diffStats" label="Code changes — last 30 days">
           <template #value>
             <span class="text-emerald-700">+{{ activity.diffStats.additions30d.toLocaleString() }}</span>
             <span class="ml-2 text-rose-700">−{{ activity.diffStats.deletions30d.toLocaleString() }}</span>
           </template>
-          <template #hint>excludes merges</template>
         </StatCard>
       </section>
 
       <section class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity — last 365 days</h2>
-        <CommitHeatmap :data="activity.dailyCommits" />
+        <CommitHeatmap :data="activity.dailyCommits" scope="repo" />
       </section>
 
       <section class="mt-8">
@@ -145,7 +180,18 @@ const filterActor = computed<number | undefined>({
             </label>
           </div>
         </div>
-        <ActivityFeed :repo="fullName" :actor="filterActor" height="24rem" />
+        <ActivityFeed :repo="fullName" :actor="filterActor" height="24rem">
+          <template #footer>
+            <!-- "See all activities →" pre-applies this repo so the
+                 dedicated /activity page lands on the same scope. -->
+            <RouterLink
+              :to="{ name: 'activity', query: { repo: fullName, after: activitySinceThirtyDays } }"
+              class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            >
+              See all activities →
+            </RouterLink>
+          </template>
+        </ActivityFeed>
       </section>
     </template>
   </main>

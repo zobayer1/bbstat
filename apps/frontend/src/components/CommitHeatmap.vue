@@ -16,9 +16,19 @@ interface DailyCommit {
   commits: number;
 }
 
-const props = defineProps<{
-  data: DailyCommit[];
-}>();
+// `scope` controls the colour palette so the three contexts the
+// heatmap shows up in — workspace-wide / per-user / per-repo — are
+// visually distinguishable at a glance. Default `'global'` keeps the
+// existing blue ramp for the Dashboard + Activity-page placements
+// (and the project-detail page, which is a workspace-aggregate
+// rollup over a project's repos).
+const props = withDefaults(
+  defineProps<{
+    data: DailyCommit[];
+    scope?: 'global' | 'user' | 'repo';
+  }>(),
+  { scope: 'global' },
+);
 
 // Layout — sized so the chart plus the summary sidebar fits inside
 // max-w-6xl without forcing a horizontal scroll on the chart column.
@@ -34,10 +44,19 @@ const TOP_PAD = 14; // month labels
 const WIDTH = LEFT_PAD + COLS * STEP - GAP;
 const HEIGHT = TOP_PAD + ROWS * STEP - GAP;
 
-// Blue intensity ramp from neutral gray (empty) through Tailwind's
-// blue-200 / 400 / 600 / 800. Steps are roughly equal-perceptual so the
-// busiest days are clearly the darkest.
-const PALETTE = ['#ebedf0', '#bfdbfe', '#60a5fa', '#2563eb', '#1e40af'] as const;
+// Per-scope intensity ramp, neutral gray (empty) → deepest shade
+// (busiest day). Steps are roughly equal-perceptual so the busiest
+// days are clearly the darkest within each palette. Same first slot
+// for every scope so empty cells look identical across pages.
+const PALETTES = {
+  // Workspace-wide blue (Tailwind blue-200 / 400 / 600 / 800).
+  global: ['#ebedf0', '#bfdbfe', '#60a5fa', '#2563eb', '#1e40af'],
+  // Per-user violet (Tailwind violet-200 / 400 / 600 / 800).
+  user: ['#ebedf0', '#ddd6fe', '#a78bfa', '#7c3aed', '#5b21b6'],
+  // Per-repository emerald (Tailwind emerald-200 / 400 / 600 / 800).
+  repo: ['#ebedf0', '#a7f3d0', '#34d399', '#059669', '#065f46'],
+} as const;
+const PALETTE = computed(() => PALETTES[props.scope]);
 
 // `current_date - 364` on the backend → 365 days inclusive of today. The
 // grid is 53 columns × 7 rows = 371 cells, so 6 cells fall outside the data
@@ -115,7 +134,7 @@ const cells = computed<Cell[]>(() => {
           year: 'numeric',
         }),
         commits,
-        fill: PALETTE[fillIndex]!,
+        fill: PALETTE.value[fillIndex]!,
         x: LEFT_PAD + col * STEP,
         y: TOP_PAD + row * STEP,
         inWindow,

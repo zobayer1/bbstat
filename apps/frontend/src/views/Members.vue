@@ -12,6 +12,12 @@ import type { ContributorWindow, WorkspaceMember } from '@/api/client';
 const store = useMembersStore();
 const stats = useStatsStore();
 
+// Workspace for the "View on BitBucket" header link. Derived from
+// the first tracked repo — single-workspace deployment by design,
+// so any row's workspace is canonical. Empty until stats land,
+// which hides the link via v-if.
+const workspace = computed(() => stats.repositories[0]?.workspace ?? '');
+
 onMounted(() => {
   void store.fetch();
   // Workspace total comes from the stats overview (counts every ingested
@@ -194,7 +200,22 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
-      <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">Workspace Members</h1>
+      <div class="mt-1 flex items-baseline justify-between gap-4">
+        <h1 class="text-3xl font-bold tracking-tight text-slate-900">Workspace Members</h1>
+        <!-- Thin external link to BB's workspace members directory.
+             Hidden until stats land so the URL is never built from an
+             empty workspace string. -->
+        <a
+          v-if="workspace"
+          :href="`https://bitbucket.org/${workspace}/workspace/members/`"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="shrink-0 text-xs text-slate-500 hover:text-blue-600"
+          title="View on BitBucket"
+        >
+          View on BitBucket ↗
+        </a>
+      </div>
       <!-- Active vs total spelt out so the page reconciles cleanly with
            the Dashboard's "Workspace Members" card, which counts every
            ingested user (including not-yet-active testers). Falls back
@@ -219,7 +240,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
          the donut vs the Lorenz plot consume. -->
     <section class="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
       <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 class="mb-4 text-xs font-medium uppercase tracking-wider text-slate-500">Activity status</h2>
+        <h2 class="mb-4 text-center text-xs font-medium uppercase tracking-wider text-slate-500">Activity status</h2>
         <div class="flex flex-1 items-center justify-center">
           <ActivityStatusDonut
             :buckets="activityBuckets"
@@ -233,7 +254,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
         </p>
       </div>
       <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 class="mb-4 text-xs font-medium uppercase tracking-wider text-slate-500">
+        <h2 class="mb-4 text-center text-xs font-medium uppercase tracking-wider text-slate-500">
           Commit concentration · {{ store.window }}
         </h2>
         <div class="flex flex-1 items-center">

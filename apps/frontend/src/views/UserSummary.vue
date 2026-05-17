@@ -27,6 +27,18 @@ onMounted(() => {
 });
 watch(userId, (next) => void store.fetch(next));
 
+// 30-day cutoff as YYYY-MM-DD for the "See all activities →" link
+// below. Matches the Activity page's range-preset detection so the
+// title chip lights up "[Last 30 days]" on landing.
+const DAY_MS = 86_400_000;
+function localDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
+
 // Project + repo filters narrow this user's activity feed. User is
 // pinned (the page subject), so we don't render a user dropdown. The
 // composable handles the project↔repo interlock — picking either one
@@ -74,7 +86,7 @@ const projectOptions = computed<string[]>(() => {
 
       <section class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity — last 365 days</h2>
-        <CommitHeatmap :data="summary.dailyCommits" />
+        <CommitHeatmap :data="summary.dailyCommits" scope="user" />
       </section>
 
       <section class="mt-8">
@@ -173,7 +185,18 @@ const projectOptions = computed<string[]>(() => {
             </label>
           </div>
         </div>
-        <ActivityFeed :actor="userId" :project="filterProject" :repo="filterRepo" height="24rem" />
+        <ActivityFeed :actor="userId" :project="filterProject" :repo="filterRepo" height="24rem">
+          <template #footer>
+            <!-- "See all activities →" pre-applies this user so the
+                 dedicated /activity page lands on the same scope. -->
+            <RouterLink
+              :to="{ name: 'activity', query: { actor: userId, after: activitySinceThirtyDays } }"
+              class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            >
+              See all activities →
+            </RouterLink>
+          </template>
+        </ActivityFeed>
       </section>
     </template>
   </main>
