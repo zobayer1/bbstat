@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue';
-import { useRoute, RouterLink } from 'vue-router';
+import { useRoute, useRouter, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
@@ -9,6 +9,7 @@ import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useRepoActivityStore } from '@/stores/repoActivity';
 
 const route = useRoute();
+const router = useRouter();
 const store = useRepoActivityStore();
 
 const workspace = computed(() => String(route.params.workspace));
@@ -23,6 +24,21 @@ const commits365d = computed(() => activity.value?.dailyCommits.reduce((acc, d) 
 
 onMounted(() => void store.fetch(workspace.value, slug.value));
 watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
+
+// Repo (and therefore its project) is pinned by the route — only the
+// user axis is meaningfully filterable here. Source the dropdown from
+// the repo's own contributors so we only list people who've actually
+// committed to this repo.
+const userOptions = computed(() => activity.value?.contributors ?? []);
+const filterActor = computed<number | undefined>({
+  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
+  set: (v) => {
+    const next = { ...route.query };
+    if (v === undefined) delete next.actor;
+    else next.actor = String(v);
+    void router.replace({ query: next });
+  },
+});
 </script>
 
 <template>
@@ -108,8 +124,28 @@ watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
       </section>
 
       <section class="mt-8">
-        <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
-        <ActivityFeed :repo="fullName" height="24rem" />
+        <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+          <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
+          <!-- Repo (and its project) is pinned by the route — only the
+               user axis is meaningfully filterable. Project filter is
+               omitted as it would have a single fixed option. -->
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <label for="repo-filter-user" class="flex items-center gap-1">
+              <span class="text-slate-500">User:</span>
+              <select
+                id="repo-filter-user"
+                v-model.number="filterActor"
+                name="repo-filter-user"
+                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+                aria-label="Filter by user"
+              >
+                <option :value="undefined">All</option>
+                <option v-for="u in userOptions" :key="u.userId" :value="u.userId">{{ u.displayName }}</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <ActivityFeed :repo="fullName" :actor="filterActor" height="24rem" />
       </section>
     </template>
   </main>

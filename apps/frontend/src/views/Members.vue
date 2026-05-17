@@ -6,13 +6,26 @@ import ActivityStatusDonut, { type ActivityBucket } from '@/components/ActivityS
 import LorenzCurve from '@/components/LorenzCurve.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import { useMembersStore } from '@/stores/members';
+import { useStatsStore } from '@/stores/stats';
 import type { ContributorWindow, WorkspaceMember } from '@/api/client';
 
 const store = useMembersStore();
+const stats = useStatsStore();
 
 onMounted(() => {
   void store.fetch();
+  // Workspace total comes from the stats overview (counts every ingested
+  // user row, including those with zero commits). The members API only
+  // returns rows with commitsAllTime > 0, so we surface both numbers in
+  // the subtitle to explain the gap (e.g., "36 of 49 …").
+  void stats.fetchOverview();
 });
+
+const totalMembers = computed<number | null>(() => stats.overview?.users ?? null);
+const activeMembers = computed<number>(() => store.members.length);
+const inactiveMembers = computed<number | null>(() =>
+  totalMembers.value === null ? null : Math.max(0, totalMembers.value - activeMembers.value),
+);
 
 const windows: ContributorWindow[] = ['7d', '30d'];
 const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Last 30 days');
@@ -182,7 +195,17 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
       <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">Workspace Members</h1>
-      <p class="mt-1 text-sm text-slate-500">Every contributor we've ingested at least one commit for.</p>
+      <!-- Active vs total spelt out so the page reconciles cleanly with
+           the Dashboard's "Workspace Members" card, which counts every
+           ingested user (including not-yet-active testers). Falls back
+           to the bare description while the overview is in flight. -->
+      <p v-if="totalMembers !== null" class="mt-1 text-sm text-slate-500">
+        {{ activeMembers }} of {{ totalMembers }} workspace member<span v-if="totalMembers !== 1">s</span> with at least
+        one ingested commit<span v-if="inactiveMembers && inactiveMembers > 0">
+          · {{ inactiveMembers }} not yet active</span
+        >.
+      </p>
+      <p v-else class="mt-1 text-sm text-slate-500">Every contributor we've ingested at least one commit for.</p>
     </header>
 
     <!-- Charts run above the filter row because they aggregate the entire
@@ -224,16 +247,38 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
 
     <section class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-3">
-        <input
-          id="members-search"
-          v-model="search"
-          type="search"
-          name="members-search"
-          autocomplete="off"
-          placeholder="Search by name, username, or email…"
-          class="w-64 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400"
-          aria-label="Search workspace members"
-        />
+        <!-- Magnifying-glass affordance anchored inside the input.
+             `relative` on the wrapper + `absolute` on the icon keeps
+             the icon visually inside the field without participating
+             in flex layout (so the field stays its declared width).
+             Input gets left padding to make room for it. -->
+        <div class="relative">
+          <svg
+            class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke-width="1.5"
+            stroke="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"
+            />
+          </svg>
+          <input
+            id="members-search"
+            v-model="search"
+            type="search"
+            name="members-search"
+            autocomplete="off"
+            placeholder="Search by name, username, or email…"
+            class="w-80 rounded-md border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400"
+            aria-label="Search workspace members"
+          />
+        </div>
         <div
           class="inline-flex shrink-0 overflow-hidden rounded-md border border-slate-200 text-xs"
           role="group"

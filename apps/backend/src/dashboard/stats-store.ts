@@ -219,11 +219,25 @@ export interface ActivityFilters {
   actor: number | null;
   repo: { workspace: string; slug: string } | null;
   project: string | null;
-  // Cursor — only entries with occurredAt strictly less than this. Null on
-  // the first page; subsequent pages pass the last entry's occurredAt back.
+  // Cursor / range upper bound — only entries with occurredAt strictly less
+  // than this. Null on the first page; subsequent pages pass the last
+  // entry's occurredAt back. Also used by the Activity page's date-range
+  // upper bound when no further cursor advance has happened.
   before: Date | null;
+  // Date-range lower bound (inclusive). Powers the dedicated Activity
+  // page's range picker. PRs use bitbucket_updated_at against this.
+  after: Date | null;
+  // Lowercased hex commit-SHA prefix (1–40 chars). When set, the PR
+  // branch is suppressed since PRs don't carry a SHA.
+  hashPrefix: string | null;
+  // Free-text search. Commits use Postgres FTS over `message_tsv`
+  // (`plainto_tsquery('simple', …)`); PRs use ILIKE on `title`.
+  message: string | null;
   // Default 50, max 200 — enforced at the route layer.
   limit: number;
+  // Offset for the Activity page's First/Last navigation. Zero for
+  // the embedded cursor-paginated feed (which uses `before` instead).
+  offset: number;
 }
 
 // Derived sync health for a tracked repository, surfaced to the dashboard
@@ -332,6 +346,33 @@ export interface StatsStore {
   // can skip / duplicate). Read directly from Postgres — list endpoints
   // bypass Redis per CLAUDE.md's "Redis is user-summary only" rule.
   getActivity(filters: ActivityFilters): Promise<ActivityEntry[]>;
+
+  // 365-day daily commit aggregate for the Activity page year-grid
+  // heatmap. Returns `{ date, commits }[]` with one row per day that
+  // had at least one commit (zero-commit days are omitted; the frontend
+  // bucket function treats absence as zero). Filterable by actor / repo
+  // / project to match the page's other narrowing controls; date range,
+  // hash search, and message search are intentionally ignored — the
+  // heatmap always answers "what does the last year look like for this
+  // slice?" regardless of which page is currently displayed.
+  getActivityDaily(filters: ActivityDailyFilters): Promise<DailyCommitPoint[]>;
+
+  // Total entries matching the given filter set (commits + PRs union).
+  // Powers the Activity page's "Page X of Y" indicator and Last button.
+  // Same filter shape as getActivity but limit / offset are ignored —
+  // count is over the full filtered universe.
+  getActivityCount(filters: ActivityFilters): Promise<number>;
+}
+
+export interface ActivityDailyFilters {
+  actor: number | null;
+  repo: { workspace: string; slug: string } | null;
+  project: string | null;
+}
+
+export interface DailyCommitPoint {
+  date: string; // YYYY-MM-DD
+  commits: number;
 }
 
 export function createDrizzleStatsStore(db: Database): StatsStore {
@@ -1018,9 +1059,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getActivity(filters) {
-      const { actor, project, before, limit } = filters;
+      const { actor, project, before, after, hashPrefix, message, limit, offset } = filters;
       const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
       const beforeIso = before === null ? null : before.toISOString();
+      const afterIso = after === null ? null : after.toISOString();
 
       // Two-branch UNION ALL with filter predicates pushed into each subquery
       // (we don't want to pull rows that the outer ORDER BY + LIMIT will
@@ -1090,6 +1132,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
             AND (${project}::text IS NULL OR r.project = ${project}::text)
             AND (${beforeIso}::timestamptz IS NULL OR c.authored_at < ${beforeIso}::timestamptz)
+            AND (${afterIso}::timestamptz IS NULL OR c.authored_at >= ${afterIso}::timestamptz)
+            AND (${hashPrefix}::text IS NULL OR c.sha LIKE ${hashPrefix}::text || '%')
+            AND (${message}::text IS NULL OR c.message_tsv @@ plainto_tsquery('simple', ${message}::text))
 
           UNION ALL
 
@@ -1123,9 +1168,14 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
             AND (${project}::text IS NULL OR r.project = ${project}::text)
             AND (${beforeIso}::timestamptz IS NULL OR pr.bitbucket_updated_at < ${beforeIso}::timestamptz)
+            AND (${afterIso}::timestamptz IS NULL OR pr.bitbucket_updated_at >= ${afterIso}::timestamptz)
+            -- Hash search targets commit SHAs; PRs have no SHA so the
+            -- whole PR branch is suppressed when hashPrefix is set.
+            AND ${hashPrefix}::text IS NULL
+            AND (${message}::text IS NULL OR pr.title ILIKE '%' || ${message}::text || '%')
         ) AS feed
         ORDER BY occurred_at DESC, kind, id DESC
-        LIMIT ${limit}
+        LIMIT ${limit} OFFSET ${offset}
       `);
 
       return result.rows.map((r): ActivityEntry => {
@@ -1169,6 +1219,66 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           occurredAt,
         };
       });
+    },
+
+    async getActivityCount(filters) {
+      const { actor, project, before, after, hashPrefix, message } = filters;
+      const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
+      const beforeIso = before === null ? null : before.toISOString();
+      const afterIso = after === null ? null : after.toISOString();
+      // Two-branch sum — same WHERE predicates as getActivity. PR
+      // branch is suppressed when hashPrefix is set (PRs don't carry
+      // a SHA), matching the feed query exactly so the count never
+      // disagrees with the data.
+      const result = await db.execute<{ total: number }>(sql`
+        SELECT
+          (
+            (SELECT count(*) FROM commits c
+             JOIN repositories r ON r.id = c.repository_id
+             WHERE
+               (${actor}::int IS NULL OR c.author_user_id = ${actor}::int)
+               AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
+               AND (${project}::text IS NULL OR r.project = ${project}::text)
+               AND (${beforeIso}::timestamptz IS NULL OR c.authored_at < ${beforeIso}::timestamptz)
+               AND (${afterIso}::timestamptz IS NULL OR c.authored_at >= ${afterIso}::timestamptz)
+               AND (${hashPrefix}::text IS NULL OR c.sha LIKE ${hashPrefix}::text || '%')
+               AND (${message}::text IS NULL OR c.message_tsv @@ plainto_tsquery('simple', ${message}::text))
+            ) +
+            (SELECT count(*) FROM pull_requests pr
+             JOIN repositories r ON r.id = pr.repository_id
+             WHERE
+               (${actor}::int IS NULL OR pr.author_user_id = ${actor}::int)
+               AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
+               AND (${project}::text IS NULL OR r.project = ${project}::text)
+               AND (${beforeIso}::timestamptz IS NULL OR pr.bitbucket_updated_at < ${beforeIso}::timestamptz)
+               AND (${afterIso}::timestamptz IS NULL OR pr.bitbucket_updated_at >= ${afterIso}::timestamptz)
+               AND ${hashPrefix}::text IS NULL
+               AND (${message}::text IS NULL OR pr.title ILIKE '%' || ${message}::text || '%')
+            )
+          )::int AS total
+      `);
+      return result.rows[0]?.total ?? 0;
+    },
+
+    async getActivityDaily(filters) {
+      const { actor, project } = filters;
+      const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
+      // Read directly from commit_daily — keeps the query cheap regardless
+      // of how large `commits` grows. JOIN on repositories only when a
+      // repo / project filter is set, but we always need it for the
+      // workspace/slug match, so keep it unconditionally.
+      const result = await db.execute<{ date: string; commits: number }>(sql`
+        SELECT cd.day::text AS date, sum(cd.commit_count)::int AS commits
+        FROM commit_daily cd
+        JOIN repositories r ON r.id = cd.repository_id
+        WHERE cd.day >= current_date - 364
+          AND (${actor}::int IS NULL OR cd.author_user_id = ${actor}::int)
+          AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
+          AND (${project}::text IS NULL OR r.project = ${project}::text)
+        GROUP BY cd.day
+        ORDER BY cd.day
+      `);
+      return result.rows.map((r) => ({ date: r.date, commits: r.commits }));
     },
   };
 }

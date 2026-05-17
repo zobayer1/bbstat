@@ -131,6 +131,19 @@ Standalone roster page reachable from the Dashboard's "Workspace Members" stat c
 
 **Status:** Landed across `297548d`..`09802b8` (5 commits). Members page, charts, SSE / sparkline, email + admin backfill, and `CACHE_VERSION` cache invalidation.
 
+#### Phase 4 follow-ups — dedicated `/activity` page + dashboard polish ✅ Landed
+
+Standalone activity-stream page reachable from the Dashboard's three commit cards, plus filter / chart / UX polish across the surrounding surfaces.
+
+- **`/activity` page** (`apps/frontend/src/views/Activity.vue`) — full unified commit + PR stream with project / repository / user dropdowns, date-range picker (defaults the "to" bound to today), single-input hash-or-message search (auto-detects mode by hex regex), 100-per-page offset pagination with First / Prev / Next / Last in a top + bottom row, and a 365-day year-grid `CommitHeatmap` scoped only by project / repo / user (date / hash / message filters don't narrow it). H1 chips out the active range with the matching stat-card tone (yellow-600 / green-600 / red-600) when the URL matches one of the three Dashboard shortcuts.
+- **Backend additions**: `/api/activity` accepts `after`, `hashPrefix`, `message`, `offset` on top of the existing filters; new `/api/activity-count` returns `{ total }` for the same filter shape (powers the page-count indicator + Last button); new `/api/activity-daily` returns 365 days of `{ date, commits }` from `commit_daily` for the heatmap. Commit-message search is backed by a `tsvector` generated column (`message_tsv`) + GIN index; hash-prefix search by a `text_pattern_ops` btree on `sha`.
+- **Filter interlock composable** (`apps/frontend/src/composables/useActivityFilters.ts`) — picking a repo auto-fills its project, picking a project trims the repo dropdown and clears a now-mismatched repo selection. URL-synced, single-replace per change. Used by Dashboard, Activity, and User detail pages; the Project detail page uses the same composable with `pinProject` to keep the repo dropdown scoped without dragging the (already-pinned) project into the query string.
+- **Detail-page filters** — Activity panels on user / repo / project detail pages now carry the two filters not pinned by the route (User → project + repo, Project → repo + user, Repo → user only since its project is fixed). User options come from each page's own contributor list when one exists.
+- **Dashboard stat-card refresh** — row 2 reordered to `Commits last 7 days / 30 days / all-time`, each card a `StatCard3D` with a Heroicons glyph and per-card tilt; tones follow CMY-RGB with Workspace Members keeping its original blue. The three commit cards link to `/activity` with the matching `?after=` window pre-applied. Activity tab gains a `More →` footer that mirrors the Top Contributors footer (members link / activity link with 7-day range).
+- **Members subtitle reconciliation** — Members page header surfaces both the active and workspace-total counts so the page no longer reads as a count mismatch when arriving from the Dashboard's "Workspace Members" card.
+- **Migration**: `ALTER TABLE commits ADD COLUMN message_tsv tsvector GENERATED ALWAYS AS …` + GIN + btree (Drizzle `0014_outstanding_sue_storm.sql` + Flyway `V1_15__commits_message_fts_and_sha_prefix.sql`).
+- **Docs**: [`docs/sync.md`](sync.md) covers the extended `/api/activity` query schema and the two sibling endpoints (`/api/activity-count`, `/api/activity-daily`).
+
 ### Phase 5 — Webhook trigger + admin UI (~3–4 days, stretch)
 
 Kill polling for hot repos; give operators visibility and self-service.

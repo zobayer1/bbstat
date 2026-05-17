@@ -1,25 +1,55 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute, RouterLink } from 'vue-router';
+import { useRoute, useRouter, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import { useProjectStatsStore } from '@/stores/projectStats';
+import { useStatsStore } from '@/stores/stats';
+import { useActivityFilters } from '@/composables/useActivityFilters';
 
 const route = useRoute();
+const router = useRouter();
 const store = useProjectStatsStore();
+const globalStats = useStatsStore();
 
 const projectKey = computed(() => String(route.params.projectKey));
 const stats = computed(() => store.byProjectKey[projectKey.value]);
 const loading = computed(() => store.loading[projectKey.value] === true);
 const error = computed(() => store.error[projectKey.value] ?? null);
 
-onMounted(() => void store.fetch(projectKey.value));
+onMounted(() => {
+  void store.fetch(projectKey.value);
+  // Stats store feeds the repo dropdown options below — a deep link
+  // into /projects/:key won't have the dashboard's prior fetch.
+  void globalStats.fetchOverview();
+});
 watch(projectKey, (next) => {
   // Reset pagination when navigating between projects.
   repositoriesPage.value = 1;
   void store.fetch(next);
+});
+
+// Project is pinned via route params, so we expose a repo + user filter
+// pair only. The repo dropdown is auto-trimmed to this project's repos
+// via the composable's `pinProject` option.
+const { repoModel: filterRepo, repoOptions: repoFilterOptions } = useActivityFilters({
+  repositories: computed(() => globalStats.repositories),
+  pinProject: () => projectKey.value,
+});
+
+// User dropdown reads from the project's own top contributors — more
+// relevant than the workspace-wide leaderboard.
+const userOptions = computed(() => stats.value?.topContributors ?? []);
+const filterActor = computed<number | undefined>({
+  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
+  set: (v) => {
+    const next = { ...route.query };
+    if (v === undefined) delete next.actor;
+    else next.actor = String(v);
+    void router.replace({ query: next });
+  },
 });
 
 const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
@@ -190,8 +220,42 @@ const pagedRepositories = computed(() => {
       </section>
 
       <section class="mt-8">
-        <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
-        <ActivityFeed :project="projectKey" height="24rem" />
+        <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+          <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
+          <!-- Project is pinned by the route, so the user gets a repo
+               filter (auto-trimmed to this project's repos by the
+               composable) plus a user filter sourced from the project's
+               own contributor list. -->
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <label for="project-filter-repo" class="flex items-center gap-1">
+              <span class="text-slate-500">Repository:</span>
+              <select
+                id="project-filter-repo"
+                v-model="filterRepo"
+                name="project-filter-repo"
+                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+                aria-label="Filter by repository"
+              >
+                <option :value="undefined">All</option>
+                <option v-for="r in repoFilterOptions" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+              </select>
+            </label>
+            <label for="project-filter-user" class="flex items-center gap-1">
+              <span class="text-slate-500">User:</span>
+              <select
+                id="project-filter-user"
+                v-model.number="filterActor"
+                name="project-filter-user"
+                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+                aria-label="Filter by user"
+              >
+                <option :value="undefined">All</option>
+                <option v-for="u in userOptions" :key="u.userId" :value="u.userId">{{ u.displayName }}</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <ActivityFeed :project="projectKey" :repo="filterRepo" :actor="filterActor" height="24rem" />
       </section>
     </template>
   </main>

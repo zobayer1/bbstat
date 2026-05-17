@@ -10,9 +10,9 @@
 // the previous repo's pages around for instant return.
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { RouterLink } from 'vue-router';
 import { MAX_ENTRIES_PER_FILTER, useActivityStore, type ActivityFilters } from '@/stores/activity';
 import type { ActivityCommit, ActivityEntry } from '@/api/client';
+import ActivityRow from './ActivityRow.vue';
 import CommitDetailModal from './CommitDetailModal.vue';
 
 const props = defineProps<{
@@ -88,40 +88,6 @@ function entryKey(e: ActivityEntry): string {
   return `p-${e.repository.fullName}-${e.prId}-${e.occurredAt}`;
 }
 
-function commitTitle(message: string): string {
-  // Show only the first line — long commit messages would push the
-  // timestamp off the row otherwise.
-  return message.split('\n')[0] ?? '';
-}
-
-// Web URL on bitbucket.org (NOT the API host) for the row's canonical
-// upstream view. Used by the small external-link icon at the right edge
-// of each title line. Hardcoded to the Cloud host since this project
-// targets BitBucket Cloud per CLAUDE.md; self-hosted Server would need a
-// config-driven base URL.
-function bitbucketUrl(entry: ActivityEntry): string {
-  const { workspace, slug } = entry.repository;
-  if (entry.kind === 'commit') return `https://bitbucket.org/${workspace}/${slug}/commits/${entry.sha}`;
-  return `https://bitbucket.org/${workspace}/${slug}/pull-requests/${entry.prId}`;
-}
-
-function prBadgeClass(state: 'OPEN' | 'MERGED' | 'DECLINED' | 'SUPERSEDED'): string {
-  switch (state) {
-    case 'OPEN':
-      return 'bg-blue-100 text-blue-700';
-    case 'MERGED':
-      return 'bg-violet-100 text-violet-700';
-    case 'DECLINED':
-      return 'bg-rose-100 text-rose-700';
-    case 'SUPERSEDED':
-      return 'bg-slate-100 text-slate-500';
-  }
-}
-
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString();
-}
-
 // Commit detail modal — clicking a commit's title / sha opens a centered
 // dialog with the full message, stats, and prev/next navigation through
 // commits in the currently-loaded feed. PR entries are deliberately
@@ -168,141 +134,7 @@ function nextCommit(): void {
 
     <div ref="scrollContainer" :style="height !== undefined ? { height, overflowY: 'auto' } : {}">
       <ul v-if="entries.length > 0" class="divide-y divide-slate-100">
-        <li v-for="entry in entries" :key="entryKey(entry)" class="flex items-start gap-3 px-4 py-3 text-sm">
-          <div v-if="entry.kind === 'commit'" class="mt-0.5 flex w-16 shrink-0 flex-col items-stretch gap-1">
-            <span
-              class="inline-block rounded bg-emerald-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-emerald-700"
-            >
-              commit
-            </span>
-            <span
-              v-if="entry.isMerge"
-              class="inline-block rounded bg-violet-100 px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-violet-700"
-              title="Merge commit — additions / deletions cover the merged branch's full delta, not authorship volume"
-            >
-              merge
-            </span>
-          </div>
-          <span
-            v-else
-            :class="prBadgeClass(entry.state)"
-            class="mt-0.5 inline-block w-16 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wider"
-          >
-            {{ entry.state }}
-          </span>
-
-          <div class="min-w-0 flex-1">
-            <div class="flex items-baseline gap-2">
-              <p class="min-w-0 flex-1 truncate text-slate-900">
-                <RouterLink
-                  :to="{
-                    name: 'repository',
-                    params: { workspace: entry.repository.workspace, slug: entry.repository.slug },
-                  }"
-                  class="font-medium hover:text-slate-600"
-                >
-                  {{ entry.repository.slug }}
-                </RouterLink>
-                <span v-if="entry.kind === 'commit'" class="text-slate-700">
-                  —
-                  <!-- Sha + visual separator are static labels — the modal
-                       trigger lives ONLY on the title, so the hover-underline
-                       doesn't sweep across the monospaced sha and the
-                       slate-400 dash (which read awkwardly underlined). -->
-                  <span class="font-mono text-xs text-slate-500">{{ entry.sha.slice(0, 7) }}</span>
-                  <span class="mx-1.5 text-slate-400">—</span>
-                  <button
-                    type="button"
-                    class="cursor-pointer text-left font-medium text-slate-800 hover:underline"
-                    @click="openCommit(entry.sha)"
-                  >
-                    {{ commitTitle(entry.message) }}
-                  </button>
-                </span>
-                <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
-              </p>
-              <!-- Open the canonical view on bitbucket.org in a new tab.
-                   Deliberately separate from the commit/PR title link so
-                   clicking the title still opens our local detail modal /
-                   page rather than navigating away. `rel=noopener` is
-                   standard for target=_blank links. -->
-              <a
-                :href="bitbucketUrl(entry)"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="shrink-0 text-slate-400 transition-colors hover:text-blue-600"
-                :title="entry.kind === 'commit' ? 'Open commit on BitBucket' : 'Open pull request on BitBucket'"
-                :aria-label="entry.kind === 'commit' ? 'Open commit on BitBucket' : 'Open pull request on BitBucket'"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke-width="1.5"
-                  stroke="currentColor"
-                  class="size-4"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
-                  />
-                </svg>
-              </a>
-            </div>
-            <p class="mt-1.5 text-xs text-slate-500">
-              <span v-if="entry.author">
-                <RouterLink
-                  :to="{ name: 'user', params: { userId: entry.author.userId } }"
-                  class="hover:text-slate-700"
-                >
-                  {{ entry.author.displayName }}
-                </RouterLink>
-              </span>
-              <span v-else class="italic">anonymous</span>
-              ·
-              <span>{{ formatTime(entry.occurredAt) }}</span>
-              <span v-if="entry.kind === 'commit' && entry.diffStatsUnavailable" class="inline-flex items-baseline">
-                ·
-                <!-- BB returned HTTP 555 (compute timeout) on /diffstat for
-                     this commit too many times; the orchestrator gave up
-                     and stamped it with zeros. Render an amber warning
-                     icon in place of the +/-/files line so the row reads
-                     as "stats unavailable" instead of misleadingly "no
-                     changes". Tooltip surfaces the underlying cause. -->
-                <span
-                  class="ml-1 inline-flex cursor-help items-baseline text-amber-600 hover:text-amber-700"
-                  title="BitBucket compute timeout (HTTP 555) — diff stats unavailable for this commit"
-                  aria-label="Diff stats unavailable: BitBucket compute timeout"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke-width="1.5"
-                    stroke="currentColor"
-                    class="size-3.5 self-center"
-                    aria-hidden="true"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
-                    />
-                  </svg>
-                  <span class="ml-1">stats unavailable</span>
-                </span>
-              </span>
-              <span v-else-if="entry.kind === 'commit'">
-                · +{{ entry.additions }} −{{ entry.deletions }}
-                <span v-if="entry.filesChanged > 0">
-                  · {{ entry.filesChanged }} file<span v-if="entry.filesChanged !== 1">s</span>
-                </span>
-              </span>
-              <span v-else> · {{ entry.sourceBranch }} → {{ entry.destinationBranch }}</span>
-            </p>
-          </div>
-        </li>
+        <ActivityRow v-for="entry in entries" :key="entryKey(entry)" :entry="entry" @open-commit="openCommit" />
       </ul>
 
       <p v-else-if="!isLoading && errMsg === null" class="px-4 py-6 text-center text-sm text-slate-400">
@@ -323,6 +155,13 @@ function nextCommit(): void {
         No more activity.
       </p>
     </div>
+
+    <!-- Optional footer slot — used by the Dashboard to drop a "More →"
+         link below the scrolling region. Other callers (User / Repo /
+         Project pages) don't provide a footer; the slot is silently
+         empty in that case. Sits outside `scrollContainer` so it stays
+         visible while the list scrolls underneath. -->
+    <slot name="footer" />
 
     <CommitDetailModal
       v-if="selectedCommit !== null"

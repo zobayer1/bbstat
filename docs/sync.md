@@ -909,13 +909,17 @@ only" rule and reads straight from Postgres via a `UNION ALL` over
 
 Query params (all optional):
 
-| Param     | Type   | Notes                                                                                  |
-| --------- | ------ | -------------------------------------------------------------------------------------- |
-| `actor`   | int    | Filter to a single `author_user_id`. Anonymous-author rows never match.                |
-| `repo`    | string | `"<workspace>/<slug>"`. Regex-validated; malformed values 400 with `invalid_query`.    |
-| `project` | string | Project key. Matches `repositories.project` exactly.                                   |
-| `before`  | ISO    | Strict-less-than cursor; the client passes the last entry's `occurredAt` back to page. |
-| `limit`   | int    | 1–200, default 50. The frontend paginates at 50 per page.                              |
+| Param        | Type   | Notes                                                                                                          |
+| ------------ | ------ | -------------------------------------------------------------------------------------------------------------- |
+| `actor`      | int    | Filter to a single `author_user_id`. Anonymous-author rows never match.                                        |
+| `repo`       | string | `"<workspace>/<slug>"`. Regex-validated; malformed values 400 with `invalid_query`.                            |
+| `project`    | string | Project key. Matches `repositories.project` exactly.                                                           |
+| `before`     | ISO    | Strict-less-than cursor (embedded feed) / range upper bound (Activity page).                                   |
+| `after`      | ISO    | Inclusive lower bound. Used by the Activity page's date-range filter; embedded feed leaves it unset.           |
+| `hashPrefix` | hex    | 1–40 hex chars (case-insensitive, lowercased server-side). Suppresses the PR branch entirely when set.         |
+| `message`    | string | 2–200 chars. Commits run Postgres FTS over `message_tsv` (`plainto_tsquery`); PR branch uses ILIKE on `title`. |
+| `limit`      | int    | 1–200, default 50. Embedded feed paginates at 50; Activity page at 100.                                        |
+| `offset`     | int    | 0–100k, default 0. Used by the Activity page for First / Last navigation; embedded feed leaves it at 0.        |
 
 Response is a discriminated array on `kind`:
 
@@ -939,6 +943,23 @@ The PR `occurredAt = updated_on` is intentional — a PR's row resurfaces in
 the feed each time its state transitions or comments churn, matching BB's
 own activity-timeline behavior. A single PR can appear at multiple positions
 across pages over its lifetime.
+
+#### Sibling endpoints
+
+Two read-side companions live alongside `/api/activity`, both at the
+`/api` prefix:
+
+- **`GET /api/activity-count`** — returns `{ total }` for the same filter
+  shape as `/api/activity` (limit / offset accepted but ignored).
+  Powers the Activity page's "Page X of Y" indicator and Last button.
+  Backed by a two-branch sum query — same WHERE predicates as the feed
+  so the count never disagrees with the rows.
+- **`GET /api/activity-daily?actor=&repo=&project=`** — returns
+  `[{ date, commits }]` over the rolling 365 days from `commit_daily`,
+  scoped only by the three structural filters (date / hash / message do
+  not apply — the year heatmap answers "what does the year look like
+  for this slice?", not "what's on this page"). Feeds the Activity
+  page's year-grid `CommitHeatmap`.
 
 ### Caching
 

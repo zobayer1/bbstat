@@ -10,6 +10,9 @@ export const router = createRouter({
   routes: [
     { path: '/', name: 'dashboard', component: Dashboard },
     { path: '/members', name: 'members', component: Members },
+    // Dedicated Activity page — lazy-loaded since it pulls in three
+    // chart components and a paged store none of the other pages use.
+    { path: '/activity', name: 'activity', component: () => import('@/views/Activity.vue') },
     { path: '/users/:userId', name: 'user', component: UserSummary, props: true },
     { path: '/projects/:projectKey', name: 'project', component: ProjectStats, props: true },
     {

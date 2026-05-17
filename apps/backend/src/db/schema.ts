@@ -11,7 +11,18 @@ import {
   index,
   unique,
   uniqueIndex,
+  customType,
 } from 'drizzle-orm/pg-core';
+
+// Postgres `tsvector` — used for the commit message FTS column. We never
+// read this column from TypeScript (it's a derived index target only), so
+// the `data` shape is `unknown`. The column is `GENERATED ALWAYS AS … STORED`
+// in the table definition below, so it's also implicitly read-only.
+const tsvector = customType<{ data: unknown; driverData: string; notNull: false; default: false }>({
+  dataType() {
+    return 'tsvector';
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -170,6 +181,14 @@ export const commits = pgTable(
     diffStatsSyncedAt: timestamp('diff_stats_synced_at', { withTimezone: true }),
     authoredAt: timestamp('authored_at', { withTimezone: true }).notNull(),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
+    // FTS index target for the dedicated Activity page's commit-message
+    // search. `simple` dictionary (no stemming, no stopword removal) keeps
+    // it predictable across the multilingual / acronym-heavy commit corpus
+    // we see in practice — `to_tsquery('english', 'fixes')` would miss
+    // "fix" / "fixed" / non-English vocabulary. GENERATED STORED so the
+    // column backfills on add and stays in lockstep with `message` on
+    // every insert / update — no application-side write needed.
+    messageTsv: tsvector('message_tsv').generatedAlwaysAs(sql`to_tsvector('simple', message)`),
   },
   (t) => ({
     shaRepoUnique: uniqueIndex('commits_sha_repo_unique').on(t.repositoryId, t.sha),
@@ -177,6 +196,15 @@ export const commits = pgTable(
     pendingDiffStatsIdx: index('commits_pending_diff_stats_idx')
       .on(t.repositoryId)
       .where(sql`${t.diffStatsSyncedAt} IS NULL`),
+    // GIN index for the FTS column — drives `message_tsv @@ plainto_tsquery(…)`
+    // lookups on the Activity page. Updated automatically with the generated
+    // column so insert paths don't touch it.
+    messageTsvIdx: index('commits_message_tsv_idx').using('gin', t.messageTsv),
+    // B-tree on `sha` with the `text_pattern_ops` opclass so the Activity
+    // page's hash-prefix search (`sha LIKE 'abc%'`) is index-driven
+    // instead of a full scan. The existing `commits_sha_repo_unique` index
+    // is on (repository_id, sha) which can't serve a SHA-only prefix scan.
+    shaPrefixIdx: index('commits_sha_prefix_idx').using('btree', sql`${t.sha} text_pattern_ops`),
   }),
 );
 

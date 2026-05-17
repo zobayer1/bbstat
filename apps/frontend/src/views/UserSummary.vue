@@ -6,17 +6,43 @@ import ActivityFeed from '@/components/ActivityFeed.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useUserSummaryStore } from '@/stores/userSummary';
+import { useStatsStore } from '@/stores/stats';
+import { useActivityFilters } from '@/composables/useActivityFilters';
 
 const route = useRoute();
 const store = useUserSummaryStore();
+const stats = useStatsStore();
 
 const userId = computed(() => Number(route.params.userId));
 const summary = computed(() => store.byUserId[userId.value]);
 const loading = computed(() => store.loading[userId.value] === true);
 const error = computed(() => store.error[userId.value] ?? null);
 
-onMounted(() => void store.fetch(userId.value));
+onMounted(() => {
+  void store.fetch(userId.value);
+  // Stats store carries the full repo list, which powers the project +
+  // repo dropdowns below. The Dashboard already fetches this, but a
+  // user landing on /users/:userId via a deep link needs it explicitly.
+  void stats.fetchOverview();
+});
 watch(userId, (next) => void store.fetch(next));
+
+// Project + repo filters narrow this user's activity feed. User is
+// pinned (the page subject), so we don't render a user dropdown. The
+// composable handles the project↔repo interlock — picking either one
+// keeps the other coherent.
+const {
+  projectModel: filterProject,
+  repoModel: filterRepo,
+  repoOptions: repoFilterOptions,
+} = useActivityFilters({
+  repositories: computed(() => stats.repositories),
+});
+const projectOptions = computed<string[]>(() => {
+  const set = new Set<string>();
+  for (const r of stats.repositories) if (r.project !== null) set.add(r.project);
+  return Array.from(set).sort();
+});
 </script>
 
 <template>
@@ -113,8 +139,41 @@ watch(userId, (next) => void store.fetch(next));
       </section>
 
       <section class="mt-8">
-        <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
-        <ActivityFeed :actor="userId" height="24rem" />
+        <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+          <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
+          <!-- Project + repo filters scoped to this user. User is pinned
+               via `:actor` on the feed below, so it isn't a dropdown
+               here. The composable wires the project↔repo interlock. -->
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <label for="user-filter-project" class="flex items-center gap-1">
+              <span class="text-slate-500">Project:</span>
+              <select
+                id="user-filter-project"
+                v-model="filterProject"
+                name="user-filter-project"
+                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+                aria-label="Filter by project"
+              >
+                <option :value="undefined">All</option>
+                <option v-for="p in projectOptions" :key="p" :value="p">{{ p }}</option>
+              </select>
+            </label>
+            <label for="user-filter-repo" class="flex items-center gap-1">
+              <span class="text-slate-500">Repository:</span>
+              <select
+                id="user-filter-repo"
+                v-model="filterRepo"
+                name="user-filter-repo"
+                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+                aria-label="Filter by repository"
+              >
+                <option :value="undefined">All</option>
+                <option v-for="r in repoFilterOptions" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <ActivityFeed :actor="userId" :project="filterProject" :repo="filterRepo" height="24rem" />
       </section>
     </template>
   </main>

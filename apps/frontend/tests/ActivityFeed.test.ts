@@ -79,7 +79,8 @@ describe('ActivityFeed', () => {
 
     expect(w.text()).toContain('feat: add thing');
     expect(w.text()).toContain('+12 −3');
-    expect(w.text()).toContain('#42 feat: shiny');
+    expect(w.text()).toContain('#42');
+    expect(w.text()).toContain('feat: shiny');
     expect(w.text()).toContain('feat → main');
     expect(w.text()).toContain('Alice');
     expect(w.text()).toContain('anonymous');

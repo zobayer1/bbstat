@@ -230,8 +230,31 @@ export interface ActivityQuery {
   actor?: number;
   repo?: string; // "<workspace>/<slug>"
   project?: string;
-  before?: string; // ISO 8601
+  before?: string; // ISO 8601 — cursor / range upper bound (exclusive)
+  after?: string; // ISO 8601 — range lower bound (inclusive)
+  hashPrefix?: string; // 1–40 hex chars; suppresses PRs server-side
+  message?: string; // 2–200 chars; FTS on commits, ILIKE on PR titles
   limit?: number; // default 50, max 200
+  // Offset-based pagination (Activity page only). Embedded feed leaves
+  // this undefined and uses `before` as a cursor instead.
+  offset?: number;
+}
+
+// Shared query-string builder for /api/activity + /api/activity-count.
+// Same field set, same URL encoding — extracted so the two callers
+// can't drift on which params they include.
+function encodeActivityQuery(query: ActivityQuery): string {
+  const params = new URLSearchParams();
+  if (query.actor !== undefined) params.set('actor', String(query.actor));
+  if (query.repo !== undefined) params.set('repo', query.repo);
+  if (query.project !== undefined) params.set('project', query.project);
+  if (query.before !== undefined) params.set('before', query.before);
+  if (query.after !== undefined) params.set('after', query.after);
+  if (query.hashPrefix !== undefined) params.set('hashPrefix', query.hashPrefix);
+  if (query.message !== undefined) params.set('message', query.message);
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.offset !== undefined) params.set('offset', String(query.offset));
+  return params.toString();
 }
 
 export const api = {
@@ -251,15 +274,21 @@ export const api = {
     ),
   listRepositories: () => request<TrackedRepositorySummary[]>('/api/stats/repositories'),
   members: (window: ContributorWindow = '7d') => request<WorkspaceMember[]>(`/api/stats/members?window=${window}`),
-  activity: (query: ActivityQuery = {}) => {
+  activityDaily: (query: { actor?: number; repo?: string; project?: string } = {}) => {
     const params = new URLSearchParams();
     if (query.actor !== undefined) params.set('actor', String(query.actor));
     if (query.repo !== undefined) params.set('repo', query.repo);
     if (query.project !== undefined) params.set('project', query.project);
-    if (query.before !== undefined) params.set('before', query.before);
-    if (query.limit !== undefined) params.set('limit', String(query.limit));
     const qs = params.toString();
+    return request<{ date: string; commits: number }[]>(`/api/activity-daily${qs.length > 0 ? `?${qs}` : ''}`);
+  },
+  activity: (query: ActivityQuery = {}) => {
+    const qs = encodeActivityQuery(query);
     return request<ActivityEntry[]>(`/api/activity${qs.length > 0 ? `?${qs}` : ''}`);
+  },
+  activityCount: (query: ActivityQuery = {}) => {
+    const qs = encodeActivityQuery(query);
+    return request<{ total: number }>(`/api/activity-count${qs.length > 0 ? `?${qs}` : ''}`);
   },
 };
 

@@ -72,6 +72,8 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     listTrackedRepositoriesWithStats: vi.fn(),
     listWorkspaceMembers: vi.fn(),
     getActivity: vi.fn(),
+    getActivityCount: vi.fn(),
+    getActivityDaily: vi.fn(),
     ...overrides,
   };
 }
@@ -596,7 +598,11 @@ describe('GET /api/activity', () => {
       repo: null,
       project: null,
       before: null,
+      after: null,
+      hashPrefix: null,
+      message: null,
       limit: 50,
+      offset: 0,
     });
   });
 
@@ -607,7 +613,7 @@ describe('GET /api/activity', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/activity?actor=7&repo=tigerit/boing-server&project=COMM&before=2026-05-12T18:00:00.000Z&limit=25',
+      url: '/api/activity?actor=7&repo=tigerit/boing-server&project=COMM&before=2026-05-12T18:00:00.000Z&after=2026-05-01T00:00:00.000Z&hashPrefix=abc123&message=widget&limit=25&offset=200',
     });
 
     expect(res.statusCode).toBe(200);
@@ -616,8 +622,46 @@ describe('GET /api/activity', () => {
       repo: { workspace: 'tigerit', slug: 'boing-server' },
       project: 'COMM',
       before: new Date('2026-05-12T18:00:00.000Z'),
+      after: new Date('2026-05-01T00:00:00.000Z'),
+      hashPrefix: 'abc123',
+      message: 'widget',
       limit: 25,
+      offset: 200,
     });
+  });
+
+  it('lowercases the hashPrefix before passing it to the store', async () => {
+    const getActivity = vi.fn<(f: ActivityFilters) => Promise<ActivityEntry[]>>().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?hashPrefix=ABC123dEF' });
+
+    expect(res.statusCode).toBe(200);
+    expect(getActivity).toHaveBeenCalledWith(expect.objectContaining({ hashPrefix: 'abc123def' }));
+  });
+
+  it('rejects a non-hex hashPrefix with 400', async () => {
+    const getActivity = vi.fn();
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?hashPrefix=zxy' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('invalid_query');
+    expect(getActivity).not.toHaveBeenCalled();
+  });
+
+  it('rejects a too-short message with 400', async () => {
+    const getActivity = vi.fn();
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?message=a' });
+
+    expect(res.statusCode).toBe(400);
+    expect(getActivity).not.toHaveBeenCalled();
   });
 
   it('rejects malformed `repo` with 400 (missing slug)', async () => {
@@ -653,5 +697,98 @@ describe('GET /api/activity', () => {
 
     expect(res.statusCode).toBe(400);
     expect(getActivity).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/activity-daily', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the daily aggregate with null filters when no query is provided', async () => {
+    const payload = [{ date: '2026-05-10', commits: 4 }];
+    const getActivityDaily = vi.fn().mockResolvedValue(payload);
+    const statsStore = makeStatsStore({ getActivityDaily });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity-daily' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(payload);
+    expect(getActivityDaily).toHaveBeenCalledWith({ actor: null, repo: null, project: null });
+  });
+
+  it('forwards actor / repo / project filters', async () => {
+    const getActivityDaily = vi.fn().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getActivityDaily });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/activity-daily?actor=7&repo=tigerit/boing-server&project=COMM',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(getActivityDaily).toHaveBeenCalledWith({
+      actor: 7,
+      repo: { workspace: 'tigerit', slug: 'boing-server' },
+      project: 'COMM',
+    });
+  });
+});
+
+describe('GET /api/activity-count', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns { total } with all filters null when none are provided', async () => {
+    const getActivityCount = vi.fn().mockResolvedValue(42);
+    const statsStore = makeStatsStore({ getActivityCount });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity-count' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ total: 42 });
+    expect(getActivityCount).toHaveBeenCalledWith({
+      actor: null,
+      repo: null,
+      project: null,
+      before: null,
+      after: null,
+      hashPrefix: null,
+      message: null,
+      limit: 50,
+      offset: 0,
+    });
+  });
+
+  it('forwards every filter axis to the store', async () => {
+    const getActivityCount = vi.fn().mockResolvedValue(0);
+    const statsStore = makeStatsStore({ getActivityCount });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/activity-count?actor=7&repo=tigerit/r1&project=COMM&after=2026-05-01T00:00:00.000Z&message=widget',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(getActivityCount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: 7,
+        repo: { workspace: 'tigerit', slug: 'r1' },
+        project: 'COMM',
+        after: new Date('2026-05-01T00:00:00.000Z'),
+        message: 'widget',
+      }),
+    );
   });
 });

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
-import StatCard from '@/components/StatCard.vue';
+import StatCard3D from '@/components/StatCard3D.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useStatsStore } from '@/stores/stats';
+import { useActivityFilters } from '@/composables/useActivityFilters';
 import type { ContributorWindow } from '@/api/client';
 
 const stats = useStatsStore();
@@ -30,13 +31,17 @@ const filterActor = computed<number | undefined>({
   get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
   set: (v) => setQueryParam('actor', v),
 });
-const filterRepo = computed<string | undefined>({
-  get: () => (typeof route.query.repo === 'string' ? route.query.repo : undefined),
-  set: (v) => setQueryParam('repo', v),
-});
-const filterProject = computed<string | undefined>({
-  get: () => (typeof route.query.project === 'string' ? route.query.project : undefined),
-  set: (v) => setQueryParam('project', v),
+// Project + repo share a single composable that owns the URL sync and
+// the project↔repo interlock (picking a repo auto-fills its project;
+// picking a project trims the repo dropdown and clears a now-mismatched
+// repo). `repoOptions` is the trimmed-by-project list for the
+// `<select>` below.
+const {
+  projectModel: filterProject,
+  repoModel: filterRepo,
+  repoOptions: repoFilterOptions,
+} = useActivityFilters({
+  repositories: computed(() => stats.repositories),
 });
 
 const filtersActive = computed(
@@ -57,6 +62,39 @@ const developers = computed(() => stats.overview?.users ?? '—');
 const totalCommits = computed(() => stats.overview?.totalCommits ?? '—');
 const commitsLast7Days = computed(() => stats.overview?.commitsLast7Days ?? '—');
 const commitsLast30Days = computed(() => stats.overview?.commitsLast30Days ?? '—');
+
+// Heroicons-outline glyph paths embedded inline so each card can own its
+// own shape without an icon-library dep. Keep these near the cards
+// they're used in so the visual treatment is local to the template.
+const GLYPHS = {
+  folder:
+    'M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z',
+  rectangleStack:
+    'M6 6.878V6a2.25 2.25 0 0 1 2.25-2.25h7.5A2.25 2.25 0 0 1 18 6v.878m-12 0c.235-.083.487-.128.75-.128h10.5c.263 0 .515.045.75.128m-12 0A2.25 2.25 0 0 0 4.5 9v.878m13.5-3A2.25 2.25 0 0 1 19.5 9v.878m0 0a2.246 2.246 0 0 0-.75-.128H5.25c-.263 0-.515.045-.75.128m15 0A2.25 2.25 0 0 1 21 12v6a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 18v-6c0-.98.626-1.813 1.5-2.122',
+  users:
+    'M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z',
+  bolt: 'm3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z',
+  calendar:
+    'M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5',
+  chartBar:
+    'M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0 0 20.25 18V6A2.25 2.25 0 0 0 18 3.75H6A2.25 2.25 0 0 0 3.75 6v12A2.25 2.25 0 0 0 6 20.25Z',
+} as const;
+
+// Recompute `after` boundaries every time the dashboard mounts so a stale
+// tab doesn't bake in a week-old window. Format is YYYY-MM-DD (matches the
+// `<input type="date">` controls on the Activity page so they hydrate
+// cleanly from the URL) — Activity.vue converts to an ISO timestamp at
+// request time.
+const DAY_MS = 86_400_000;
+function localDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const activitySinceSevenDays = computed(() => localDateString(new Date(Date.now() - 7 * DAY_MS)));
+const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
+
 const lastSyncLabel = computed(() => {
   if (!stats.lastSyncedAt) return 'never';
   return new Date(stats.lastSyncedAt).toLocaleString();
@@ -157,40 +195,72 @@ const pagedRepositories = computed(() => {
       </div>
     </header>
 
-    <!-- `perspective-[1200px]` sets the vanishing point depth for the 3D
-         hover transform on the Workspace Members card below — other cards
-         are unaffected since they don't apply any 3D rotation. -->
+    <!-- `perspective-[1200px]` sets the vanishing point depth for every
+         card's 3D hover transform. Each card carries its own slightly
+         different rotateX / rotateY pair via StatCard3D's `tilt` prop so
+         the grid reads as six distinct surfaces under hover, not one
+         repeated template. Tone follows CMY-RGB (Members keeps the
+         original blue): row 1 = cyan / fuchsia / blue, row 2 = yellow /
+         green / red. -->
     <section class="grid grid-cols-1 gap-4 [perspective:1200px] sm:grid-cols-2 lg:grid-cols-3">
-      <StatCard label="Tracked repositories" :value="repos" />
-      <StatCard label="Projects" :value="projects" />
-      <RouterLink
+      <!-- Repos / Projects don't link anywhere yet — dedicated browse pages
+           are next on the roadmap. The "Browse all →" hint is rendered as
+           a placeholder so all six cards keep the same vertical rhythm
+           (otherwise the two hint-less cards collapse to a shorter height
+           and break the grid baseline). Swap to a real `to` prop when the
+           pages land. -->
+      <StatCard3D
+        label="Tracked repositories"
+        :value="repos"
+        hint="Browse all →"
+        :glyph-path="GLYPHS.folder"
+        tone="cyan"
+        :tilt="{ x: 5, y: -3 }"
+      />
+      <StatCard3D
+        label="Projects"
+        :value="projects"
+        hint="Browse all →"
+        :glyph-path="GLYPHS.rectangleStack"
+        tone="fuchsia"
+        :tilt="{ x: 3, y: 5 }"
+      />
+      <StatCard3D
+        label="Workspace Members"
+        :value="developers"
+        hint="Browse all →"
+        :glyph-path="GLYPHS.users"
+        tone="blue"
+        :tilt="{ x: 6, y: -4 }"
         :to="{ name: 'members' }"
-        class="group relative block rounded-lg shadow-sm transition-all duration-200 ease-out [transform-style:preserve-3d] hover:-translate-y-1 hover:scale-[1.02] hover:shadow-xl hover:[transform:translateY(-4px)_scale(1.02)_rotateX(6deg)_rotateY(-4deg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-      >
-        <StatCard label="Workspace Members" :value="developers" hint="Browse all →" />
-        <!-- "users" glyph (Heroicons-style) anchored to the card's right
-             edge, vertically centered, behind the text in z-order so the
-             value never collides with it. Resting color slate-300; flips
-             to blue on card hover via the `group` ancestor. -->
-        <svg
-          class="pointer-events-none absolute top-1/2 right-4 size-14 -translate-y-1/2 text-slate-300 transition-colors group-hover:text-blue-500 group-focus-visible:text-blue-500"
-          xmlns="http://www.w3.org/2000/svg"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke-width="1.5"
-          stroke="currentColor"
-          aria-hidden="true"
-        >
-          <path
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z"
-          />
-        </svg>
-      </RouterLink>
-      <StatCard label="Commits (all-time)" :value="totalCommits" />
-      <StatCard label="Commits last 7 days" :value="commitsLast7Days" hint="Recent activity" />
-      <StatCard label="Commits last 30 days" :value="commitsLast30Days" hint="Trailing month" />
+      />
+      <StatCard3D
+        label="Commits last 7 days"
+        :value="commitsLast7Days"
+        hint="Recent activity →"
+        :glyph-path="GLYPHS.bolt"
+        tone="yellow"
+        :tilt="{ x: -2, y: -3 }"
+        :to="{ name: 'activity', query: { after: activitySinceSevenDays } }"
+      />
+      <StatCard3D
+        label="Commits last 30 days"
+        :value="commitsLast30Days"
+        hint="Trailing month →"
+        :glyph-path="GLYPHS.calendar"
+        tone="green"
+        :tilt="{ x: -3, y: 6 }"
+        :to="{ name: 'activity', query: { after: activitySinceThirtyDays } }"
+      />
+      <StatCard3D
+        label="Commits (all-time)"
+        :value="totalCommits"
+        hint="Full stream →"
+        :glyph-path="GLYPHS.chartBar"
+        tone="red"
+        :tilt="{ x: 6, y: 4 }"
+        :to="{ name: 'activity' }"
+      />
     </section>
 
     <section class="mt-8">
@@ -240,10 +310,12 @@ const pagedRepositories = computed(() => {
         </div>
 
         <div v-else class="flex flex-wrap items-center gap-2 text-xs">
-          <label class="flex items-center gap-1">
+          <label for="dashboard-filter-project" class="flex items-center gap-1">
             <span class="text-slate-500">Project:</span>
             <select
+              id="dashboard-filter-project"
               v-model="filterProject"
+              name="dashboard-filter-project"
               class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
               aria-label="Filter by project"
             >
@@ -251,21 +323,25 @@ const pagedRepositories = computed(() => {
               <option v-for="p in projectsPanel" :key="p.projectKey" :value="p.projectKey">{{ p.projectKey }}</option>
             </select>
           </label>
-          <label class="flex items-center gap-1">
+          <label for="dashboard-filter-repo" class="flex items-center gap-1">
             <span class="text-slate-500">Repository:</span>
             <select
+              id="dashboard-filter-repo"
               v-model="filterRepo"
+              name="dashboard-filter-repo"
               class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
               aria-label="Filter by repository"
             >
               <option :value="undefined">All</option>
-              <option v-for="r in stats.repositories" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+              <option v-for="r in repoFilterOptions" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
             </select>
           </label>
-          <label class="flex items-center gap-1">
+          <label for="dashboard-filter-user" class="flex items-center gap-1">
             <span class="text-slate-500">User:</span>
             <select
+              id="dashboard-filter-user"
               v-model.number="filterActor"
+              name="dashboard-filter-user"
               class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
               aria-label="Filter by user"
             >
@@ -273,7 +349,12 @@ const pagedRepositories = computed(() => {
               <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
             </select>
           </label>
-          <button v-if="filtersActive" type="button" class="text-slate-500 hover:text-slate-700" @click="clearFilters">
+          <button
+            v-if="filtersActive"
+            type="button"
+            class="cursor-pointer text-slate-500 hover:text-slate-700"
+            @click="clearFilters"
+          >
             Clear
           </button>
         </div>
@@ -349,18 +430,33 @@ const pagedRepositories = computed(() => {
             No commits in the {{ windowLabel(stats.contributorsWindow).toLowerCase() }}.
           </p>
         </div>
+        <!-- "More →" footer — sits below the height-capped scrolling area
+             so it stays in view regardless of how many rows render above. -->
+        <RouterLink
+          :to="{ name: 'members' }"
+          class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+        >
+          More →
+        </RouterLink>
       </div>
 
       <!-- Activity tab — same height cap so the surrounding layout doesn't
            shift when switching tabs. v-show keeps the component mounted, so
            any filter state / loaded pages stay live across tab toggles. -->
       <div v-show="activeTab === 'activity'" role="tabpanel">
-        <ActivityFeed
-          :actor="filterActor"
-          :repo="filterRepo"
-          :project="filterProject"
-          :height="ACTIVITY_PANEL_HEIGHT"
-        />
+        <ActivityFeed :actor="filterActor" :repo="filterRepo" :project="filterProject" :height="ACTIVITY_PANEL_HEIGHT">
+          <template #footer>
+            <!-- Mirror of the contributors footer. Lands on /activity
+                 with the "last 7 days" range pre-applied so the user
+                 picks up where the dashboard's quick-look left off. -->
+            <RouterLink
+              :to="{ name: 'activity', query: { after: activitySinceSevenDays } }"
+              class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            >
+              More →
+            </RouterLink>
+          </template>
+        </ActivityFeed>
       </div>
     </section>
 
