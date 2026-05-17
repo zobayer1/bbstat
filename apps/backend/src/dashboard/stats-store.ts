@@ -98,13 +98,16 @@ export interface ProjectStats {
     contributorCount7d: number;
     repositoryCount: number;
   };
-  // Last 12 ISO weeks (Monday-aligned per Postgres date_trunc), oldest first.
-  weeklyCommits: Array<{ weekStart: string; commits: number }>;
   // Last 365 calendar days, oldest first. Zero-commit days omitted —
   // the frontend backfills gaps when rendering the contribution heatmap.
   // Aggregates across every repo carrying this project's key.
   dailyCommits: Array<{ date: string; commits: number }>;
-  topContributors: TopContributor[];
+  // Project-scoped contributor table — same enriched shape as the
+  // per-repo contributor list (30-day sparkline + adds/dels excluding
+  // merges) so the Project detail page can reuse the repo-page's row
+  // layout verbatim. Aggregates across every repo carrying this
+  // project's key.
+  topContributors: RepoContributor[];
   repositories: Array<{
     workspace: string;
     slug: string;
@@ -121,6 +124,11 @@ export interface RepoActivity {
     workspace: string;
     slug: string;
     fullName: string;
+    // Project key the repo lives under, or null if the repo isn't
+    // assigned to a project. Surfaced so the repo-detail page can
+    // breadcrumb back to its parent project without a separate
+    // lookup against the workspace-wide repository list.
+    project: string | null;
     syncStatus: RepoSyncStatus;
   };
   // Last 365 calendar days, oldest first. Zero-commit days omitted —
@@ -303,6 +311,12 @@ export interface TrackedRepositorySummary {
   // dashboard column reflects "developers who landed code", not raw author
   // identities.
   contributors30d: number;
+  // Code-change volume in the last 30 days, EXCLUDING merge commits —
+  // same predicate the repo-detail page uses, so the two surfaces
+  // agree on per-repo adds/dels totals. Reads zero on repos whose
+  // diff-stat ingest hasn't landed yet (transient state).
+  additions30d: number;
+  deletions30d: number;
   lastCommitAt: string | null;
   syncStatus: RepoSyncStatus;
 }
@@ -362,6 +376,40 @@ export interface StatsStore {
   // Same filter shape as getActivity but limit / offset are ignored —
   // count is over the full filtered universe.
   getActivityCount(filters: ActivityFilters): Promise<number>;
+
+  // Top-N repositories by commits in the trailing window, each with its
+  // top-M contributors. Powers the Projects page sunburst chart
+  // (angular slices = repos, radial bands = contributors per repo).
+  // Reads commit_daily so it stays cheap regardless of how large
+  // `commits` grows.
+  getRepoContributorBreakdown(opts: RepoContributorBreakdownOptions): Promise<RepoContributorBreakdown[]>;
+}
+
+export interface RepoContributorBreakdownOptions {
+  windowDays: number;
+  topRepos: number;
+  topPerRepo: number;
+  // Optional project scope — when set, only repos under this project
+  // key contribute to the top-N pool. Used by the project detail page
+  // to render the workspace-wide sunburst over a single project.
+  project: string | null;
+}
+
+export interface RepoContributorBreakdown {
+  workspace: string;
+  slug: string;
+  fullName: string;
+  project: string | null;
+  // Total commits in the window across all included contributors.
+  // Anonymous-author commits are excluded (commit_daily.author_user_id
+  // IS NULL is filtered out), so this can be slightly smaller than
+  // `commits30d` in the dashboard repo summary.
+  commits: number;
+  contributors: Array<{
+    userId: number;
+    displayName: string;
+    commits: number;
+  }>;
 }
 
 export interface ActivityDailyFilters {
@@ -624,7 +672,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       ).rows;
       if (repositoryCount === 0) return null;
 
-      const [totalsRows, weeklyRows, dailyRows, contributorRows, repoRows] = await Promise.all([
+      const [totalsRows, dailyRows, contributorRows, repoRows] = await Promise.all([
         db.execute<{
           commits_7d: number | null;
           commits_30d: number | null;
@@ -640,18 +688,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           JOIN repositories r ON r.id = cd.repository_id
           WHERE r.project = ${projectKey}
         `),
-        // 12 weeks back, Monday-aligned. Filtering on the original `day`
-        // column (and not on `week_start`) keeps the predicate sargable
-        // against the (repo, day) index.
-        db.execute<{ week_start: string; commits: number }>(sql`
-          SELECT date_trunc('week', cd.day)::date::text AS week_start, sum(cd.commit_count)::int AS commits
-          FROM commit_daily cd
-          JOIN repositories r ON r.id = cd.repository_id
-          WHERE r.project = ${projectKey}
-            AND cd.day >= date_trunc('week', current_date)::date - (11 * 7)
-          GROUP BY week_start
-          ORDER BY week_start
-        `),
         // 365-day daily aggregate. Mirrors the user/repo dailyCommits shape
         // so the CommitHeatmap component can render the project's combined
         // contribution timeline without any client-side reshaping.
@@ -663,14 +699,72 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY cd.day
           ORDER BY cd.day
         `),
-        db.execute<{ user_id: number; bitbucket_uuid: string; display_name: string; commits: number }>(sql`
-          SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
-          FROM commit_daily cd
-          JOIN repositories r ON r.id = cd.repository_id
-          JOIN users u ON u.id = cd.author_user_id
-          WHERE r.project = ${projectKey} AND cd.day >= current_date - 29
-          GROUP BY u.id, u.bitbucket_uuid, u.display_name
-          ORDER BY sum(cd.commit_count) DESC
+        // Top contributors — same enriched shape as getRepositoryActivity
+        // (30-day sparkline + non-merge diff stats per contributor) so
+        // the Project detail page can reuse the repo-page's row layout.
+        // Sparkline + diff stats are aggregated across every repo
+        // carrying this project's key.
+        db.execute<{
+          user_id: number;
+          bitbucket_uuid: string;
+          display_name: string;
+          commits: number;
+          last_30_days: number[];
+          additions_30d: number;
+          deletions_30d: number;
+        }>(sql`
+          WITH project_repos AS (
+            SELECT id FROM repositories WHERE project = ${projectKey}
+          ),
+          top AS (
+            SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
+            FROM commit_daily cd
+            JOIN users u ON u.id = cd.author_user_id
+            WHERE cd.repository_id IN (SELECT id FROM project_repos)
+              AND cd.day >= current_date - 29
+            GROUP BY u.id, u.bitbucket_uuid, u.display_name
+          ),
+          daily AS (
+            SELECT author_user_id, day, sum(commit_count)::int AS commits
+            FROM commit_daily
+            WHERE repository_id IN (SELECT id FROM project_repos)
+              AND day >= current_date - 29
+              AND author_user_id IN (SELECT user_id FROM top)
+            GROUP BY author_user_id, day
+          ),
+          spark AS (
+            SELECT
+              t.user_id,
+              array_agg(COALESCE(daily.commits, 0) ORDER BY sd.day) AS last_30_days
+            FROM top t
+            CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval) AS sd(day)
+            LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
+            GROUP BY t.user_id
+          ),
+          diff_summary AS (
+            SELECT
+              author_user_id,
+              sum(additions)::int AS additions_30d,
+              sum(deletions)::int AS deletions_30d
+            FROM commits
+            WHERE repository_id IN (SELECT id FROM project_repos)
+              AND authored_at >= (current_date - 29)::timestamp
+              AND NOT is_merge
+              AND author_user_id IN (SELECT user_id FROM top)
+            GROUP BY author_user_id
+          )
+          SELECT
+            t.user_id,
+            t.bitbucket_uuid,
+            t.display_name,
+            t.commits,
+            spark.last_30_days,
+            COALESCE(diff_summary.additions_30d, 0) AS additions_30d,
+            COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d
+          FROM top t
+          JOIN spark ON spark.user_id = t.user_id
+          LEFT JOIN diff_summary ON diff_summary.author_user_id = t.user_id
+          ORDER BY t.commits DESC
           LIMIT 10
         `),
         // Per-repo last-commit-at comes from `commits` (the rollup doesn't
@@ -723,13 +817,15 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           contributorCount7d: t?.contributor_count_7d ?? 0,
           repositoryCount,
         },
-        weeklyCommits: weeklyRows.rows.map((r) => ({ weekStart: r.week_start, commits: r.commits })),
         dailyCommits: dailyRows.rows.map((r) => ({ date: r.date, commits: r.commits })),
         topContributors: contributorRows.rows.map((r) => ({
           userId: r.user_id,
           bitbucketUuid: r.bitbucket_uuid,
           displayName: r.display_name,
           commits: r.commits,
+          last30Days: r.last_30_days,
+          additions30d: r.additions_30d,
+          deletions30d: r.deletions_30d,
         })),
         repositories: repoRows.rows.map((r) => ({
           workspace: r.workspace,
@@ -751,6 +847,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         project: string | null;
         commits_30d: number;
         contributors_30d: number;
+        additions_30d: number;
+        deletions_30d: number;
         last_commit_at: string | Date | null;
         last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
         last_synced_at: string | Date | null;
@@ -771,6 +869,22 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
               AND day >= current_date - 29
               AND author_user_id IS NOT NULL
           ), 0) AS contributors_30d,
+          -- Non-merge diff stats over the last 30 days. Reads from
+          -- the commits table (not commit_daily) so the merge
+          -- exclusion stays accurate; the daily rollup aggregates
+          -- every commit regardless of is_merge.
+          COALESCE((
+            SELECT sum(additions)::int FROM commits
+            WHERE repository_id = r.id
+              AND authored_at >= (current_date - 29)::timestamp
+              AND NOT is_merge
+          ), 0) AS additions_30d,
+          COALESCE((
+            SELECT sum(deletions)::int FROM commits
+            WHERE repository_id = r.id
+              AND authored_at >= (current_date - 29)::timestamp
+              AND NOT is_merge
+          ), 0) AS deletions_30d,
           (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at,
           ss.last_sync_status,
           ss.last_synced_at,
@@ -786,6 +900,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         project: r.project,
         commits30d: r.commits_30d,
         contributors30d: r.contributors_30d,
+        additions30d: r.additions_30d,
+        deletions30d: r.deletions_30d,
         lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
         syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
       }));
@@ -798,6 +914,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           workspace: repositories.workspace,
           slug: repositories.slug,
           fullName: repositories.fullName,
+          project: repositories.project,
           syncExcluded: repositories.syncExcluded,
           lastSyncStatus: syncState.lastSyncStatus,
           lastSyncedAt: syncState.lastSyncedAt,
@@ -917,6 +1034,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           workspace: repo.workspace,
           slug: repo.slug,
           fullName: repo.fullName,
+          project: repo.project,
           syncStatus: deriveSyncStatus(repo.lastSyncStatus ?? null, repo.lastSyncedAt ?? null, repo.syncExcluded),
         },
         dailyCommits: dailyRows.rows.map((r) => ({
@@ -1279,6 +1397,96 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         ORDER BY cd.day
       `);
       return result.rows.map((r) => ({ date: r.date, commits: r.commits }));
+    },
+
+    async getRepoContributorBreakdown(opts) {
+      const { windowDays, topRepos, topPerRepo, project } = opts;
+      // Three-CTE pipeline:
+      //   1. per_user_repo  — sum commit_count per (repo, author) in window
+      //   2. top_repos      — top N repo IDs by total commits (descending)
+      //   3. ranked         — row_number() per repo, contributors sorted by commits
+      // Final SELECT joins repositories / users and clips to top M per
+      // repo. Anonymous-author rows are excluded so the bands sum to the
+      // repo total without an "unknown" slice. When `project` is set,
+      // the per_user_repo seed is restricted to repos under that key —
+      // every downstream CTE inherits the scope through the join chain.
+      const result = await db.execute<{
+        workspace: string;
+        slug: string;
+        full_name: string;
+        project: string | null;
+        repo_commits: number;
+        user_id: number;
+        display_name: string;
+        user_commits: number;
+      }>(sql`
+        WITH per_user_repo AS (
+          SELECT cd.repository_id, cd.author_user_id, sum(cd.commit_count)::int AS commits
+          FROM commit_daily cd
+          JOIN repositories r ON r.id = cd.repository_id
+          WHERE cd.day >= current_date - (${windowDays - 1}::int)
+            AND cd.author_user_id IS NOT NULL
+            AND (${project}::text IS NULL OR r.project = ${project}::text)
+          GROUP BY cd.repository_id, cd.author_user_id
+        ),
+        top_repos AS (
+          SELECT repository_id, sum(commits)::int AS total_commits
+          FROM per_user_repo
+          GROUP BY repository_id
+          ORDER BY total_commits DESC
+          LIMIT ${topRepos}
+        ),
+        ranked AS (
+          SELECT
+            pur.repository_id,
+            pur.author_user_id,
+            pur.commits,
+            row_number() OVER (PARTITION BY pur.repository_id ORDER BY pur.commits DESC, pur.author_user_id) AS rn
+          FROM per_user_repo pur
+          JOIN top_repos tr ON tr.repository_id = pur.repository_id
+        )
+        SELECT
+          r.workspace,
+          r.slug,
+          r.full_name,
+          r.project,
+          tr.total_commits AS repo_commits,
+          u.id AS user_id,
+          u.display_name,
+          ranked.commits AS user_commits
+        FROM ranked
+        JOIN top_repos tr ON tr.repository_id = ranked.repository_id
+        JOIN repositories r ON r.id = ranked.repository_id
+        JOIN users u ON u.id = ranked.author_user_id
+        WHERE ranked.rn <= ${topPerRepo}
+        ORDER BY tr.total_commits DESC, ranked.commits DESC, u.id
+      `);
+
+      // Group flat rows into the repo-bucketed shape the chart expects.
+      // Preserve the SQL-side ordering: rows are returned repo-by-repo
+      // (since top_repos is the inner JOIN), so grouping in a single
+      // pass is enough.
+      const byRepo = new Map<string, RepoContributorBreakdown>();
+      for (const row of result.rows) {
+        let bucket = byRepo.get(row.full_name);
+        if (bucket === undefined) {
+          bucket = {
+            workspace: row.workspace,
+            slug: row.slug,
+            fullName: row.full_name,
+            project: row.project,
+            commits: row.repo_commits,
+            contributors: [],
+          };
+          byRepo.set(row.full_name, bucket);
+        }
+        bucket.contributors.push({
+          userId: row.user_id,
+          displayName: row.display_name,
+          commits: row.user_commits,
+        });
+      }
+      return Array.from(byRepo.values());
     },
   };
 }

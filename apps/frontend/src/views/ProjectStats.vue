@@ -5,6 +5,7 @@ import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
+import Sparkline from '@/components/Sparkline.vue';
 import { useProjectStatsStore } from '@/stores/projectStats';
 import { useStatsStore } from '@/stores/stats';
 import { useActivityFilters } from '@/composables/useActivityFilters';
@@ -42,6 +43,25 @@ const { repoModel: filterRepo, repoOptions: repoFilterOptions } = useActivityFil
 // User dropdown reads from the project's own top contributors — more
 // relevant than the workspace-wide leaderboard.
 const userOptions = computed(() => stats.value?.topContributors ?? []);
+
+// Workspace of any repo in the project. Picking the first one is
+// safe — the tracked set is single-workspace per deployment per
+// CLAUDE.md, and a BB project always lives inside exactly one
+// workspace anyway. Used to build the canonical BB project URL
+// surfaced via the "View on BitBucket" link in the page header.
+const projectWorkspace = computed(() => stats.value?.repositories[0]?.workspace);
+
+// 30-day cutoff as YYYY-MM-DD for the "See all activities →" link.
+// Matches the Activity page's range-preset detection so the title chip
+// lights up "[Last 30 days]" on landing.
+const DAY_MS = 86_400_000;
+function localDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 const filterActor = computed<number | undefined>({
   get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
   set: (v) => {
@@ -76,7 +96,22 @@ const pagedRepositories = computed(() => {
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
-      <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">{{ projectKey }}</h1>
+      <div class="mt-1 flex items-baseline justify-between gap-4">
+        <h1 class="text-3xl font-bold tracking-tight text-slate-900">{{ projectKey }}</h1>
+        <!-- Thin external link to the canonical BB project page —
+             hidden until we know the workspace (the link is built
+             from the first repo's workspace once stats land). -->
+        <a
+          v-if="projectWorkspace"
+          :href="`https://bitbucket.org/${projectWorkspace}/workspace/projects/${projectKey}`"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="shrink-0 text-xs text-slate-500 hover:text-blue-600"
+          title="View on BitBucket"
+        >
+          View on BitBucket ↗
+        </a>
+      </div>
       <p v-if="stats" class="mt-1 text-sm text-slate-500">{{ stats.totals.repositoryCount }} repositories tracked</p>
     </header>
 
@@ -94,50 +129,6 @@ const pagedRepositories = computed(() => {
       <section class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity — last 365 days</h2>
         <CommitHeatmap :data="stats.dailyCommits ?? []" />
-      </section>
-
-      <section class="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div>
-          <h2 class="mb-3 text-lg font-semibold text-slate-900">Last 12 weeks</h2>
-          <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
-            <ul v-if="stats.weeklyCommits.length > 0" class="divide-y divide-slate-100">
-              <li
-                v-for="w in stats.weeklyCommits"
-                :key="w.weekStart"
-                class="flex items-center justify-between px-4 py-2 text-sm"
-              >
-                <span class="font-mono text-slate-500">Week of {{ w.weekStart }}</span>
-                <span class="text-slate-900">{{ w.commits }} commits</span>
-              </li>
-            </ul>
-            <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No commits in the last 12 weeks.</p>
-          </div>
-        </div>
-
-        <div>
-          <h2 class="mb-3 text-lg font-semibold text-slate-900">Top contributors — last 30 days</h2>
-          <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
-            <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
-              <li
-                v-for="(c, i) in stats.topContributors"
-                :key="c.bitbucketUuid"
-                class="flex items-center justify-between px-4 py-3"
-              >
-                <div class="flex items-center gap-3">
-                  <span class="w-5 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-                  <RouterLink
-                    :to="{ name: 'user', params: { userId: c.userId } }"
-                    class="text-sm font-medium text-slate-900 hover:text-slate-600"
-                  >
-                    {{ c.displayName }}
-                  </RouterLink>
-                </div>
-                <span class="text-sm text-slate-500">{{ c.commits }} commits</span>
-              </li>
-            </ul>
-            <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No contributors in the last 30 days.</p>
-          </div>
-        </div>
       </section>
 
       <section class="mt-8">
@@ -219,6 +210,49 @@ const pagedRepositories = computed(() => {
         </div>
       </section>
 
+      <!-- Contributor table — same layout as the per-repo Contributors
+           list on RepoActivity.vue (rank · name · sparkline · adds /
+           dels · commits). Data is project-scoped: sparkline + diff
+           stats aggregate across every repo carrying this project's
+           key. Sparkline excludes merge commits via the same NOT
+           is_merge predicate used by the repo-page query. -->
+      <section class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold text-slate-900">Contributors — last 30 days</h2>
+        <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
+          <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
+            <li v-for="(c, i) in stats.topContributors" :key="c.bitbucketUuid">
+              <RouterLink
+                :to="{ name: 'user', params: { userId: c.userId } }"
+                class="group flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
+              >
+                <div class="flex items-center gap-3">
+                  <span class="w-5 shrink-0 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
+                  <span class="text-sm font-medium text-slate-900">{{ c.displayName }}</span>
+                </div>
+                <div class="flex items-center gap-3">
+                  <Sparkline
+                    :points="c.last30Days ?? []"
+                    :width="128"
+                    :height="16"
+                    class="shrink-0 text-slate-400 transition-colors group-hover:text-blue-600"
+                  />
+                  <div class="flex items-center gap-1">
+                    <span class="w-20 shrink-0 text-right text-xs tabular-nums text-emerald-700">
+                      +{{ c.additions30d.toLocaleString() }}
+                    </span>
+                    <span class="w-20 shrink-0 text-right text-xs tabular-nums text-rose-700">
+                      −{{ c.deletions30d.toLocaleString() }}
+                    </span>
+                  </div>
+                  <span class="w-24 shrink-0 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
+                </div>
+              </RouterLink>
+            </li>
+          </ul>
+          <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No contributors in the last 30 days.</p>
+        </div>
+      </section>
+
       <section class="mt-8">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
           <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
@@ -255,7 +289,18 @@ const pagedRepositories = computed(() => {
             </label>
           </div>
         </div>
-        <ActivityFeed :project="projectKey" :repo="filterRepo" :actor="filterActor" height="24rem" />
+        <ActivityFeed :project="projectKey" :repo="filterRepo" :actor="filterActor" height="24rem">
+          <template #footer>
+            <!-- "See all activities →" pre-applies this project so the
+                 dedicated /activity page lands on the same scope. -->
+            <RouterLink
+              :to="{ name: 'activity', query: { project: projectKey, after: activitySinceThirtyDays } }"
+              class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            >
+              See all activities →
+            </RouterLink>
+          </template>
+        </ActivityFeed>
       </section>
     </template>
   </main>

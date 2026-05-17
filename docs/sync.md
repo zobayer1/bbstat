@@ -891,6 +891,7 @@ lengthen in production if you want.
 | `GET /api/stats/projects/:projectKey`                        | Project rollup: totals, 12-week sparkline, top 10 contributors, per-repo summary list.                                          |
 | `GET /api/stats/repositories/:workspace/:slug/activity`      | Repo activity: 30-day daily sparkline + 30-day contributor list. (`recentCommits` dropped — see `/api/activity`.)               |
 | `GET /api/stats/repositories`                                | All tracked repositories with `project`, `commits30d`, `contributors30d`, and `lastCommitAt`.                                   |
+| `GET /api/stats/repo-contributors`                           | Top-N repos × top-M contributors with commit counts in a trailing window. Powers the Projects-page sunburst chart.              |
 | `GET /api/activity`                                          | Phase 4 unified feed of commits + PRs, newest-first. See "Activity feed" below for filters, pagination, and the response shape. |
 | `GET /api/live`                                              | Server-Sent Events stream for live dashboard updates. See "Live updates" below for the event catalog + wire format.             |
 

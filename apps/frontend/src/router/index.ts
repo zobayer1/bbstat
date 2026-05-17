@@ -13,6 +13,12 @@ export const router = createRouter({
     // Dedicated Activity page — lazy-loaded since it pulls in three
     // chart components and a paged store none of the other pages use.
     { path: '/activity', name: 'activity', component: () => import('@/views/Activity.vue') },
+    // Projects index — lazy-loaded; pulls the sunburst chart + the
+    // repo-contributors endpoint that no other page touches.
+    { path: '/projects', name: 'projects', component: () => import('@/views/Projects.vue') },
+    // Repositories index — lazy-loaded; full searchable / sortable
+    // table of every tracked repo plus a sync-health donut.
+    { path: '/repositories', name: 'repositories', component: () => import('@/views/Repositories.vue') },
     { path: '/users/:userId', name: 'user', component: UserSummary, props: true },
     { path: '/projects/:projectKey', name: 'project', component: ProjectStats, props: true },
     {

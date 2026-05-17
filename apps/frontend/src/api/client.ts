@@ -89,9 +89,11 @@ export interface ProjectStats {
     contributorCount7d: number;
     repositoryCount: number;
   };
-  weeklyCommits: Array<{ weekStart: string; commits: number }>;
   dailyCommits: Array<{ date: string; commits: number }>;
-  topContributors: TopContributor[];
+  // Project-scoped contributor table — same enriched shape as the
+  // repo detail page's per-repo contributors (30-day sparkline + adds /
+  // dels excluding merges) so both pages reuse the same row layout.
+  topContributors: RepoContributor[];
   repositories: Array<{
     workspace: string;
     slug: string;
@@ -116,6 +118,7 @@ export interface RepoActivity {
     workspace: string;
     slug: string;
     fullName: string;
+    project: string | null;
     syncStatus: RepoSyncStatus;
   };
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
@@ -170,6 +173,11 @@ export interface TrackedRepositorySummary {
   project: string | null;
   commits30d: number;
   contributors30d: number;
+  // 30-day non-merge diff totals. Surfaced for the Repositories
+  // index's compound bar chart; reads zero on repos whose diff-stat
+  // ingest hasn't landed yet (transient).
+  additions30d: number;
+  deletions30d: number;
   lastCommitAt: string | null;
   syncStatus: RepoSyncStatus;
 }
@@ -226,6 +234,15 @@ export interface ActivityPullRequest {
 
 export type ActivityEntry = ActivityCommit | ActivityPullRequest;
 
+export interface RepoContributorBreakdown {
+  workspace: string;
+  slug: string;
+  fullName: string;
+  project: string | null;
+  commits: number;
+  contributors: Array<{ userId: number; displayName: string; commits: number }>;
+}
+
 export interface ActivityQuery {
   actor?: number;
   repo?: string; // "<workspace>/<slug>"
@@ -273,6 +290,17 @@ export const api = {
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/activity`,
     ),
   listRepositories: () => request<TrackedRepositorySummary[]>('/api/stats/repositories'),
+  repoContributorBreakdown: (
+    query: { windowDays?: number; topRepos?: number; topPerRepo?: number; project?: string } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (query.windowDays !== undefined) params.set('windowDays', String(query.windowDays));
+    if (query.topRepos !== undefined) params.set('topRepos', String(query.topRepos));
+    if (query.topPerRepo !== undefined) params.set('topPerRepo', String(query.topPerRepo));
+    if (query.project !== undefined) params.set('project', query.project);
+    const qs = params.toString();
+    return request<RepoContributorBreakdown[]>(`/api/stats/repo-contributors${qs.length > 0 ? `?${qs}` : ''}`);
+  },
   members: (window: ContributorWindow = '7d') => request<WorkspaceMember[]>(`/api/stats/members?window=${window}`),
   activityDaily: (query: { actor?: number; repo?: string; project?: string } = {}) => {
     const params = new URLSearchParams();

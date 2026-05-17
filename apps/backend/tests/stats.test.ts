@@ -74,6 +74,7 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     getActivity: vi.fn(),
     getActivityCount: vi.fn(),
     getActivityDaily: vi.fn(),
+    getRepoContributorBreakdown: vi.fn(),
     ...overrides,
   };
 }
@@ -411,9 +412,18 @@ describe('GET /api/stats/projects/:projectKey', () => {
     const project: ProjectStats = {
       project: 'COMM',
       totals: { commits7d: 1, commits30d: 2, contributorCount7d: 3, repositoryCount: 4 },
-      weeklyCommits: [{ weekStart: '2026-05-04', commits: 5 }],
       dailyCommits: [{ date: '2026-05-12', commits: 2 }],
-      topContributors: [{ userId: 1, bitbucketUuid: '{u1}', displayName: 'Alice', commits: 9 }],
+      topContributors: [
+        {
+          userId: 1,
+          bitbucketUuid: '{u1}',
+          displayName: 'Alice',
+          commits: 9,
+          last30Days: new Array(30).fill(0),
+          additions30d: 120,
+          deletions30d: 45,
+        },
+      ],
       repositories: [
         {
           workspace: 'tigerit',
@@ -462,6 +472,7 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
         workspace: 'tigerit',
         slug: 'r1',
         fullName: 'tigerit/r1',
+        project: 'COMM',
         syncStatus: 'ok',
       },
       dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],
@@ -523,6 +534,8 @@ describe('GET /api/stats/repositories', () => {
         project: 'COMM',
         commits30d: 30,
         contributors30d: 4,
+        additions30d: 1234,
+        deletions30d: 432,
         lastCommitAt: '2026-05-12T00:00:00.000Z',
         syncStatus: 'ok' as const,
       },
@@ -533,6 +546,8 @@ describe('GET /api/stats/repositories', () => {
         project: null,
         commits30d: 0,
         contributors30d: 0,
+        additions30d: 0,
+        deletions30d: 0,
         lastCommitAt: null,
         syncStatus: 'never' as const,
       },
@@ -546,6 +561,72 @@ describe('GET /api/stats/repositories', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(repos);
     expect(listTrackedRepositoriesWithStats).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GET /api/stats/repo-contributors', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the per-repo contributor breakdown with default caps', async () => {
+    const payload = [
+      {
+        workspace: 'tigerit',
+        slug: 'r1',
+        fullName: 'tigerit/r1',
+        project: 'COMM',
+        commits: 50,
+        contributors: [{ userId: 1, displayName: 'Alice', commits: 30 }],
+      },
+    ];
+    const getRepoContributorBreakdown = vi.fn().mockResolvedValue(payload);
+    const statsStore = makeStatsStore({ getRepoContributorBreakdown });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/repo-contributors' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(payload);
+    expect(getRepoContributorBreakdown).toHaveBeenCalledWith({
+      windowDays: 30,
+      topRepos: 15,
+      topPerRepo: 5,
+      project: null,
+    });
+  });
+
+  it('passes overrides through to the store', async () => {
+    const getRepoContributorBreakdown = vi.fn().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getRepoContributorBreakdown });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({
+      method: 'GET',
+      url: '/api/stats/repo-contributors?windowDays=90&topRepos=20&topPerRepo=10&project=COMM',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(getRepoContributorBreakdown).toHaveBeenCalledWith({
+      windowDays: 90,
+      topRepos: 20,
+      topPerRepo: 10,
+      project: 'COMM',
+    });
+  });
+
+  it('rejects out-of-range caps with 400', async () => {
+    const getRepoContributorBreakdown = vi.fn();
+    const statsStore = makeStatsStore({ getRepoContributorBreakdown });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/repo-contributors?topRepos=999' });
+
+    expect(res.statusCode).toBe(400);
+    expect(getRepoContributorBreakdown).not.toHaveBeenCalled();
   });
 });
 

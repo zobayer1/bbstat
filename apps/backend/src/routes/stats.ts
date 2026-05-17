@@ -89,4 +89,33 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
   app.get('/repositories', async () => {
     return opts.statsStore.listTrackedRepositoriesWithStats();
   });
+
+  // Per-repo contributor breakdown feeding the Projects page sunburst.
+  // Caps are server-side so a runaway client can't pull every (repo,
+  // user) pair; defaults match what the chart renders cleanly. The
+  // optional `project` filter scopes the breakdown to a single
+  // project — used by the project-detail page to render the same
+  // chart over just that project's repos.
+  app.get<{
+    Querystring: { windowDays?: string; topRepos?: string; topPerRepo?: string; project?: string };
+  }>('/repo-contributors', async (request, reply) => {
+    const parsed = repoContributorsSchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+    }
+    const { windowDays, topRepos, topPerRepo, project } = parsed.data;
+    return opts.statsStore.getRepoContributorBreakdown({
+      windowDays,
+      topRepos,
+      topPerRepo,
+      project: project ?? null,
+    });
+  });
 };
+
+const repoContributorsSchema = z.object({
+  windowDays: z.coerce.number().int().min(1).max(365).default(30),
+  topRepos: z.coerce.number().int().min(1).max(50).default(15),
+  topPerRepo: z.coerce.number().int().min(1).max(20).default(5),
+  project: z.string().min(1).optional(),
+});
