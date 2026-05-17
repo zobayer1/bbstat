@@ -32,6 +32,7 @@ const commit: ActivityEntry = {
   deletions: 3,
   filesChanged: 4,
   isMerge: false,
+  diffStatsUnavailable: false,
   repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
   author: { userId: 1, displayName: 'Alice', bitbucketUuid: '{u1}' },
   occurredAt: '2026-05-12T18:00:00.000Z',

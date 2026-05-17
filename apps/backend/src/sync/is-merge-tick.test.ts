@@ -31,6 +31,7 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     resolveUserIdsByUuid: fail,
     setUserEmailsIfMissing: fail,
     listUsersMissingEmailWithLastCommit: fail,
+    incrementDiffStatsFailure: fail,
     insertCommits: fail,
     getSyncState: fail,
     markSyncRunning: fail,

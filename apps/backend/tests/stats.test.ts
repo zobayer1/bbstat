@@ -567,6 +567,7 @@ const sampleActivity: ActivityEntry[] = [
     deletions: 3,
     filesChanged: 4,
     isMerge: false,
+    diffStatsUnavailable: false,
     repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
     author: null,
     occurredAt: '2026-05-12T14:00:00.000Z',

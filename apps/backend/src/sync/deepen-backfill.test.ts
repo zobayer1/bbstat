@@ -54,6 +54,10 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
       // is the only caller.
       return [];
     },
+    async incrementDiffStatsFailure() {
+      // Not exercised by deepen tests.
+      return 0;
+    },
     async insertCommits(input): Promise<CommitInsertResult> {
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
       // Dedupe on (repo, sha) so we can simulate ON CONFLICT DO NOTHING.

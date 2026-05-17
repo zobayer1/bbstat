@@ -28,6 +28,7 @@ function fakeStore(): CommitStore {
     resolveUserIdsByUuid: fail,
     setUserEmailsIfMissing: fail,
     listUsersMissingEmailWithLastCommit: fail,
+    incrementDiffStatsFailure: fail,
     insertCommits: fail,
     getSyncState: fail,
     markSyncRunning: fail,

@@ -22,10 +22,14 @@ import type { RollupStore } from '../dashboard/rollup-store.js';
 interface FakeStoreState {
   queue: PendingDiffStatCommitWithRepo[];
   updates: Array<{ commitId: number; additions: number; deletions: number; filesChanged: number }>;
+  // Per-commit failure counter — mirrors the new `commits.diff_stats_failure_count`
+  // column. Lets us assert on increment behavior (weight=1 for generic 5xx,
+  // weight=3 for HTTP 555) and threshold crossings.
+  failureCounts: Map<number, number>;
 }
 
 function makeStore(queue: PendingDiffStatCommitWithRepo[]): { store: CommitStore; state: FakeStoreState } {
-  const state: FakeStoreState = { queue: [...queue], updates: [] };
+  const state: FakeStoreState = { queue: [...queue], updates: [], failureCounts: new Map() };
   const unreachable = (): never => {
     throw new Error('CommitStore method called from tick test — unexpected');
   };
@@ -44,6 +48,11 @@ function makeStore(queue: PendingDiffStatCommitWithRepo[]): { store: CommitStore
     },
     async updateCommitDiffStats(commitId, input) {
       state.updates.push({ commitId, ...input });
+    },
+    async incrementDiffStatsFailure(commitId, weight) {
+      const next = (state.failureCounts.get(commitId) ?? 0) + weight;
+      state.failureCounts.set(commitId, next);
+      return next;
     },
     getOldestCommitSha: unreachable,
     pickRepoForDeepening: unreachable,
@@ -347,5 +356,76 @@ describe('runDiffStatsBackfillTick', () => {
 
     expect(result.totalUpdated).toBe(1);
     expect(result.totalFailed).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Failure-budget mechanics. Drives the per-commit counter that gives up on
+  // commits BB keeps refusing to compute diff stats for (heavy commits that
+  // 555 the /diffstat endpoint repeatedly). Threshold is 3; generic 5xx
+  // adds 1 per failure, HTTP 555 adds 3 so one strike is enough.
+  // ---------------------------------------------------------------------------
+
+  it('increments by 1 on generic 5xx, stays below threshold, does not stamp', async () => {
+    const c = commit({ id: 100, sha: 'flaky-500', authoredAt: new Date('2026-05-15T00:00:00Z') });
+    const { store, state } = makeStore([c]);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 500 }));
+    const client = new BitbucketClient({
+      baseUrl: 'https://api.bitbucket.org/2.0',
+      email: 'a@b.c',
+      token: 't',
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      hourlyCallBudget: 1000,
+      retryBaseDelayMs: 0,
+    });
+
+    const result = await runDiffStatsBackfillTick({ client, store }, { maxCommitsPerTick: 50, budgetThreshold: 10 });
+
+    expect(state.failureCounts.get(100)).toBe(1);
+    expect(state.updates).toEqual([]); // no stamp at count=1
+    expect(result.totalFailed).toBe(1);
+    expect(result.totalUpdated).toBe(0);
+  });
+
+  it('crosses the threshold on the third generic-5xx and stamps with zeros', async () => {
+    const c = commit({ id: 101, sha: 'three-strikes', authoredAt: new Date('2026-05-15T00:00:00Z') });
+    const { store, state } = makeStore([c]);
+    // Pre-seed the counter to 2 so this tick's failure tips us to 3.
+    state.failureCounts.set(101, 2);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 500 }));
+    const client = new BitbucketClient({
+      baseUrl: 'https://api.bitbucket.org/2.0',
+      email: 'a@b.c',
+      token: 't',
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      hourlyCallBudget: 1000,
+      retryBaseDelayMs: 0,
+    });
+
+    await runDiffStatsBackfillTick({ client, store }, { maxCommitsPerTick: 50, budgetThreshold: 10 });
+
+    expect(state.failureCounts.get(101)).toBe(3);
+    // Stamp lands with all zeros so the commit drops out of future pickups.
+    expect(state.updates).toEqual([{ commitId: 101, additions: 0, deletions: 0, filesChanged: 0 }]);
+  });
+
+  it('crosses the threshold immediately on HTTP 555 (weight=3) and stamps with zeros', async () => {
+    const c = commit({ id: 102, sha: 'heavy-555', authoredAt: new Date('2026-05-15T00:00:00Z') });
+    const { store, state } = makeStore([c]);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 555 }));
+    const client = new BitbucketClient({
+      baseUrl: 'https://api.bitbucket.org/2.0',
+      email: 'a@b.c',
+      token: 't',
+      fetch: fetchMock as unknown as typeof globalThis.fetch,
+      hourlyCallBudget: 1000,
+      retryBaseDelayMs: 0,
+    });
+
+    await runDiffStatsBackfillTick({ client, store }, { maxCommitsPerTick: 50, budgetThreshold: 10 });
+
+    // 555 weight=3 crosses the threshold on a single strike — no need to wait
+    // out 3 ticks for what's a persistent-per-commit failure mode.
+    expect(state.failureCounts.get(102)).toBe(3);
+    expect(state.updates).toEqual([{ commitId: 102, additions: 0, deletions: 0, filesChanged: 0 }]);
   });
 });

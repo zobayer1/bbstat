@@ -150,6 +150,23 @@ export const commits = pgTable(
     additions: integer('additions').notNull().default(0),
     deletions: integer('deletions').notNull().default(0),
     filesChanged: integer('files_changed').notNull().default(0),
+    // Cumulative count of failed `/diffstat/<sha>` fetch attempts for this
+    // commit. Incremented by the diff-stats orchestrator on every caught
+    // error (BB 5xx surfaced from the BB client's exhausted in-tick
+    // retry budget): generic 5xx adds 1, HTTP 555 adds 3 — 555 means
+    // "BB compute timeout on this commit's diff", which is a persistent
+    // property of the commit shape (heavy file count, deep tree,
+    // rename-detection blow-up) rather than transient load. When the
+    // count reaches DIFF_STATS_FAILURE_THRESHOLD (3) the orchestrator
+    // also calls updateCommitDiffStats with zeros — stamping
+    // diff_stats_synced_at = NOW() drops the commit out of the pickup
+    // query for good, so we stop burning BB budget on it. The counter
+    // value survives the stamp so downstream readers (and the activity
+    // feed) can distinguish "we tried 3 times and gave up" from "this
+    // commit genuinely has zero changes". UI: ActivityFeed +
+    // CommitDetailModal swap the +/-/files line for an exclamation
+    // icon when count >= threshold.
+    diffStatsFailureCount: integer('diff_stats_failure_count').notNull().default(0),
     diffStatsSyncedAt: timestamp('diff_stats_synced_at', { withTimezone: true }),
     authoredAt: timestamp('authored_at', { withTimezone: true }).notNull(),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),

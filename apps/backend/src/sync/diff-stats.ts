@@ -29,8 +29,8 @@
 
 import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
-import { BitbucketRateLimitError } from '../bitbucket/errors.js';
-import type { CommitStore, PendingDiffStatCommit } from './commit-store.js';
+import { BitbucketApiError, BitbucketRateLimitError } from '../bitbucket/errors.js';
+import { DIFF_STATS_FAILURE_THRESHOLD, type CommitStore, type PendingDiffStatCommit } from './commit-store.js';
 import type { RepositoryHandle } from './commits.js';
 
 export interface DiffStatsSyncOptions {
@@ -162,15 +162,48 @@ async function walkAndPersist(
         throw err;
       }
       failed++;
-      deps.logger?.warn?.(
-        {
-          repositoryId: repo.repositoryId,
-          fullName: repo.fullName,
-          sha: commit.sha,
-          err: err instanceof Error ? err.message : String(err),
-        },
-        'diff-stats fetch failed — leaving commit pending for next tick',
-      );
+      // Same failure-budget mechanics as `runDiffStatsBackfillTick`: 555
+      // (BB compute timeout on this commit's diff) is persistent for the
+      // commit shape — weight 3 short-circuits the threshold on a single
+      // strike. Other 5xx / network blips get weight 1 so 3 cross-tick
+      // failures are needed before giving up.
+      //
+      // Without this, a heavy commit pushed *right now* would fail
+      // inline-eager (without counter increment), then fail again in the
+      // next backfill tick (which DOES increment) — paying ~2× the BB
+      // calls. Inline-eager touching the counter keeps the give-up path
+      // consistent regardless of which orchestrator surfaced the
+      // failure first.
+      const is555 = err instanceof BitbucketApiError && err.status === 555;
+      const weight = is555 ? DIFF_STATS_FAILURE_THRESHOLD : 1;
+      const newCount = await deps.store.incrementDiffStatsFailure(commit.id, weight);
+      if (newCount >= DIFF_STATS_FAILURE_THRESHOLD) {
+        await deps.store.updateCommitDiffStats(commit.id, { additions: 0, deletions: 0, filesChanged: 0 });
+        deps.logger?.warn?.(
+          {
+            repositoryId: repo.repositoryId,
+            fullName: repo.fullName,
+            sha: commit.sha,
+            failureCount: newCount,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          is555
+            ? 'diff-stats: BB compute timeout (555) — giving up on this commit'
+            : 'diff-stats: failure threshold crossed — giving up on this commit',
+        );
+      } else {
+        deps.logger?.warn?.(
+          {
+            repositoryId: repo.repositoryId,
+            fullName: repo.fullName,
+            sha: commit.sha,
+            failureCount: newCount,
+            threshold: DIFF_STATS_FAILURE_THRESHOLD,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'diff-stats fetch failed — leaving commit pending for next tick',
+        );
+      }
     }
   }
 

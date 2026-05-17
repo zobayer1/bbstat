@@ -1,0 +1,1 @@
+ALTER TABLE "commits" ADD COLUMN "diff_stats_failure_count" integer DEFAULT 0 NOT NULL;

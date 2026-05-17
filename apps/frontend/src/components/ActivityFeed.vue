@@ -262,7 +262,38 @@ function nextCommit(): void {
               <span v-else class="italic">anonymous</span>
               ·
               <span>{{ formatTime(entry.occurredAt) }}</span>
-              <span v-if="entry.kind === 'commit'">
+              <span v-if="entry.kind === 'commit' && entry.diffStatsUnavailable" class="inline-flex items-baseline">
+                ·
+                <!-- BB returned HTTP 555 (compute timeout) on /diffstat for
+                     this commit too many times; the orchestrator gave up
+                     and stamped it with zeros. Render an amber warning
+                     icon in place of the +/-/files line so the row reads
+                     as "stats unavailable" instead of misleadingly "no
+                     changes". Tooltip surfaces the underlying cause. -->
+                <span
+                  class="ml-1 inline-flex cursor-help items-baseline text-amber-600 hover:text-amber-700"
+                  title="BitBucket compute timeout (HTTP 555) — diff stats unavailable for this commit"
+                  aria-label="Diff stats unavailable: BitBucket compute timeout"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="1.5"
+                    stroke="currentColor"
+                    class="size-3.5 self-center"
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
+                    />
+                  </svg>
+                  <span class="ml-1">stats unavailable</span>
+                </span>
+              </span>
+              <span v-else-if="entry.kind === 'commit'">
                 · +{{ entry.additions }} −{{ entry.deletions }}
                 <span v-if="entry.filesChanged > 0">
                   · {{ entry.filesChanged }} file<span v-if="entry.filesChanged !== 1">s</span>

@@ -60,6 +60,7 @@ function noopCommitStore(): CommitStore {
     resolveUserIdsByUuid: fail,
     setUserEmailsIfMissing: fail,
     listUsersMissingEmailWithLastCommit: fail,
+    incrementDiffStatsFailure: fail,
     insertCommits: fail,
     getSyncState: fail,
     markSyncRunning: fail,
@@ -181,6 +182,11 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
       // No-op default — dedicated email-backfill tests construct a
       // fresh CommitStore stub that returns seed data inline.
       return [];
+    },
+    async incrementDiffStatsFailure() {
+      // No-op default — diff-stats failure budgeting is tested in
+      // diff-stats-tick.test.ts.
+      return 0;
     },
     async insertCommits(input) {
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];

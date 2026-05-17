@@ -24,10 +24,11 @@ function makeRepo(over: Partial<RepositoryHandle> = {}): RepositoryHandle {
 
 interface FakeState {
   updates: Array<{ commitId: number; additions: number; deletions: number; filesChanged: number }>;
+  failureCounts: Map<number, number>;
 }
 
 function makeStore(): { store: CommitStore; state: FakeState } {
-  const state: FakeState = { updates: [] };
+  const state: FakeState = { updates: [], failureCounts: new Map() };
   const unreachable = (): never => {
     throw new Error('CommitStore method called from diff-stats test — unexpected');
   };
@@ -35,6 +36,14 @@ function makeStore(): { store: CommitStore; state: FakeState } {
     resolveUserIdsByUuid: unreachable,
     setUserEmailsIfMissing: unreachable,
     listUsersMissingEmailWithLastCommit: unreachable,
+    async incrementDiffStatsFailure(commitId, weight) {
+      // Mirrors the Drizzle impl's atomic increment-then-return — the
+      // inline-eager path in fetchDiffStatsForCommits now calls this on
+      // every per-commit failure (same shape as the backfill tick).
+      const next = (state.failureCounts.get(commitId) ?? 0) + weight;
+      state.failureCounts.set(commitId, next);
+      return next;
+    },
     insertCommits: unreachable,
     getSyncState: unreachable,
     markSyncRunning: unreachable,

@@ -79,6 +79,11 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
       // tests/admin.test.ts.
       return [];
     },
+    async incrementDiffStatsFailure() {
+      // Not exercised by commit-sync tests — the diff-stats orchestrator
+      // is the only caller, covered in diff-stats-tick.test.ts.
+      return 0;
+    },
     async insertCommits(input) {
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
       for (const c of input) {

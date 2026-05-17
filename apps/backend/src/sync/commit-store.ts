@@ -8,11 +8,25 @@
 // (getSyncState, markSync{Running,Success,Failed}) own the sync_state row
 // lifecycle for a single repository.
 
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { commitDaily, commits, repositories, syncState, users } from '../db/schema.js';
 
 export type SyncStatus = 'idle' | 'running' | 'success' | 'failed';
+
+// Per-commit failure budget threshold for `/diffstat/<sha>` fetches.
+// Cross this many cumulative failures and the orchestrator stops re-
+// queueing the commit. Exported so both the orchestrator (deciding
+// when to stamp-as-done) and the pickup queries (defending against
+// stamp-then-counter-drift) agree on the same number.
+//
+// Weight scheme used by `incrementDiffStatsFailure`: generic 5xx adds
+// 1 per failed tick, HTTP 555 adds 3 (one strike is enough — that
+// class of failure is persistent for the commit shape). So a 555
+// crosses the threshold immediately; a flaky 500/502/503 gets three
+// chances spread across however many ticks it takes the global
+// pickup to re-attempt this commit.
+export const DIFF_STATS_FAILURE_THRESHOLD = 3;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -148,6 +162,18 @@ export interface CommitStore {
     input: { additions: number; deletions: number; filesChanged: number },
   ): Promise<void>;
 
+  // Increment the per-commit `diff_stats_failure_count` by `weight`. The
+  // diff-stats orchestrator calls this from its catch block on every
+  // /diffstat fetch failure surfaced through the BB client (after its
+  // in-tick retry budget has already been exhausted). Generic 5xx uses
+  // weight=1; HTTP 555 (BB compute timeout for this commit's diff) uses
+  // weight=3 so a single 555 strike crosses the threshold immediately —
+  // that class of failure is persistent for the commit shape and
+  // retrying buys nothing. Returns the post-increment count so the
+  // caller can decide whether to also stamp the commit as done (with
+  // zeros) to remove it from future pickups.
+  incrementDiffStatsFailure(commitId: number, weight: number): Promise<number>;
+
   // Oldest known commit (by authored_at ASC) for the repo, used as the
   // seed sha for deepen-backfill's `include=<sha>` walk. Null when no
   // commits have been ingested yet (cold mode hasn't run).
@@ -215,13 +241,24 @@ export interface CommitStore {
   resetSyncCursors(repositoryId: number): Promise<void>;
 
   // Re-arm diff-stat backfill for a repo. Zeros the line counts on
-  // every commit, clears `diff_stats_synced_at`, AND zeros the
+  // every commit, clears `diff_stats_synced_at`, **resets the
+  // per-commit `diff_stats_failure_count` to zero**, AND zeros the
   // `commit_daily` aggregates for the repo so the dashboard shows
   // clearly-wrong (zero) rather than subtly-wrong (mixed) during the
   // drain. The next diff-stats backfill ticks re-fetch /diffstat with
   // whatever filter is now configured in
   // `repositories.diff_stats_exclude_patterns`, and the rollup hook
   // refills `commit_daily` as commits drain.
+  //
+  // The failure-count reset is what makes the admin "reset" operation
+  // actually re-arm previously gave-up'd commits — otherwise the
+  // pickup queries' `failure_count < 3` predicate would still filter
+  // them out and the operator's reset would silently do nothing on
+  // those rows. If BB has since recovered on a heavy commit (rare but
+  // possible — BB-side caching artifact, GC'd parent restored, etc.),
+  // this gives them another shot. Commits that are still genuinely
+  // too heavy will fail again on the next attempt and re-cross the
+  // threshold; cost is one round of BB calls per stuck commit.
   //
   // Single transaction so the dashboard never observes a partial
   // state. Returns the count of commits whose stamp was cleared
@@ -405,7 +442,20 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
       const rows = await db
         .select({ id: commits.id, sha: commits.sha, authoredAt: commits.authoredAt })
         .from(commits)
-        .where(and(eq(commits.repositoryId, repositoryId), isNull(commits.diffStatsSyncedAt)))
+        .where(
+          and(
+            eq(commits.repositoryId, repositoryId),
+            isNull(commits.diffStatsSyncedAt),
+            // Belt-and-suspenders alongside the IS NULL check above —
+            // once a commit crosses the failure threshold the
+            // orchestrator stamps it with zeros so it drops out of the
+            // IS NULL predicate naturally, but this guard means a
+            // future stamp-without-counter-increment (or a manual
+            // operator NULL of the stamp) still skips give-up'd
+            // commits until the counter is reset.
+            lt(commits.diffStatsFailureCount, DIFF_STATS_FAILURE_THRESHOLD),
+          ),
+        )
         .orderBy(desc(commits.authoredAt))
         .limit(limit);
       return rows;
@@ -437,6 +487,12 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .where(
           and(
             isNull(commits.diffStatsSyncedAt),
+            // Same belt-and-suspenders as listPendingDiffStatCommits —
+            // commits that crossed the failure threshold are stamped
+            // with zeros + NOW() so the IS NULL check above already
+            // skips them, but the explicit guard means manual operator
+            // un-stamps still skip until the counter is reset.
+            lt(commits.diffStatsFailureCount, DIFF_STATS_FAILURE_THRESHOLD),
             eq(repositories.archived, false),
             eq(repositories.syncExcluded, false),
           ),
@@ -456,6 +512,19 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
           diffStatsSyncedAt: new Date(),
         })
         .where(eq(commits.id, commitId));
+    },
+
+    async incrementDiffStatsFailure(commitId, weight) {
+      // Single UPDATE ... RETURNING — one round-trip, atomic, returns the
+      // post-increment count so the caller can branch on threshold
+      // crossing without a follow-up SELECT.
+      const result = await db.execute<{ diff_stats_failure_count: number }>(sql`
+        UPDATE commits
+        SET diff_stats_failure_count = diff_stats_failure_count + ${weight}::int
+        WHERE id = ${commitId}
+        RETURNING diff_stats_failure_count
+      `);
+      return result.rows[0]?.diff_stats_failure_count ?? 0;
     },
 
     async getOldestCommitSha(repositoryId) {
@@ -600,11 +669,14 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
       // Run both UPDATEs in one transaction so the dashboard never sees
       // commits.* cleared while commit_daily still has the old (inflated)
       // sums — or vice versa. The backfill tick repopulates upward as
-      // it drains.
+      // it drains. diffStatsFailureCount is also zeroed so previously
+      // gave-up'd commits re-enter the pickup queue — without that the
+      // `failure_count < 3` predicate would silently filter them out
+      // and the operator's reset would be a no-op for those rows.
       return await db.transaction(async (tx) => {
         const commitResult = await tx
           .update(commits)
-          .set({ additions: 0, deletions: 0, filesChanged: 0, diffStatsSyncedAt: null })
+          .set({ additions: 0, deletions: 0, filesChanged: 0, diffStatsSyncedAt: null, diffStatsFailureCount: 0 })
           .where(eq(commits.repositoryId, repositoryId));
         await tx
           .update(commitDaily)

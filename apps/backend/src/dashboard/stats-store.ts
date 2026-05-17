@@ -182,6 +182,16 @@ export interface ActivityCommit {
   // authorship volume). Future per-user 30d aggregates over adds/dels
   // will default-exclude rows where `is_merge = true`.
   isMerge: boolean;
+  // True when the diff-stats orchestrator gave up fetching diffs for
+  // this commit (commits.diff_stats_failure_count >= the orchestrator's
+  // threshold). Surfaces in the activity feed as an exclamation icon
+  // in place of the +/-/files row, tooltip "BitBucket compute timeout
+  // (HTTP 555)". `additions` / `deletions` / `filesChanged` will all
+  // read 0 in this case — the stamp-with-zeros pattern that drops the
+  // commit out of the pickup query. Renderers MUST branch on this
+  // flag rather than treating zeros as "small commit", otherwise the
+  // commit looks like a no-op.
+  diffStatsUnavailable: boolean;
   repository: ActivityRepository;
   author: ActivityAuthor | null;
   // commits.authored_at, ISO 8601.
@@ -1030,6 +1040,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         deletions: number | null;
         files_changed: number | null;
         is_merge: boolean | null;
+        diff_stats_unavailable: boolean | null;
         pr_id: number | null;
         title: string | null;
         state: string | null;
@@ -1053,6 +1064,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             c.deletions AS deletions,
             c.files_changed AS files_changed,
             c.is_merge AS is_merge,
+            -- Derive the give-up flag at query time rather than persisting a
+            -- separate boolean — the threshold lives in the orchestrator
+            -- (DIFF_STATS_FAILURE_THRESHOLD = 3, kept literal here so the
+            -- SQL is self-contained). Stays in sync as long as both sides
+            -- agree on the constant; verified by the activity-feed test.
+            (c.diff_stats_failure_count >= 3) AS diff_stats_unavailable,
             NULL::int AS pr_id,
             NULL::text AS title,
             NULL::text AS state,
@@ -1085,6 +1102,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             NULL::int AS deletions,
             NULL::int AS files_changed,
             NULL::boolean AS is_merge,
+            NULL::boolean AS diff_stats_unavailable,
             pr.bitbucket_pr_id AS pr_id,
             pr.title AS title,
             pr.state::text AS state,
@@ -1133,6 +1151,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             deletions: r.deletions!,
             filesChanged: r.files_changed ?? 0,
             isMerge: r.is_merge ?? false,
+            diffStatsUnavailable: r.diff_stats_unavailable ?? false,
             repository,
             author,
             occurredAt,

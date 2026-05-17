@@ -199,6 +199,14 @@ export interface ActivityCommit {
   deletions: number;
   filesChanged: number;
   isMerge: boolean;
+  // True when the diff-stats orchestrator gave up fetching diffs for
+  // this commit (typically HTTP 555 — BB compute timeout). The +/-/files
+  // row in the UI swaps for an exclamation icon when this is true;
+  // additions / deletions / filesChanged will all be 0 (the stamp-with-
+  // zeros pattern that drops the commit out of the backfill pickup),
+  // so renderers MUST branch on this flag, not on a "values are zero"
+  // heuristic, or the icon swap won't happen.
+  diffStatsUnavailable: boolean;
   repository: ActivityRepository;
   author: ActivityAuthor | null;
   occurredAt: string;

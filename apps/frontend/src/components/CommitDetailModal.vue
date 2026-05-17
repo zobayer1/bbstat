@@ -113,7 +113,36 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </span>
           <span v-else class="italic">anonymous</span>
           <span>{{ formattedTime }}</span>
-          <span>
+          <!-- Diff stats unavailable: BB returned HTTP 555 (compute timeout)
+               too many times for this commit's /diffstat. Show an amber
+               warning glyph + tooltip rather than misleading "0 / 0 / 0
+               files" — the numbers are nominally accurate but read as "no
+               change" which is wrong for what's usually a very heavy
+               commit. -->
+          <span
+            v-if="commit.diffStatsUnavailable"
+            class="inline-flex cursor-help items-center gap-1 text-amber-600 hover:text-amber-700"
+            title="BitBucket compute timeout (HTTP 555) — diff stats unavailable for this commit"
+            aria-label="Diff stats unavailable: BitBucket compute timeout"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="1.5"
+              stroke="currentColor"
+              class="size-4"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
+              />
+            </svg>
+            <span>stats unavailable</span>
+          </span>
+          <span v-else>
             <span class="text-emerald-700">+{{ commit.additions.toLocaleString() }}</span>
             <span class="ml-2 text-rose-700">−{{ commit.deletions.toLocaleString() }}</span>
             <span v-if="commit.filesChanged > 0" class="ml-2"
