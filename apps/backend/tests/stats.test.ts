@@ -179,6 +179,7 @@ describe('GET /api/stats/top-contributors', () => {
         last30Days: Array.from({ length: 30 }, (_, i) => (i === 29 ? 5 : 1)),
         additionsWindow: 1200,
         deletionsWindow: 400,
+        reposWindow: 4,
       },
       {
         userId: 2,
@@ -188,6 +189,7 @@ describe('GET /api/stats/top-contributors', () => {
         last30Days: new Array(30).fill(0),
         additionsWindow: 500,
         deletionsWindow: 150,
+        reposWindow: 2,
       },
     ];
     const getTopContributors = vi.fn().mockResolvedValue(contributors);
@@ -428,6 +430,7 @@ describe('GET /api/stats/projects/:projectKey', () => {
           deletions30d: 45,
           additionsWindow: 120,
           deletionsWindow: 45,
+          reposWindow: 2,
         },
       ],
       repositories: [
@@ -494,6 +497,7 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
           deletions30d: 0,
           additionsWindow: 0,
           deletionsWindow: 0,
+          reposWindow: 1,
         },
       ],
     };

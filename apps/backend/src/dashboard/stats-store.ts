@@ -54,6 +54,9 @@ export interface TopContributorWithSparkline extends TopContributor {
   // elsewhere on the dashboard.
   additionsWindow: number;
   deletionsWindow: number;
+  // Distinct repositories the contributor landed code in over the
+  // same window. Same metric the Members table surfaces as "Repos".
+  reposWindow: number;
 }
 
 export interface UserSummary {
@@ -513,6 +516,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         commits: number;
         additions_window: number;
         deletions_window: number;
+        repos_window: number;
         last_30_days: number[];
       }>(sql`
         WITH top AS (
@@ -522,7 +526,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             u.display_name,
             sum(cd.commit_count)::int AS commits,
             sum(cd.additions)::int AS additions_window,
-            sum(cd.deletions)::int AS deletions_window
+            sum(cd.deletions)::int AS deletions_window,
+            count(DISTINCT cd.repository_id)::int AS repos_window
           FROM commit_daily cd
           JOIN users u ON u.id = cd.author_user_id
           WHERE cd.day >= current_date - ${windowDays - 1}::int
@@ -554,6 +559,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           t.commits,
           t.additions_window,
           t.deletions_window,
+          t.repos_window,
           spark.last_30_days
         FROM top t
         JOIN spark ON spark.user_id = t.user_id
@@ -567,6 +573,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         last30Days: r.last_30_days,
         additionsWindow: r.additions_window,
         deletionsWindow: r.deletions_window,
+        reposWindow: r.repos_window,
       }));
     },
 
@@ -735,12 +742,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last_30_days: number[];
           additions_30d: number;
           deletions_30d: number;
+          repos_30d: number;
         }>(sql`
           WITH project_repos AS (
             SELECT id FROM repositories WHERE project = ${projectKey}
           ),
           top AS (
-            SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
+            SELECT
+              u.id AS user_id,
+              u.bitbucket_uuid,
+              u.display_name,
+              sum(cd.commit_count)::int AS commits,
+              count(DISTINCT cd.repository_id)::int AS repos_30d
             FROM commit_daily cd
             JOIN users u ON u.id = cd.author_user_id
             WHERE cd.repository_id IN (SELECT id FROM project_repos)
@@ -781,6 +794,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             t.bitbucket_uuid,
             t.display_name,
             t.commits,
+            t.repos_30d,
             spark.last_30_days,
             COALESCE(diff_summary.additions_30d, 0) AS additions_30d,
             COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d
@@ -854,6 +868,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           // mirror the explicit 30d values.
           additionsWindow: r.additions_30d,
           deletionsWindow: r.deletions_30d,
+          reposWindow: r.repos_30d,
         })),
         repositories: repoRows.rows.map((r) => ({
           workspace: r.workspace,
@@ -1084,6 +1099,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           // same alias.
           additionsWindow: r.additions_30d,
           deletionsWindow: r.deletions_30d,
+          // Per-repo contributors are by definition working on this
+          // one repo, so the distinct-repo count is always 1.
+          reposWindow: 1,
         })),
       };
     },

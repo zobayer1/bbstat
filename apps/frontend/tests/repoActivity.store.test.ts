@@ -29,6 +29,7 @@ const sample: RepoActivity = {
       deletions30d: 0,
       additionsWindow: 0,
       deletionsWindow: 0,
+      reposWindow: 1,
     },
   ],
 };

@@ -52,6 +52,9 @@ export interface TopContributorWithSparkline extends TopContributor {
   // Adds / dels for the same window as `commits` (merges excluded).
   additionsWindow: number;
   deletionsWindow: number;
+  // Distinct repos this contributor landed code in over the same
+  // window. Mirrors the Members table's "Repos" column.
+  reposWindow: number;
 }
 
 export type ContributorWindow = '7d' | '30d';

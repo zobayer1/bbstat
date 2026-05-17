@@ -484,7 +484,7 @@ function clearFilters(): void {
         <h2
           class="border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-medium uppercase tracking-wider text-slate-500"
         >
-          Top 10 repositories · last 30 days
+          Top 10 repositories by commits · last 30 days
         </h2>
         <table v-if="topRepos.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
           <tbody class="divide-y divide-slate-100">
@@ -512,7 +512,7 @@ function clearFilters(): void {
         <h2
           class="border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-medium uppercase tracking-wider text-slate-500"
         >
-          Top 10 contributors · last {{ stats.contributorsWindow === '7d' ? '7' : '30' }} days
+          Top 10 contributors by commits · last {{ stats.contributorsWindow === '7d' ? '7' : '30' }} days
         </h2>
         <table v-if="topContributors.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
           <tbody class="divide-y divide-slate-100">

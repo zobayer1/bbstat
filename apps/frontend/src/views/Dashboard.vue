@@ -186,7 +186,7 @@ const topRepos = computed(() =>
 
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
-    <header class="relative mb-6 h-24 overflow-hidden rounded-lg">
+    <header class="relative mb-6 h-[88px] overflow-hidden rounded-lg">
       <!-- Full-width water. Two layered paths fan across any
            viewport via preserveAspectRatio="none": a higher cyan
            layer with sharply irregular peaks, and a softer sky
@@ -497,7 +497,22 @@ const topRepos = computed(() =>
                   <span class="text-slate-300">/</span>
                   <span class="text-left text-rose-600">−{{ c.deletionsWindow.toLocaleString() }}</span>
                 </div>
-                <span class="w-24 shrink-0 text-right text-sm text-slate-500">{{ c.commits }} commits</span>
+                <!-- Digit gets the flex-1 left slot (right-aligned via
+                     text-right); label sits in a fixed-width right
+                     slot, left-aligned, plural-aware. Because the
+                     label box is the same width on every row, the
+                     digit's right edge and the label's left edge
+                     are uniform across rows — `1 commit` / `1 repo`
+                     stay grammatically correct without breaking the
+                     column alignment. -->
+                <div class="flex w-24 shrink-0 items-baseline gap-1 text-sm tabular-nums text-slate-500">
+                  <span class="flex-1 text-right">{{ c.commits }}</span>
+                  <span class="w-14 text-left">commit{{ c.commits !== 1 ? 's' : '' }}</span>
+                </div>
+                <div class="flex w-16 shrink-0 items-baseline gap-1 text-sm tabular-nums text-slate-500">
+                  <span class="flex-1 text-right">{{ c.reposWindow }}</span>
+                  <span class="w-10 text-left">repo{{ c.reposWindow !== 1 ? 's' : '' }}</span>
+                </div>
               </RouterLink>
             </li>
           </ul>
