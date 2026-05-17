@@ -31,9 +31,24 @@ Three layers — keep them separate; don't collapse them into a single tier.
 
 **Cache layering, in one line:** Postgres = truth, Redis = pre-computed user summaries on the server, Pinia = the browser's working copy. Don't blur these.
 
-**When you change a persisted-store shape** (add/rename/remove a field on a Pinia store's persisted state, or alter a shared type like `WorkspaceMember` / `UserSummary` that flows into one), **bump `CACHE_VERSION` in `apps/frontend/src/lib/cache-version.ts`**. The boot-time bust in `lib/cache-bust.ts` wipes every `bbstat-*` localStorage key on version mismatch — users who already have the page open get fresh data on next reload instead of rendering the old shape against new components. Redis caches (`bbstat:*` keys) are separate: keep manually flushing those with `docker compose exec redis redis-cli FLUSHDB` when the same kind of shape change reaches a Redis-cached payload (today: `UserSummary`).
-
 When in doubt about where logic belongs: aggregation/rollup work goes in the sync layer or backend, not the client.
+
+### Changing a persisted-store shape — bump `CACHE_VERSION`
+
+Pinia stores persist their state to `localStorage` (via `pinia-plugin-persistedstate`), and components read synchronously from that cache before the backend responds. A field that exists in the new TypeScript shape but not in the persisted blob renders `undefined`, with everything that implies. The boot-time bust handles this automatically — but only if you bump the version.
+
+Any time you do one of the following:
+
+- Add, rename, or remove a field on a `defineStore(...)` body that is referenced inside its `persist.pick` list
+- Add or remove an entry from a `persist.pick` array
+- Change the shape of a type that flows into a persisted store — most notably `WorkspaceMember`, `UserSummary`, `TrackedRepositorySummary`, `ProjectStats`, `RepoActivity`, `ActivityEntry` and their nested types (these live in `apps/frontend/src/api/client.ts`, mirrored from `apps/backend/src/dashboard/stats-store.ts`)
+- Change the `pinia-plugin-persistedstate` config (serializer, key strategy, etc.)
+
+…increment `CACHE_VERSION` in `apps/frontend/src/lib/cache-version.ts` in the **same commit / PR** as the shape change. The boot bust in `lib/cache-bust.ts` runs before any store hydrates and wipes every `bbstat-*` prefixed localStorage key when the sentinel mismatches the in-code version, so users see fresh data on their next reload — no manual `localStorage.clear()` console command, no support questions about UUIDs showing where emails should be.
+
+**Redis is separate and stays manual.** The server-side cache (`bbstat:*` keys, today only `UserSummary` rollups via `apps/backend/src/dashboard/user-summary-cache.ts`) survives across browser sessions and across server restarts — auto-flushing on every boot would defeat the cache. When a shape change touches a Redis-cached payload, the operator runs `docker compose exec redis redis-cli FLUSHDB` after deploy. Surface this as part of the post-deploy reminder for any change involving `UserSummary` (or future Redis-cached shapes).
+
+**Multi-tab caveat.** If a user has the app open in two tabs during the deploy, the older tab's in-memory state can write the old shape back to `localStorage` under the new key after the sentinel has already been updated. Reloading the older tab fixes it. Not common enough to engineer around — flag if it starts biting in practice and the follow-up is a `storage`-event listener that calls `location.reload()` on sentinel change.
 
 ## Authentication
 

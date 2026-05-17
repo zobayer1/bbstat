@@ -115,6 +115,22 @@ Post-Phase-4 ops work driven by running the sync at 160-repo scale and hitting B
 - **Project activity heatmap**: `CommitHeatmap` mounted on project detail pages with project-scoped `dailyCommits` aggregate.
 - **Algorithm doc** (`docs/sync.md`): "Backpressure algorithm" section explaining the 5-layer defense (self-counted budget, adaptive pacing, tick abort, fair round-robin, and adaptive per-repo backoff for quiet repos) plus a "Tick execution order" tree, and a "Tuning playbook" mapping log symptoms to knobs.
 
+#### Phase 4 follow-ups — Workspace Members page + git-author email + cache versioning ✅ Landed
+
+Standalone roster page reachable from the Dashboard's "Workspace Members" stat card, plus the supporting plumbing.
+
+- **`GET /api/stats/members?window=7d|30d`** — single 4-CTE query (base / last_active / daily / spark) returning the full eligible roster (`HAVING sum(commit_count) > 0`; archived / sync-excluded repos filtered). Powers the page in one round-trip; fuzzy search, sort, pagination all run on the frontend over the cached payload.
+- **`/members` page** (`apps/frontend/src/views/Members.vue`) — Fuse.js fuzzy search across `displayName` / `username` / `email`, sortable columns, 100-per-page client-side pagination, per-row 30-day sparkline, vertical separator between window-scoped and window-independent columns. SSE wiring (`tick.commits.complete` + `repository.deleted` + fallback) keeps it fresh.
+- **Two aggregate charts** above the table: activity-status donut (recency buckets 7d / 30d / 90d / dormant, mutually exclusive partition; emerald / blue / amber / slate) and Lorenz commit-concentration curve with a Gini coefficient badge. Both pure SVG, no external charting dep.
+- **Dashboard stat-card entry** with a 3D hover tilt (`perspective:1200px` + composite `rotateX/rotateY` transform) and a Heroicons "users" glyph that color-flips to `blue-500` on hover.
+- **Git-author email capture** — new nullable `users.email` column populated from `commits.author.raw` at ingest time, write-once via `COALESCE`. Parser (`apps/backend/src/sync/author-email.ts`) filters BB / GitHub `noreply` synthetics. Plumbed into both forward commit-sync and deepen-backfill. Surfaced in `WorkspaceMember.email`, `UserSummary.user.email`, and the Members row / user-detail header (UUID stays as the `font-mono` fallback when email is null).
+- **Retroactive admin backfill** — `POST /api/admin/users/backfill-emails?limit=N` walks every NULL-email user's most recent ingested commit (`DISTINCT ON (author_user_id)`, archived / excluded repos filtered), fetches that one commit via `paginateCommits({include: sha})`, parses and bulk-writes. Default cap 500, hard cap 2000. One-shot, idempotent.
+- **`CACHE_VERSION` boot-time bust** — `bustStaleCacheIfNeeded()` wipes every `bbstat-*` prefixed localStorage key when the in-code version mismatches the sentinel. Pinia persistedstate is configured globally with the `bbstat-` prefix so new stores auto-participate. Eliminates the "stale persisted shape renders against new component code" failure mode that hit twice during this work.
+- **Migration**: `ALTER TABLE users ADD COLUMN email text` (Drizzle `0012_cold_champions.sql` + Flyway `V1_13__add_users_email.sql`).
+- **Docs**: [`docs/members.md`](members.md) covers the page surface, charts, SSE, email capture + backfill, and the change-checklist for member-facing shapes; [`docs/frontend-cache.md`](frontend-cache.md) covers the `CACHE_VERSION` mechanism with side-effect analysis.
+
+**Status:** Landed across `297548d`..`09802b8` (5 commits). Members page, charts, SSE / sparkline, email + admin backfill, and `CACHE_VERSION` cache invalidation.
+
 ### Phase 5 — Webhook trigger + admin UI (~3–4 days, stretch)
 
 Kill polling for hot repos; give operators visibility and self-service.
