@@ -94,6 +94,17 @@ function commitTitle(message: string): string {
   return message.split('\n')[0] ?? '';
 }
 
+// Web URL on bitbucket.org (NOT the API host) for the row's canonical
+// upstream view. Used by the small external-link icon at the right edge
+// of each title line. Hardcoded to the Cloud host since this project
+// targets BitBucket Cloud per CLAUDE.md; self-hosted Server would need a
+// config-driven base URL.
+function bitbucketUrl(entry: ActivityEntry): string {
+  const { workspace, slug } = entry.repository;
+  if (entry.kind === 'commit') return `https://bitbucket.org/${workspace}/${slug}/commits/${entry.sha}`;
+  return `https://bitbucket.org/${workspace}/${slug}/pull-requests/${entry.prId}`;
+}
+
 function prBadgeClass(state: 'OPEN' | 'MERGED' | 'DECLINED' | 'SUPERSEDED'): string {
   switch (state) {
     case 'OPEN':
@@ -181,25 +192,64 @@ function nextCommit(): void {
           </span>
 
           <div class="min-w-0 flex-1">
-            <p class="truncate text-slate-900">
-              <RouterLink
-                :to="{
-                  name: 'repository',
-                  params: { workspace: entry.repository.workspace, slug: entry.repository.slug },
-                }"
-                class="font-medium hover:text-slate-600"
-              >
-                {{ entry.repository.slug }}
-              </RouterLink>
-              <span v-if="entry.kind === 'commit'" class="text-slate-700">
-                —
-                <button type="button" class="cursor-pointer text-left hover:underline" @click="openCommit(entry.sha)">
+            <div class="flex items-baseline gap-2">
+              <p class="min-w-0 flex-1 truncate text-slate-900">
+                <RouterLink
+                  :to="{
+                    name: 'repository',
+                    params: { workspace: entry.repository.workspace, slug: entry.repository.slug },
+                  }"
+                  class="font-medium hover:text-slate-600"
+                >
+                  {{ entry.repository.slug }}
+                </RouterLink>
+                <span v-if="entry.kind === 'commit'" class="text-slate-700">
+                  —
+                  <!-- Sha + visual separator are static labels — the modal
+                       trigger lives ONLY on the title, so the hover-underline
+                       doesn't sweep across the monospaced sha and the
+                       slate-400 dash (which read awkwardly underlined). -->
                   <span class="font-mono text-xs text-slate-500">{{ entry.sha.slice(0, 7) }}</span>
-                  <span class="font-medium text-slate-800">{{ commitTitle(entry.message) }}</span>
-                </button>
-              </span>
-              <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
-            </p>
+                  <span class="mx-1.5 text-slate-400">—</span>
+                  <button
+                    type="button"
+                    class="cursor-pointer text-left font-medium text-slate-800 hover:underline"
+                    @click="openCommit(entry.sha)"
+                  >
+                    {{ commitTitle(entry.message) }}
+                  </button>
+                </span>
+                <span v-else class="text-slate-700"> — #{{ entry.prId }} {{ entry.title }}</span>
+              </p>
+              <!-- Open the canonical view on bitbucket.org in a new tab.
+                   Deliberately separate from the commit/PR title link so
+                   clicking the title still opens our local detail modal /
+                   page rather than navigating away. `rel=noopener` is
+                   standard for target=_blank links. -->
+              <a
+                :href="bitbucketUrl(entry)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="shrink-0 text-slate-400 transition-colors hover:text-blue-600"
+                :title="entry.kind === 'commit' ? 'Open commit on BitBucket' : 'Open pull request on BitBucket'"
+                :aria-label="entry.kind === 'commit' ? 'Open commit on BitBucket' : 'Open pull request on BitBucket'"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke-width="1.5"
+                  stroke="currentColor"
+                  class="size-4"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25"
+                  />
+                </svg>
+              </a>
+            </div>
             <p class="mt-1.5 text-xs text-slate-500">
               <span v-if="entry.author">
                 <RouterLink

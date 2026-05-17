@@ -231,6 +231,7 @@ describe('GET /api/stats/members', () => {
       bitbucketUuid: '{u1}',
       displayName: 'Alice',
       username: 'alice',
+      email: 'alice@example.com',
       commitsWindow: 12,
       commitsAllTime: 200,
       additionsWindow: 540,
@@ -245,6 +246,7 @@ describe('GET /api/stats/members', () => {
       bitbucketUuid: '{u2}',
       displayName: 'Bob',
       username: null,
+      email: null,
       commitsWindow: 0,
       commitsAllTime: 18,
       additionsWindow: 0,
@@ -292,7 +294,7 @@ describe('GET /api/stats/members', () => {
 });
 
 const sampleUserSummary: UserSummary = {
-  user: { id: 7, bitbucketUuid: '{u7}', displayName: 'Alice' },
+  user: { id: 7, bitbucketUuid: '{u7}', displayName: 'Alice', email: 'alice@example.com' },
   totals: {
     commits7d: 12,
     commits30d: 40,

@@ -25,6 +25,7 @@
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
+import { parseAuthorEmail } from './author-email.js';
 import { BitbucketApiError, BitbucketRateLimitError } from '../bitbucket/errors.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
@@ -102,9 +103,13 @@ export interface DeepenBackfillDeps {
 // Extends CommitInsertInput with the BB-side author uuid so we can resolve
 // it back to a users.id after collecting the batch (one bulk
 // resolveUserIdsByUuid call instead of per-commit lookups). Stripped
-// before passing to insertCommits.
+// before passing to insertCommits. `parsedEmail` carries the `<email>`
+// portion of author.raw when it parses cleanly (and survives the noreply
+// filter), so the write-once email capture can batch across the whole
+// pull without iterating author.raw a second time.
 interface DeepenInsertStaging extends CommitInsertInput {
   bitbucketUuid?: string;
+  parsedEmail?: string;
 }
 
 export interface DeepenSpecificRepo {
@@ -277,10 +282,26 @@ export async function deepenOneRepo(
         input.authorUserId = userIdByUuid.get(input.bitbucketUuid) ?? null;
       }
     }
+    // Write-once email capture, same shape as the forward sync. Only
+    // entries whose uuid resolved (the user exists locally) are sent —
+    // a row with no matching user can't have its email updated anyway.
+    const emailEntries: Array<{ bitbucketUuid: string; email: string }> = [];
+    for (const input of inserts) {
+      if (
+        input.bitbucketUuid !== undefined &&
+        input.parsedEmail !== undefined &&
+        userIdByUuid.has(input.bitbucketUuid)
+      ) {
+        emailEntries.push({ bitbucketUuid: input.bitbucketUuid, email: input.parsedEmail });
+      }
+    }
+    if (emailEntries.length > 0) {
+      await deps.store.setUserEmailsIfMissing(emailEntries);
+    }
   }
 
   const { inserted } = await deps.store.insertCommits(
-    inserts.map(({ bitbucketUuid: _bitbucketUuid, ...rest }) => rest),
+    inserts.map(({ bitbucketUuid: _bitbucketUuid, parsedEmail: _parsedEmail, ...rest }) => rest),
   );
 
   // Rollup + cache hook — mirrors `withRollupRecompute` for the delta
@@ -356,6 +377,7 @@ export async function deepenOneRepo(
 }
 
 function buildInsertInput(repositoryId: number, commit: BitbucketCommit): DeepenInsertStaging {
+  const parsedEmail = parseAuthorEmail(commit.author.raw);
   return {
     repositoryId,
     authorUserId: null, // resolved in the batch step below
@@ -364,6 +386,7 @@ function buildInsertInput(repositoryId: number, commit: BitbucketCommit): Deepen
     isMerge: commit.parents.length > 1,
     authoredAt: new Date(commit.date),
     ...(commit.author.user !== undefined ? { bitbucketUuid: commit.author.user.uuid } : {}),
+    ...(parsedEmail !== null ? { parsedEmail } : {}),
   };
 }
 

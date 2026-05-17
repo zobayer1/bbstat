@@ -1,0 +1,23 @@
+-- Capture the <email> portion of commits.author.raw at ingest time and
+-- park it on the user row, write-once. This is the contributor's
+-- git-configured email, NOT a verified workspace email — BB's
+-- /workspaces/{ws}/members endpoint never exposed email, so the only
+-- source we have is whatever the author had set in their local git
+-- configuration when they pushed. Surfaced on the /members page so
+-- operators can disambiguate contributors who share a display name,
+-- recognize legacy aliases, or contact someone directly.
+--
+-- Write-once via COALESCE on the ingest path (see
+-- CommitStore.setUserEmailsIfMissing in commits-store, plumbed from
+-- commits.ts and deepen-backfill.ts). Once a non-NULL value lands it
+-- stays — the "last observed" email isn't meaningfully more correct than
+-- the first, and constant overwrites would thrash on developers who
+-- commit from multiple machines (corp vs personal email). Synthetic
+-- noreply@bitbucket.org addresses are filtered out at parse time so
+-- they never poison the column.
+--
+-- Nullable: every existing row stays NULL until that user's next ingested
+-- commit (or a deepen-backfill pass) lands a parseable address. No
+-- retroactive UPDATE here; the backfill drains organically.
+
+ALTER TABLE "users" ADD COLUMN "email" text;

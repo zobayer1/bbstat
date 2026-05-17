@@ -33,6 +33,8 @@ function makeStore(): { store: CommitStore; state: FakeState } {
   };
   const store: CommitStore = {
     resolveUserIdsByUuid: unreachable,
+    setUserEmailsIfMissing: unreachable,
+    listUsersMissingEmailWithLastCommit: unreachable,
     insertCommits: unreachable,
     getSyncState: unreachable,
     markSyncRunning: unreachable,

@@ -57,7 +57,7 @@ export type ContributorWindow = '7d' | '30d';
 // types in apps/backend/src/dashboard/stats-store.ts — keep in lockstep.
 
 export interface UserSummary {
-  user: { id: number; bitbucketUuid: string; displayName: string };
+  user: { id: number; bitbucketUuid: string; displayName: string; email: string | null };
   totals: {
     commits7d: number;
     commits30d: number;
@@ -144,11 +144,15 @@ export interface RepoContributor extends TopContributorWithSparkline {
 
 // One row on the /members page. Mirror of WorkspaceMember in
 // apps/backend/src/dashboard/stats-store.ts — keep in lockstep.
+// `email` is the git-author email parsed from commits.author.raw on
+// ingest — best-effort, not a verified workspace email. See the
+// comment on users.email in schema.ts for caveats.
 export interface WorkspaceMember {
   userId: number;
   bitbucketUuid: string;
   displayName: string;
   username: string | null;
+  email: string | null;
   commitsWindow: number;
   commitsAllTime: number;
   additionsWindow: number;

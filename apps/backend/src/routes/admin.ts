@@ -12,6 +12,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { paginateCommits } from '../bitbucket/commits.js';
+import { parseAuthorEmail } from '../sync/author-email.js';
 import { BitbucketApiError } from '../bitbucket/errors.js';
 import { validatePatterns } from '../bitbucket/diff-stats-filter.js';
 import { syncRepositoryCommits } from '../sync/commits.js';
@@ -455,4 +456,99 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       return reply.code(200).send({ fullName: row.fullName, resetCount });
     },
   );
+
+  // One-shot retroactive email backfill. The live ingest path
+  // (commits.ts + deepen-backfill.ts) captures author-raw emails on
+  // every new commit, but rows that predate the `users.email` column
+  // stay NULL until that user's next commit lands. For inactive
+  // contributors (left the org, on vacation, between projects) that
+  // could be never — this endpoint fills the backlog in one shot.
+  //
+  // Strategy: per user-with-NULL-email, find their most recent
+  // ingested commit's (workspace, slug, sha), hit BB's commits API
+  // anchored at that sha via `include=<sha>` (the first yielded item
+  // IS the sha itself), parse `<email>` out of `author.raw`, write
+  // via setUserEmailsIfMissing. One BB call per user — bounded by
+  // the cap below.
+  //
+  // Cap exists to prevent surprise BB-budget burn if the call lands
+  // against a workspace with thousands of inactive users. With "few
+  // users" being the expected case, the default 500 is well above
+  // any realistic batch size; the operator can pass a query param to
+  // raise it consciously.
+  //
+  // Per-user failures are isolated (try/catch around each user's
+  // fetch) — one BB hiccup doesn't poison the whole pass; the
+  // affected user simply rolls over to a future run.
+  const DEFAULT_BACKFILL_LIMIT = 500;
+  app.post<{ Querystring: { limit?: string } }>('/users/backfill-emails', async (request, reply) => {
+    const parsed = z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(2000)
+      .safeParse(request.query.limit ?? DEFAULT_BACKFILL_LIMIT);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_limit', max: 2000 });
+    }
+    const limit = parsed.data;
+    const seed = await opts.syncDeps.commitStore.listUsersMissingEmailWithLastCommit(limit);
+
+    const entries: Array<{ bitbucketUuid: string; email: string }> = [];
+    let attempted = 0;
+    let fetched = 0;
+    let skippedNoParseableEmail = 0;
+    let fetchFailed = 0;
+
+    for (const u of seed) {
+      attempted++;
+      try {
+        // paginateCommits with include=<sha> yields the requested sha as
+        // its first item. Break after one — we don't care about ancestors.
+        let raw: string | null = null;
+        for await (const commit of paginateCommits(opts.syncDeps.client, u.workspace, u.slug, {
+          include: u.sha,
+        })) {
+          raw = commit.author.raw;
+          break;
+        }
+        if (raw === null) {
+          fetchFailed++;
+          continue;
+        }
+        fetched++;
+        const email = parseAuthorEmail(raw);
+        if (email === null) {
+          skippedNoParseableEmail++;
+          continue;
+        }
+        entries.push({ bitbucketUuid: u.bitbucketUuid, email });
+      } catch (err) {
+        // Don't poison the batch — log + move on. Common cause: BB
+        // 404 on a sha whose repo got renamed/recreated upstream.
+        fetchFailed++;
+        opts.syncDeps.logger?.warn?.(
+          { workspace: u.workspace, slug: u.slug, sha: u.sha, userId: u.userId, err },
+          'email backfill: per-user fetch failed',
+        );
+      }
+    }
+
+    if (entries.length > 0) {
+      await opts.syncDeps.commitStore.setUserEmailsIfMissing(entries);
+    }
+
+    opts.syncDeps.logger?.info?.(
+      { attempted, fetched, written: entries.length, skippedNoParseableEmail, fetchFailed, limit },
+      'email backfill complete',
+    );
+
+    return {
+      attempted,
+      fetched,
+      written: entries.length,
+      skippedNoParseableEmail,
+      fetchFailed,
+    };
+  });
 };

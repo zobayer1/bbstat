@@ -58,6 +58,8 @@ function noopCommitStore(): CommitStore {
   };
   return {
     resolveUserIdsByUuid: fail,
+    setUserEmailsIfMissing: fail,
+    listUsersMissingEmailWithLastCommit: fail,
     insertCommits: fail,
     getSyncState: fail,
     markSyncRunning: fail,
@@ -170,6 +172,15 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
   const store: CommitStore = {
     async resolveUserIdsByUuid() {
       return new Map(); // no users seeded — every commit lands as anonymous
+    },
+    async setUserEmailsIfMissing() {
+      // No-op for admin tests — write-once email capture is exercised in
+      // commits.test.ts where the fake CommitStore actually tracks emails.
+    },
+    async listUsersMissingEmailWithLastCommit() {
+      // No-op default — dedicated email-backfill tests construct a
+      // fresh CommitStore stub that returns seed data inline.
+      return [];
     },
     async insertCommits(input) {
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
@@ -1554,6 +1565,160 @@ describe('admin routes', () => {
       });
 
       expect(res.statusCode).toBe(404);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Retroactive email backfill (commit #4 admin task). Per user-with-NULL-
+  // email, fetches the one commit identified by the SQL seed, parses
+  // `<email>` from author.raw, and write-once-updates the user row.
+  // -------------------------------------------------------------------------
+  describe('POST /api/admin/users/backfill-emails', () => {
+    // Build a CommitStore override that:
+    //   - returns a fixed list from listUsersMissingEmailWithLastCommit,
+    //   - records every (uuid, email) entry passed to setUserEmailsIfMissing
+    //     so we can assert exactly which writes the endpoint produced.
+    function makeBackfillCommitStore(
+      seed: Array<{ userId: number; bitbucketUuid: string; workspace: string; slug: string; sha: string }>,
+    ): { store: CommitStore; writes: Array<{ bitbucketUuid: string; email: string }> } {
+      const base = noopCommitStore();
+      const writes: Array<{ bitbucketUuid: string; email: string }> = [];
+      const store: CommitStore = {
+        ...base,
+        async listUsersMissingEmailWithLastCommit() {
+          return seed;
+        },
+        async setUserEmailsIfMissing(entries) {
+          for (const e of entries) writes.push(e);
+        },
+      };
+      return { store, writes };
+    }
+
+    function commitPageWithRaw(sha: string, raw: string): Response {
+      return jsonResponse({
+        pagelen: 100,
+        values: [
+          {
+            hash: sha,
+            message: 'msg',
+            date: '2026-05-08T00:00:00Z',
+            parents: [],
+            author: { raw },
+          },
+        ],
+      });
+    }
+
+    it('writes the parsed email for each user that yields a parseable address', async () => {
+      const { store: commitStore, writes } = makeBackfillCommitStore([
+        { userId: 1, bitbucketUuid: '{u1}', workspace: 'tigerit', slug: 'repo-a', sha: 'sha-a' },
+        { userId: 2, bitbucketUuid: '{u2}', workspace: 'tigerit', slug: 'repo-b', sha: 'sha-b' },
+      ]);
+      fetchMock
+        .mockResolvedValueOnce(commitPageWithRaw('sha-a', 'Alice Example <alice@example.com>'))
+        .mockResolvedValueOnce(commitPageWithRaw('sha-b', 'Bob <bob@example.org>'));
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/users/backfill-emails' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        attempted: 2,
+        fetched: 2,
+        written: 2,
+        skippedNoParseableEmail: 0,
+        fetchFailed: 0,
+      });
+      expect(writes).toEqual([
+        { bitbucketUuid: '{u1}', email: 'alice@example.com' },
+        { bitbucketUuid: '{u2}', email: 'bob@example.org' },
+      ]);
+    });
+
+    it('skips users whose author.raw fails to parse (noreply / malformed) without aborting the batch', async () => {
+      const { store: commitStore, writes } = makeBackfillCommitStore([
+        { userId: 1, bitbucketUuid: '{u1}', workspace: 'tigerit', slug: 'repo-a', sha: 'sha-a' },
+        { userId: 2, bitbucketUuid: '{u2}', workspace: 'tigerit', slug: 'repo-b', sha: 'sha-b' },
+        { userId: 3, bitbucketUuid: '{u3}', workspace: 'tigerit', slug: 'repo-c', sha: 'sha-c' },
+      ]);
+      fetchMock
+        .mockResolvedValueOnce(commitPageWithRaw('sha-a', 'Alice <alice@example.com>'))
+        .mockResolvedValueOnce(commitPageWithRaw('sha-b', 'Bob <bot+noreply@users.noreply.bitbucket.org>'))
+        .mockResolvedValueOnce(commitPageWithRaw('sha-c', 'just a name with no angle brackets'));
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/users/backfill-emails' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        attempted: 3,
+        fetched: 3,
+        written: 1,
+        skippedNoParseableEmail: 2,
+        fetchFailed: 0,
+      });
+      expect(writes).toEqual([{ bitbucketUuid: '{u1}', email: 'alice@example.com' }]);
+    });
+
+    it('records per-user fetch failures without poisoning the rest of the batch', async () => {
+      const { store: commitStore, writes } = makeBackfillCommitStore([
+        { userId: 1, bitbucketUuid: '{u1}', workspace: 'tigerit', slug: 'gone', sha: 'sha-gone' },
+        { userId: 2, bitbucketUuid: '{u2}', workspace: 'tigerit', slug: 'live', sha: 'sha-live' },
+      ]);
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404))
+        .mockResolvedValueOnce(commitPageWithRaw('sha-live', 'Alice <alice@example.com>'));
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/users/backfill-emails' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        attempted: 2,
+        fetched: 1,
+        written: 1,
+        skippedNoParseableEmail: 0,
+        fetchFailed: 1,
+      });
+      expect(writes).toEqual([{ bitbucketUuid: '{u2}', email: 'alice@example.com' }]);
+    });
+
+    it('returns a zero summary when no users are missing emails (no BB calls)', async () => {
+      const { store: commitStore, writes } = makeBackfillCommitStore([]);
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/users/backfill-emails' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        attempted: 0,
+        fetched: 0,
+        written: 0,
+        skippedNoParseableEmail: 0,
+        fetchFailed: 0,
+      });
+      expect(writes).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects limit above 2000 with 400', async () => {
+      const { store: commitStore } = makeBackfillCommitStore([]);
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/users/backfill-emails?limit=5000',
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'invalid_limit', max: 2000 });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });

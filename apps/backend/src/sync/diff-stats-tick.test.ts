@@ -31,6 +31,8 @@ function makeStore(queue: PendingDiffStatCommitWithRepo[]): { store: CommitStore
   };
   const store: CommitStore = {
     resolveUserIdsByUuid: unreachable,
+    setUserEmailsIfMissing: unreachable,
+    listUsersMissingEmailWithLastCommit: unreachable,
     insertCommits: unreachable,
     getSyncState: unreachable,
     markSyncRunning: unreachable,

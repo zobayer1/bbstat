@@ -24,6 +24,9 @@ interface FakeCommitStoreState {
   idSeq: number;
   syncStateByRepo: Map<number, SyncStateRow>;
   usersByUuid: Map<string, number>;
+  // Mirrors users.email — write-once semantics enforced in
+  // setUserEmailsIfMissing below so tests can assert capture behavior.
+  emailsByUuid: Map<string, string>;
   markRunningCalls: number[]; // repositoryId, in order
   markSuccessCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
   markFailedCalls: Array<{ repositoryId: number; error: string }>;
@@ -44,6 +47,7 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     idSeq: 0,
     syncStateByRepo: new Map(),
     usersByUuid: new Map(),
+    emailsByUuid: new Map(),
     markRunningCalls: [],
     markSuccessCalls: [],
     markFailedCalls: [],
@@ -61,6 +65,19 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
         if (id !== undefined) map.set(u, id);
       }
       return map;
+    },
+    async setUserEmailsIfMissing(entries) {
+      for (const e of entries) {
+        if (!state.usersByUuid.has(e.bitbucketUuid)) continue;
+        if (state.emailsByUuid.has(e.bitbucketUuid)) continue;
+        state.emailsByUuid.set(e.bitbucketUuid, e.email);
+      }
+    },
+    async listUsersMissingEmailWithLastCommit() {
+      // Not exercised by these per-repo sync tests — the admin email
+      // backfill endpoint is the only caller, and its tests live in
+      // tests/admin.test.ts.
+      return [];
     },
     async insertCommits(input) {
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];

@@ -85,6 +85,13 @@
       "when": 1778883044009,
       "tag": "0011_confused_felicia_hardy",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1778930399956,
+      "tag": "0012_cold_champions",
+      "breakpoints": true
     }
   ]
 }

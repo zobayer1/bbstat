@@ -26,7 +26,13 @@ watch(userId, (next) => void store.fetch(next));
       <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">
         {{ summary?.user.displayName ?? `User #${userId}` }}
       </h1>
-      <p v-if="summary" class="mt-1 font-mono text-xs text-slate-400">{{ summary.user.bitbucketUuid }}</p>
+      <!-- Prefer the git-author email when we have one — more useful for
+           humans recognizing / contacting the contributor than the opaque
+           BB UUID. Fall back to the UUID when email is null (user predates
+           the column / no parseable address landed yet). Email runs in the
+           regular font; UUID stays monospaced since it's an identifier. -->
+      <p v-if="summary?.user.email" class="mt-1 text-xs text-slate-400">{{ summary.user.email }}</p>
+      <p v-else-if="summary" class="mt-1 font-mono text-xs text-slate-400">{{ summary.user.bitbucketUuid }}</p>
     </header>
 
     <p v-if="loading && !summary" class="text-sm text-slate-400">Loading…</p>

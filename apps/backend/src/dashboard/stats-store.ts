@@ -51,7 +51,7 @@ export interface TopContributorWithSparkline extends TopContributor {
 }
 
 export interface UserSummary {
-  user: { id: number; bitbucketUuid: string; displayName: string };
+  user: { id: number; bitbucketUuid: string; displayName: string; email: string | null };
   totals: {
     commits7d: number;
     commits30d: number;
@@ -241,6 +241,12 @@ export interface WorkspaceMember {
   bitbucketUuid: string;
   displayName: string;
   username: string | null;
+  // Git-author email captured from commits.author.raw at ingest time,
+  // write-once. NOT a verified workspace email — see the comment on
+  // users.email in schema.ts for caveats. Null when no commit for this
+  // user has yet landed a parseable address (or the user predates the
+  // column on a not-yet-resynced deployment).
+  email: string | null;
   // Per-window aggregates. Additions / deletions read from commit_daily
   // and so carry the same merge semantics as getUserSummary's totals — the
   // dashboard treats them the same way.
@@ -448,6 +454,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           id: users.id,
           bitbucketUuid: users.bitbucketUuid,
           displayName: users.displayName,
+          email: users.email,
         })
         .from(users)
         .where(eq(users.id, userId))
@@ -907,6 +914,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         bitbucket_uuid: string;
         display_name: string;
         username: string | null;
+        email: string | null;
         commits_window: number;
         commits_all_time: number;
         additions_window: number;
@@ -962,6 +970,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           u.bitbucket_uuid,
           u.display_name,
           u.username,
+          u.email,
           b.commits_window,
           b.commits_all_time,
           b.additions_window,
@@ -981,6 +990,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         bitbucketUuid: r.bitbucket_uuid,
         displayName: r.display_name,
         username: r.username,
+        email: r.email,
         commitsWindow: r.commits_window,
         commitsAllTime: r.commits_all_time,
         additionsWindow: r.additions_window,

@@ -45,6 +45,15 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
       // Tests don't seed users — every author lands as null.
       return new Map();
     },
+    async setUserEmailsIfMissing() {
+      // No-op — deepen tests don't exercise email capture (covered in
+      // commits.test.ts where the fake store actually tracks emails).
+    },
+    async listUsersMissingEmailWithLastCommit() {
+      // Not relevant to deepen tests — the email backfill admin endpoint
+      // is the only caller.
+      return [];
+    },
     async insertCommits(input): Promise<CommitInsertResult> {
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
       // Dedupe on (repo, sha) so we can simulate ON CONFLICT DO NOTHING.

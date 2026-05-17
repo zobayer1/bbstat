@@ -25,11 +25,26 @@ export const pullRequestStateEnum = pgEnum('pull_request_state', ['OPEN', 'MERGE
 // Core entities
 // ---------------------------------------------------------------------------
 
+// `email` captures the `<email>` portion of commits.author.raw on first
+// ingest and is then write-once via COALESCE — once set it sticks. This is
+// the contributor's git-configured email, NOT a verified workspace email
+// (BB's `/workspaces/{ws}/members` endpoint never returned email even when
+// it was public). Caveats apply to display: same person can use multiple
+// git emails across machines (corp vs personal), BB synthesizes
+// `noreply@bitbucket.org` for web-merge commits, and a fresh laptop can
+// produce a one-off bogus email. The write-once policy means whatever
+// landed first sticks; we don't keep overwriting because the "last
+// observed" email isn't meaningfully more correct than the first.
+// noreply addresses are filtered out at ingest so they never poison the
+// column. Plumbed in commits.ts forward sync + deepen-backfill.ts via
+// CommitStore.setUserEmailsIfMissing; surfaced in the WorkspaceMember
+// payload + /members table.
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
   displayName: text('display_name').notNull(),
   username: text('username'),
+  email: text('email'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

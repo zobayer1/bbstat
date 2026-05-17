@@ -23,6 +23,7 @@ import { BitbucketApiError } from '../bitbucket/errors.js';
 import type { EventBus } from '../events/bus.js';
 import type { CommitInsertInput, CommitStore, PendingDiffStatCommit } from './commit-store.js';
 import type { DiscoveryStore } from './discovery-store.js';
+import { parseAuthorEmail } from './author-email.js';
 import { fetchDiffStatsForCommits, type DiffStatsSyncResult } from './diff-stats.js';
 
 export interface RepositoryHandle {
@@ -179,6 +180,24 @@ export async function syncRepositoryCommits(
       new Set(pull.batch.map((c) => c.author.user?.uuid).filter((u): u is string => u !== undefined)),
     );
     const userIdByUuid = await deps.store.resolveUserIdsByUuid(uuids);
+
+    // Best-effort write-once email capture. For each commit whose
+    // author.user.uuid resolved to a local user, parse `<email>` out of
+    // author.raw and queue it for the bulk UPDATE. Dedupe happens in
+    // the store; noreply / malformed addresses are filtered upstream
+    // in parseAuthorEmail. Runs before insertCommits so the email
+    // lands on the user row even if the commit itself loses the
+    // ON CONFLICT race.
+    const emailEntries: Array<{ bitbucketUuid: string; email: string }> = [];
+    for (const c of pull.batch) {
+      const uuid = c.author.user?.uuid;
+      if (uuid === undefined || !userIdByUuid.has(uuid)) continue;
+      const email = parseAuthorEmail(c.author.raw);
+      if (email !== null) emailEntries.push({ bitbucketUuid: uuid, email });
+    }
+    if (emailEntries.length > 0) {
+      await deps.store.setUserEmailsIfMissing(emailEntries);
+    }
 
     const inserts: CommitInsertInput[] = pull.batch.map((c) => ({
       repositoryId: repo.repositoryId,

@@ -84,6 +84,34 @@ export interface CommitStore {
   // result map; callers translate that absence into author_user_id = null.
   resolveUserIdsByUuid(uuids: string[]): Promise<Map<string, number>>;
 
+  // Write-once email capture from commits.author.raw. For each (uuid, email)
+  // entry, sets users.email = email only when the current value IS NULL —
+  // the "first observed wins" policy keeps things stable for developers who
+  // commit from multiple machines with different addresses. UUIDs not in the
+  // users table are silently skipped (no rows match the predicate). No-op
+  // on empty input. Parsing + noreply filtering happens upstream in the
+  // sync layer (see src/sync/author-email.ts).
+  setUserEmailsIfMissing(entries: Array<{ bitbucketUuid: string; email: string }>): Promise<void>;
+
+  // One-shot email backfill seed list. Returns every user whose email IS NULL
+  // alongside the (workspace, slug, sha) of their most recently authored
+  // ingested commit, capped by `limit`. The caller hits BB's commit endpoint
+  // for each row, parses author.raw, and writes via setUserEmailsIfMissing.
+  // Archived / sync-excluded repos are filtered out — fetching against them
+  // is unreliable (404s / drift), and the user's NEXT live commit in a
+  // healthy repo will capture their email anyway. Users with no ingested
+  // commits at all (theoretically unreachable today; defensively filtered)
+  // are absent.
+  listUsersMissingEmailWithLastCommit(limit: number): Promise<
+    Array<{
+      userId: number;
+      bitbucketUuid: string;
+      workspace: string;
+      slug: string;
+      sha: string;
+    }>
+  >;
+
   // Bulk insert commits. Conflicts on (repository_id, sha) are skipped — commits
   // are immutable, so re-runs converge. Returns the count of newly inserted rows.
   insertCommits(input: CommitInsertInput[]): Promise<CommitInsertResult>;
@@ -237,6 +265,72 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .from(users)
         .where(inArray(users.bitbucketUuid, uuids));
       return new Map(rows.map((r) => [r.uuid, r.id]));
+    },
+
+    async listUsersMissingEmailWithLastCommit(limit) {
+      // DISTINCT ON (author_user_id) picks the newest commit per user in
+      // one pass, backed by the `commits_author_authored_idx` index on
+      // (author_user_id, authored_at). Cheap even at hundreds of
+      // thousands of commits — the planner short-circuits per user as
+      // soon as it sees the first row.
+      const rows = await db.execute<{
+        user_id: number;
+        bitbucket_uuid: string;
+        workspace: string;
+        slug: string;
+        sha: string;
+      }>(sql`
+        SELECT DISTINCT ON (c.author_user_id)
+          u.id           AS user_id,
+          u.bitbucket_uuid,
+          r.workspace,
+          r.slug,
+          c.sha
+        FROM users u
+        JOIN commits c       ON c.author_user_id = u.id
+        JOIN repositories r  ON r.id = c.repository_id
+        WHERE u.email IS NULL
+          AND r.archived = false
+          AND r.sync_excluded = false
+        ORDER BY c.author_user_id, c.authored_at DESC
+        LIMIT ${limit}::int
+      `);
+      return rows.rows.map((r) => ({
+        userId: r.user_id,
+        bitbucketUuid: r.bitbucket_uuid,
+        workspace: r.workspace,
+        slug: r.slug,
+        sha: r.sha,
+      }));
+    },
+
+    async setUserEmailsIfMissing(entries) {
+      if (entries.length === 0) return;
+      // Dedupe by uuid before the SQL build — multiple commits in the same
+      // batch can carry the same author, and emitting duplicate VALUES
+      // rows for one uuid would be wasted work (the COALESCE still
+      // converges, just with redundant evaluations).
+      const byUuid = new Map<string, string>();
+      for (const e of entries) {
+        if (!byUuid.has(e.bitbucketUuid)) byUuid.set(e.bitbucketUuid, e.email);
+      }
+      // Single UPDATE ... FROM (VALUES ...) — one round-trip regardless of
+      // batch size. Casts on each parameter are load-bearing for the same
+      // reason as updateIsMergeBatch: pg-node sends parameters untyped and
+      // Postgres infers VALUES column types from the first row only.
+      // `WHERE users.email IS NULL` enforces write-once; a non-NULL
+      // value already on the row blocks the update, no overwrite.
+      const tuples = sql.join(
+        Array.from(byUuid, ([uuid, email]) => sql`(${uuid}::text, ${email}::text)`),
+        sql`, `,
+      );
+      await db.execute(sql`
+        UPDATE users
+        SET email = data.email
+        FROM (VALUES ${tuples}) AS data(uuid, email)
+        WHERE users.bitbucket_uuid = data.uuid
+          AND users.email IS NULL
+      `);
     },
 
     async insertCommits(input) {

@@ -50,7 +50,7 @@ const search = ref('');
 const fuse = computed(
   () =>
     new Fuse(store.members, {
-      keys: ['displayName', 'username'],
+      keys: ['displayName', 'username', 'email'],
       threshold: 0.4,
       ignoreLocation: true,
     }),
@@ -230,7 +230,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
           type="search"
           name="members-search"
           autocomplete="off"
-          placeholder="Search by name or username…"
+          placeholder="Search by name, username, or email…"
           class="w-64 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400"
           aria-label="Search workspace members"
         />
@@ -324,6 +324,14 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
                 {{ m.displayName }}
                 <span v-if="m.username" class="ml-1 text-xs font-normal text-slate-400">@{{ m.username }}</span>
               </RouterLink>
+              <!-- Git-author email: best-effort, parsed from commits.author.raw at
+                   ingest. Rendered muted under the displayName so it never
+                   competes with the primary identifier. Hidden entirely when
+                   null (users predating the column or whose commits never
+                   carried a parseable address). -->
+              <div v-if="m.email" class="mt-0.5 truncate text-xs text-slate-400" :title="m.email">
+                {{ m.email }}
+              </div>
             </td>
             <td class="px-4 py-2 text-right text-slate-900">{{ m.commitsWindow }}</td>
             <!-- 3-column grid with the `/` in a fixed center column so the
