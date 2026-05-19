@@ -65,6 +65,11 @@ function noopCommitStore(): CommitStore {
     listAnonymousCommits: fail,
     reattributeAnonymousCommits: fail,
     backfillAuthorSnapshotsFromUsers: fail,
+    countAnonymousCommits: fail,
+    pickRepoForAnonymousSweep: fail,
+    markAnonymousSweepAttempt: fail,
+    markAnonymousSweepComplete: fail,
+    bulkUpdateAnonymousAttribution: fail,
     upsertAuthorUsers: fail,
     incrementDiffStatsFailure: fail,
     insertCommits: fail,
@@ -260,6 +265,19 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
         map.set(e.bitbucketUuid, nextId++);
       }
       return map;
+    },
+    async countAnonymousCommits() {
+      // Admin tests don't exercise the standalone anonymous-sweep
+      // runner — covered by anonymous-sweep.test.ts.
+      return 0;
+    },
+    async pickRepoForAnonymousSweep() {
+      return null;
+    },
+    async markAnonymousSweepAttempt() {},
+    async markAnonymousSweepComplete() {},
+    async bulkUpdateAnonymousAttribution() {
+      return [];
     },
     async backfillAuthorSnapshotsFromUsers() {
       // Mirrors the Drizzle UPDATE FROM with COALESCE: for each commit

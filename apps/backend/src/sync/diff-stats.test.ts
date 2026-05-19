@@ -39,6 +39,11 @@ function makeStore(): { store: CommitStore; state: FakeState } {
     listAnonymousCommits: unreachable,
     reattributeAnonymousCommits: unreachable,
     backfillAuthorSnapshotsFromUsers: unreachable,
+    countAnonymousCommits: unreachable,
+    pickRepoForAnonymousSweep: unreachable,
+    markAnonymousSweepAttempt: unreachable,
+    markAnonymousSweepComplete: unreachable,
+    bulkUpdateAnonymousAttribution: unreachable,
     upsertAuthorUsers: unreachable,
     async incrementDiffStatsFailure(commitId, weight) {
       // Mirrors the Drizzle impl's atomic increment-then-return — the

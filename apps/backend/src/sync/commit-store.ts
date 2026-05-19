@@ -337,6 +337,57 @@ export interface CommitStore {
   // — give up, mirrors deepen seedMissing).
   markIsMergeBackfillComplete(repositoryId: number): Promise<void>;
 
+  // Total anonymous commits across non-archived non-excluded repos.
+  // Used by the standalone anonymous-sweep runner's outer loop to
+  // decide when to exit (when the count is zero) and surfaces a
+  // single number the operator can sanity-check.
+  countAnonymousCommits(): Promise<number>;
+
+  // Anonymous-sweep queue pick: picks the next repo with at least
+  // one anonymous commit AND `anonymous_sweep_complete = false`,
+  // ordered by `anonymous_sweep_last_run_at ASC NULLS FIRST` so
+  // brand-new repos drain first, then round-robin by staleness. Same
+  // shape as `pickRepoForDeepening` / `pickRepoForIsMergeBackfill`.
+  // Returns null when every eligible repo is either complete or has
+  // zero anonymous commits.
+  pickRepoForAnonymousSweep(): Promise<AnonymousSweepCandidate | null>;
+
+  // Bumps `anonymous_sweep_last_run_at = now()` without changing
+  // `anonymous_sweep_complete`. Called once per pick so the
+  // round-robin advances even when the sweep is a no-op (e.g., BB
+  // rate-limited mid-walk). Mirrors `markDeepenAttempt`.
+  markAnonymousSweepAttempt(repositoryId: number): Promise<void>;
+
+  // Flips `anonymous_sweep_complete = true`. Called when a sweep
+  // pass for the repo attributed zero rows (the residual is
+  // structurally anonymous — BB lacks a UUID or the email is
+  // unparseable) or when BB 404'd on the commits endpoint. Operator
+  // can manually UPDATE back to FALSE to re-arm.
+  markAnonymousSweepComplete(repositoryId: number): Promise<void>;
+
+  // Bulk apply attribution + snapshot updates from the sweep pass.
+  // Each entry carries the resolved attribution data the sweep gathered
+  // from one BB `/commits` page intersected with our local anonymous
+  // rows. The UPDATE:
+  //   - `author_user_id` is overwritten ONLY when the row is still
+  //     anonymous (WHERE author_user_id IS NULL), so a concurrent
+  //     commit-sync that lands attribution first wins — race-safe.
+  //   - `author_email` and `author_display_name` use COALESCE so
+  //     pre-existing snapshot values are preserved (e.g. rows the
+  //     V1_16 forward sync already filled).
+  // Returns rows actually visited (some may have been raced away by
+  // concurrent sync) with a post-UPDATE `attributed` flag so the
+  // caller can scope the `commit_daily` recompute to only the rows
+  // whose `author_user_id` transitioned NULL → known.
+  bulkUpdateAnonymousAttribution(
+    entries: Array<{
+      commitId: number;
+      userId: number | null;
+      email: string | null;
+      displayName: string | null;
+    }>,
+  ): Promise<Array<{ id: number; repositoryId: number; authoredAt: Date; attributed: boolean }>>;
+
   // Reset the commit-sync cursor + deepen state to cold-mode defaults.
   // Used by POST /repositories/:ws/:slug/include after a sync_excluded
   // recovery so the next tick starts fresh — a stale or invalid
@@ -382,6 +433,13 @@ export interface DeepenCandidate {
   // the repo has zero commits ingested — caller treats as
   // "nothing to deepen yet; cold mode hasn't run".
   oldestSha: string | null;
+}
+
+export interface AnonymousSweepCandidate {
+  repositoryId: number;
+  workspace: string;
+  slug: string;
+  fullName: string;
 }
 
 export interface IsMergeBackfillCandidate {
@@ -961,6 +1019,140 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .update(syncState)
         .set({ isMergeBackfillComplete: true, isMergeLastRunAt: now, updatedAt: now })
         .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async countAnonymousCommits() {
+      // Joining repositories filters archived + sync_excluded so the
+      // count matches what the picker would actually walk. Operator-
+      // facing single number for "how much work remains".
+      const rows = await db.execute<{ total: number }>(sql`
+        SELECT count(*)::int AS total
+        FROM commits c
+        JOIN repositories r ON r.id = c.repository_id
+        WHERE c.author_user_id IS NULL
+          AND r.archived = false
+          AND r.sync_excluded = false
+      `);
+      return rows.rows[0]?.total ?? 0;
+    },
+
+    async pickRepoForAnonymousSweep() {
+      // Single round-trip: filter to repos that have at least one
+      // anonymous commit AND haven't been marked complete, then
+      // round-robin by `anonymous_sweep_last_run_at`. The EXISTS
+      // subquery short-circuits per repo as soon as it finds one
+      // anonymous row — much cheaper than `count(*) > 0` at our scale
+      // (Postgres planner uses commits_author_authored_idx via the
+      // author_user_id IS NULL predicate).
+      const rows = await db.execute<{
+        repository_id: number;
+        workspace: string;
+        slug: string;
+        full_name: string;
+      }>(sql`
+        SELECT
+          s.repository_id,
+          r.workspace,
+          r.slug,
+          r.full_name
+        FROM sync_state s
+        JOIN repositories r ON r.id = s.repository_id
+        WHERE s.anonymous_sweep_complete = false
+          AND r.archived = false
+          AND r.sync_excluded = false
+          AND EXISTS (
+            SELECT 1 FROM commits c
+            WHERE c.repository_id = s.repository_id
+              AND c.author_user_id IS NULL
+          )
+        ORDER BY s.anonymous_sweep_last_run_at ASC NULLS FIRST, s.repository_id ASC
+        LIMIT 1
+      `);
+      const row = rows.rows[0];
+      if (row === undefined) return null;
+      return {
+        repositoryId: row.repository_id,
+        workspace: row.workspace,
+        slug: row.slug,
+        fullName: row.full_name,
+      };
+    },
+
+    async markAnonymousSweepAttempt(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ anonymousSweepLastRunAt: now, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async markAnonymousSweepComplete(repositoryId) {
+      const now = new Date();
+      await db
+        .update(syncState)
+        .set({ anonymousSweepComplete: true, anonymousSweepLastRunAt: now, updatedAt: now })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async bulkUpdateAnonymousAttribution(entries) {
+      if (entries.length === 0) return [];
+      // Single UPDATE FROM (VALUES …) — one round-trip regardless of
+      // batch size. Per-column casts mirror the existing bulk paths
+      // (setUserEmailsIfMissing, updateIsMergeBatch); pg-node sends
+      // parameters untyped and Postgres infers VALUES column types
+      // from the first row, so an all-NULL column on the first row
+      // would otherwise poison the inferred type.
+      //
+      // WHERE commits.author_user_id IS NULL is load-bearing — a
+      // concurrent commit-sync landing attribution first wins, and we
+      // never overwrite an established attribution. The COALESCE on
+      // snapshot columns preserves any pre-existing value (e.g. rows
+      // the V1_16 forward sync already filled).
+      //
+      // The RETURNING clause reads the POST-update row, so
+      // `commits.author_user_id IS NOT NULL` reflects "did this row
+      // transition NULL → known on this call". Snapshot-only changes
+      // (author_user_id still NULL but email/name newly populated)
+      // come back with attributed=false; the caller skips them for
+      // commit_daily recompute (snapshot columns don't affect the
+      // rollup).
+      const tuples = sql.join(
+        entries.map(
+          (e) => sql`(
+            ${e.commitId}::int,
+            ${e.userId}::int,
+            ${e.email}::text,
+            ${e.displayName}::text
+          )`,
+        ),
+        sql`, `,
+      );
+      const result = await db.execute<{
+        id: number;
+        repository_id: number;
+        authored_at: Date;
+        attributed: boolean;
+      }>(sql`
+        UPDATE commits c
+        SET
+          author_user_id = data.user_id,
+          author_email = COALESCE(c.author_email, data.email),
+          author_display_name = COALESCE(c.author_display_name, data.display_name)
+        FROM (VALUES ${tuples}) AS data(commit_id, user_id, email, display_name)
+        WHERE c.id = data.commit_id
+          AND c.author_user_id IS NULL
+        RETURNING
+          c.id,
+          c.repository_id,
+          c.authored_at,
+          (c.author_user_id IS NOT NULL) AS attributed
+      `);
+      return result.rows.map((r) => ({
+        id: r.id,
+        repositoryId: r.repository_id,
+        authoredAt: r.authored_at instanceof Date ? r.authored_at : new Date(r.authored_at),
+        attributed: r.attributed,
+      }));
     },
 
     async resetSyncCursors(repositoryId) {

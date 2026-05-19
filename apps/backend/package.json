@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=../../.env src/index.ts",
     "dev:sync": "tsx watch --env-file-if-exists=../../.env src/sync/index.ts",
+    "dev:resync": "tsx --env-file-if-exists=../../.env src/anonymous-sweep-main.ts",
     "doctor": "tsx --env-file-if-exists=../../.env src/scripts/doctor.ts",
     "rebuild:rollups": "tsx --env-file-if-exists=../../.env src/scripts/rebuild-rollups.ts",
     "build": "tsc -p tsconfig.build.json",

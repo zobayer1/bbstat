@@ -83,6 +83,18 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
       // admin endpoint test in tests/admin.test.ts.
       return { updated: 0 };
     },
+    async countAnonymousCommits() {
+      // Anonymous-sweep runner — covered by anonymous-sweep.test.ts.
+      return 0;
+    },
+    async pickRepoForAnonymousSweep() {
+      return null;
+    },
+    async markAnonymousSweepAttempt() {},
+    async markAnonymousSweepComplete() {},
+    async bulkUpdateAnonymousAttribution() {
+      return [];
+    },
     async upsertAuthorUsers(inputs) {
       // Mirrors the Drizzle impl: INSERT (with is_workspace_member=false
       // + email) if the UUID is new; leave the existing row untouched

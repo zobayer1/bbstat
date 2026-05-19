@@ -376,6 +376,24 @@ export const syncState = pgTable('sync_state', {
   isMergeBackfillComplete: boolean('is_merge_backfill_complete').notNull().default(false),
   isMergeBackfillCursorSha: text('is_merge_backfill_cursor_sha'),
   isMergeLastRunAt: timestamp('is_merge_last_run_at', { withTimezone: true }),
+  // Anonymous-commit sweep state. Standalone runner (entry point
+  // `apps/backend/src/anonymous-sweep-main.ts`, `make dev-resync`)
+  // walks BB `/commits` per repo to attribute commits whose
+  // `author_user_id IS NULL` — typically ex-employees / never-members
+  // whose UUIDs weren't in our users table at original ingest.
+  // `anonymous_sweep_complete` flips to true once a sweep pass for
+  // a repo attributes zero rows (everything attributable has been
+  // attributed; the residual is structurally anonymous, e.g. BB lacks
+  // a UUID or the email is unparseable). Picker filters out complete
+  // repos via `ORDER BY anonymous_sweep_last_run_at NULLS FIRST` and
+  // `WHERE anonymous_sweep_complete = false`, same shape as the
+  // deepen / is-merge rotation. Independent of `dev-sync`'s cron —
+  // operator runs `make dev-resync` once to drain the backlog and
+  // it exits cleanly when done. To re-arm a repo (e.g. after adding
+  // ex-employee accounts back to the workspace), manually UPDATE
+  // the flag to false.
+  anonymousSweepComplete: boolean('anonymous_sweep_complete').notNull().default(false),
+  anonymousSweepLastRunAt: timestamp('anonymous_sweep_last_run_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
