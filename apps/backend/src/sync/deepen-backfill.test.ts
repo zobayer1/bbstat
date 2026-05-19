@@ -62,6 +62,10 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     async reattributeAnonymousCommits() {
       return [];
     },
+    async backfillAuthorSnapshotsFromUsers() {
+      // Not exercised by deepen tests — admin endpoint only.
+      return { updated: 0 };
+    },
     async upsertAuthorUsers(inputs) {
       // Deepen tests don't assert on user creation — return synthetic
       // ids so the forward-resolution step gets a value. Real

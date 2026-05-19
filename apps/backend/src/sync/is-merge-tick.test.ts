@@ -33,6 +33,7 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     listUsersMissingEmailWithLastCommit: fail,
     listAnonymousCommits: fail,
     reattributeAnonymousCommits: fail,
+    backfillAuthorSnapshotsFromUsers: fail,
     upsertAuthorUsers: fail,
     incrementDiffStatsFailure: fail,
     insertCommits: fail,

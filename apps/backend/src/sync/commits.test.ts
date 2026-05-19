@@ -78,6 +78,11 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
         state.emailsByUuid.set(e.bitbucketUuid, e.email);
       }
     },
+    async backfillAuthorSnapshotsFromUsers() {
+      // Not exercised by per-repo commit-sync tests — covered by the
+      // admin endpoint test in tests/admin.test.ts.
+      return { updated: 0 };
+    },
     async upsertAuthorUsers(inputs) {
       // Mirrors the Drizzle impl: INSERT (with is_workspace_member=false
       // + email) if the UUID is new; leave the existing row untouched

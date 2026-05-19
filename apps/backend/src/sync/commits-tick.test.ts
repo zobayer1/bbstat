@@ -30,6 +30,7 @@ function fakeStore(): CommitStore {
     listUsersMissingEmailWithLastCommit: fail,
     listAnonymousCommits: fail,
     reattributeAnonymousCommits: fail,
+    backfillAuthorSnapshotsFromUsers: fail,
     upsertAuthorUsers: fail,
     incrementDiffStatsFailure: fail,
     insertCommits: fail,

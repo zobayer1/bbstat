@@ -39,6 +39,7 @@ function makeStore(queue: PendingDiffStatCommitWithRepo[]): { store: CommitStore
     listUsersMissingEmailWithLastCommit: unreachable,
     listAnonymousCommits: unreachable,
     reattributeAnonymousCommits: unreachable,
+    backfillAuthorSnapshotsFromUsers: unreachable,
     upsertAuthorUsers: unreachable,
     insertCommits: unreachable,
     getSyncState: unreachable,

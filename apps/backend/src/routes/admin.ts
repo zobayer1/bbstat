@@ -552,6 +552,26 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     };
   });
 
+  // One-shot SQL backfill of commits.author_email + commits.author_display_name
+  // for rows ingested before the V1_16 schema migration added those
+  // columns. Pulls the value straight from the linked users row — no
+  // BB calls. Only fills NULL snapshot columns (COALESCE); never
+  // overwrites pre-existing snapshot data; skips anonymous rows
+  // (author_user_id IS NULL — those need the BB-walk path).
+  //
+  // Idempotent: re-running converges (the WHERE filters out rows
+  // already populated). Single Postgres UPDATE FROM, no batching —
+  // hundreds of thousands of rows complete in seconds at our scale.
+  //
+  // Run once after deploying the V1_16 migration; not part of the
+  // recurring sync cadence. The "step 3" BB-walk path handles the
+  // anonymous tail separately.
+  app.post('/commits/backfill-author-snapshots', async () => {
+    const { updated } = await opts.syncDeps.commitStore.backfillAuthorSnapshotsFromUsers();
+    opts.syncDeps.logger?.info?.({ updated }, 'commits author-snapshot backfill complete');
+    return { updated };
+  });
+
   // Per-user retroactive reattribution of anonymous commits.
   //
   // Why this exists: when a commit is first ingested, we resolve the

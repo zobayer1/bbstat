@@ -64,6 +64,7 @@ function noopCommitStore(): CommitStore {
     listUsersMissingEmailWithLastCommit: fail,
     listAnonymousCommits: fail,
     reattributeAnonymousCommits: fail,
+    backfillAuthorSnapshotsFromUsers: fail,
     upsertAuthorUsers: fail,
     incrementDiffStatsFailure: fail,
     insertCommits: fail,
@@ -181,6 +182,11 @@ interface FakeCommitStoreState {
   knownUsersByUuid: Map<string, number>;
   anonymousCandidates: AnonymousCandidateRow[];
   reattributeCalls: Array<{ commitId: number; userId: number }>;
+  // Seed-able for the author-snapshot backfill admin tests. Mirrors a
+  // minimal `users` table so the fake backfill can JOIN commits →
+  // users on author_user_id and apply the same COALESCE semantics as
+  // the Drizzle impl.
+  usersById: Map<number, { email: string | null; displayName: string }>;
 }
 
 function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreState } {
@@ -192,6 +198,7 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
     knownUsersByUuid: new Map(),
     anonymousCandidates: [],
     reattributeCalls: [],
+    usersById: new Map(),
   };
   const store: CommitStore = {
     async resolveUserIdsByUuid(uuids) {
@@ -253,6 +260,31 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
         map.set(e.bitbucketUuid, nextId++);
       }
       return map;
+    },
+    async backfillAuthorSnapshotsFromUsers() {
+      // Mirrors the Drizzle UPDATE FROM with COALESCE: for each commit
+      // whose author_user_id resolves to a seeded user, fill
+      // author_email (only when currently NULL AND users.email IS NOT
+      // NULL) and author_display_name (only when currently NULL —
+      // users.display_name is NOT NULL by schema). Anonymous commits
+      // (author_user_id IS NULL) are skipped; pre-existing snapshot
+      // values are preserved.
+      let updated = 0;
+      for (const [key, c] of state.commits.entries()) {
+        if (c.authorUserId === null) continue;
+        const user = state.usersById.get(c.authorUserId);
+        if (user === undefined) continue;
+        const fillEmail = c.authorEmail === null && user.email !== null;
+        const fillName = c.authorDisplayName === null;
+        if (!fillEmail && !fillName) continue;
+        state.commits.set(key, {
+          ...c,
+          authorEmail: fillEmail ? user.email : c.authorEmail,
+          authorDisplayName: fillName ? user.displayName : c.authorDisplayName,
+        });
+        updated++;
+      }
+      return { updated };
     },
     async incrementDiffStatsFailure() {
       // No-op default — diff-stats failure budgeting is tested in
@@ -2130,6 +2162,173 @@ describe('admin routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ walked: 2, bbMatched: 1, bbFailed: 1, updated: 1 });
+    });
+  });
+
+  describe('POST /api/admin/commits/backfill-author-snapshots', () => {
+    // Helper for seeding a commit + linked user in the fake. Keeps the
+    // test body focused on inputs that drive the COALESCE semantics
+    // (NULL → fill, non-NULL → preserve, anonymous → skip).
+    function seedCommit(
+      state: ReturnType<typeof createFakeCommitStore>['state'],
+      opts: {
+        sha: string;
+        authorUserId: number | null;
+        authorEmail: string | null;
+        authorDisplayName: string | null;
+      },
+    ): void {
+      state.commits.set(`1:${opts.sha}`, {
+        repositoryId: 1,
+        authorUserId: opts.authorUserId,
+        sha: opts.sha,
+        message: 'msg',
+        isMerge: false,
+        authoredAt: new Date('2026-05-01T00:00:00Z'),
+        authorEmail: opts.authorEmail,
+        authorDisplayName: opts.authorDisplayName,
+      });
+    }
+
+    function seedUser(
+      state: ReturnType<typeof createFakeCommitStore>['state'],
+      id: number,
+      email: string | null,
+      displayName: string,
+    ): void {
+      state.usersById.set(id, { email, displayName });
+    }
+
+    it('fills NULL author_email and author_display_name from the linked user', async () => {
+      const { store: commitStore, state } = createFakeCommitStore();
+      seedUser(state, 42, 'alice@example.com', 'Alice Example');
+      seedCommit(state, { sha: 'sha-needs-fill', authorUserId: 42, authorEmail: null, authorDisplayName: null });
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ updated: 1 });
+      const c = state.commits.get('1:sha-needs-fill')!;
+      expect(c.authorEmail).toBe('alice@example.com');
+      expect(c.authorDisplayName).toBe('Alice Example');
+    });
+
+    it('does NOT overwrite pre-existing snapshot values', async () => {
+      const { store: commitStore, state } = createFakeCommitStore();
+      seedUser(state, 42, 'alice@example.com', 'Alice Example');
+      // Commit already carries (different) snapshot values — likely
+      // captured at ingest from author.raw before the user's email
+      // was canonicalized in users. Preserve them.
+      seedCommit(state, {
+        sha: 'sha-preserved',
+        authorUserId: 42,
+        authorEmail: 'alice+work@example.com',
+        authorDisplayName: 'Alice Work',
+      });
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ updated: 0 });
+      const c = state.commits.get('1:sha-preserved')!;
+      expect(c.authorEmail).toBe('alice+work@example.com');
+      expect(c.authorDisplayName).toBe('Alice Work');
+    });
+
+    it('skips anonymous commits (author_user_id IS NULL)', async () => {
+      // Anonymous rows are the step-3 BB-walk path's job — this
+      // endpoint must not touch them so we don't accidentally
+      // attribute (or leave half-attributed metadata behind).
+      const { store: commitStore, state } = createFakeCommitStore();
+      seedUser(state, 42, 'alice@example.com', 'Alice');
+      seedCommit(state, {
+        sha: 'sha-anon',
+        authorUserId: null,
+        authorEmail: null,
+        authorDisplayName: null,
+      });
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+
+      expect(res.json()).toEqual({ updated: 0 });
+      const c = state.commits.get('1:sha-anon')!;
+      expect(c.authorEmail).toBeNull();
+      expect(c.authorDisplayName).toBeNull();
+    });
+
+    it('partial fill: author_email already set, only display_name needs backfill', async () => {
+      const { store: commitStore, state } = createFakeCommitStore();
+      seedUser(state, 42, 'alice@example.com', 'Alice');
+      seedCommit(state, {
+        sha: 'sha-half',
+        authorUserId: 42,
+        authorEmail: 'alice@example.com',
+        authorDisplayName: null,
+      });
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+
+      expect(res.json()).toEqual({ updated: 1 });
+      const c = state.commits.get('1:sha-half')!;
+      expect(c.authorEmail).toBe('alice@example.com'); // preserved
+      expect(c.authorDisplayName).toBe('Alice'); // filled
+    });
+
+    it('user.email is NULL: author_email stays NULL, but author_display_name still fills', async () => {
+      // The COALESCE clause and the WHERE predicate together ensure
+      // we don't write NULL → NULL (no-op) but we DO still fill the
+      // display_name (users.display_name is NOT NULL by schema, so
+      // it's always available).
+      const { store: commitStore, state } = createFakeCommitStore();
+      seedUser(state, 42, null, 'Email-less Alice');
+      seedCommit(state, {
+        sha: 'sha-no-email',
+        authorUserId: 42,
+        authorEmail: null,
+        authorDisplayName: null,
+      });
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+
+      expect(res.json()).toEqual({ updated: 1 });
+      const c = state.commits.get('1:sha-no-email')!;
+      expect(c.authorEmail).toBeNull();
+      expect(c.authorDisplayName).toBe('Email-less Alice');
+    });
+
+    it('idempotent: re-running converges (zero updates on the second pass)', async () => {
+      const { store: commitStore, state } = createFakeCommitStore();
+      seedUser(state, 42, 'alice@example.com', 'Alice');
+      seedCommit(state, { sha: 'sha-once', authorUserId: 42, authorEmail: null, authorDisplayName: null });
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const first = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+      expect(first.json()).toEqual({ updated: 1 });
+
+      const second = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+      expect(second.json()).toEqual({ updated: 0 });
+    });
+
+    it('returns zero when no commits need backfill (empty / fully-populated state)', async () => {
+      const { store: commitStore } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({ method: 'POST', url: '/api/admin/commits/backfill-author-snapshots' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ updated: 0 });
     });
   });
 });

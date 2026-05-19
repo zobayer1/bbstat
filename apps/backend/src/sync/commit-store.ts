@@ -205,6 +205,28 @@ export interface CommitStore {
     entries: Array<{ commitId: number; userId: number }>,
   ): Promise<Array<{ id: number; repositoryId: number; authoredAt: Date }>>;
 
+  // One-shot SQL backfill of `commits.author_email` +
+  // `commits.author_display_name` for rows where `author_user_id` is
+  // already set (i.e., the commit attributes to a known user) but the
+  // snapshot columns are NULL — typically commits ingested before the
+  // V1_16 schema migration that added those columns. Pulls the value
+  // straight from the linked `users` row via INNER JOIN, no BB call.
+  //
+  // Each column is filled independently via COALESCE so partial
+  // pre-existing data isn't clobbered:
+  //   - If `commits.author_email` is NULL and `users.email` is NOT
+  //     NULL → copy.
+  //   - If `commits.author_display_name` is NULL → copy
+  //     `users.display_name` (the users column is NOT NULL).
+  //   - Otherwise the existing snapshot value is preserved.
+  //
+  // Idempotent: re-running converges (no row matches the WHERE on
+  // the second pass). Anonymous rows (author_user_id IS NULL) are
+  // skipped — they need the BB-walk path (step 3 in the
+  // attribution-fix series) to populate. Returns the post-UPDATE
+  // row count.
+  backfillAuthorSnapshotsFromUsers(): Promise<{ updated: number }>;
+
   // Bulk upsert commits. Conflicts on (repository_id, sha) trigger a narrow
   // DO UPDATE that only fills `author_user_id` when the stored value IS NULL
   // and the incoming value IS NOT NULL — never overwrites established
@@ -513,6 +535,30 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         fullName: r.full_name,
         authoredAt: r.authored_at instanceof Date ? r.authored_at : new Date(r.authored_at),
       }));
+    },
+
+    async backfillAuthorSnapshotsFromUsers() {
+      // Single UPDATE FROM joining commits → users on author_user_id.
+      // COALESCE means each column is updated only if currently NULL —
+      // pre-existing snapshot values are preserved. The WHERE clause
+      // filters to rows where at least one of the two columns is NULL
+      // AND a fill is available (users.email IS NOT NULL for email;
+      // users.display_name is NOT NULL by schema). Postgres can handle
+      // hundreds of thousands of rows in one statement; no batching
+      // needed for our scale.
+      const result = await db.execute(sql`
+        UPDATE commits c
+        SET
+          author_email = COALESCE(c.author_email, u.email),
+          author_display_name = COALESCE(c.author_display_name, u.display_name)
+        FROM users u
+        WHERE c.author_user_id = u.id
+          AND (
+            (c.author_email IS NULL AND u.email IS NOT NULL)
+            OR c.author_display_name IS NULL
+          )
+      `);
+      return { updated: result.rowCount ?? 0 };
     },
 
     async reattributeAnonymousCommits(entries) {
