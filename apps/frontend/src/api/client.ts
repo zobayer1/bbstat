@@ -57,6 +57,11 @@ export interface TopContributorWithSparkline extends TopContributor {
   reposWindow: number;
 }
 
+// Time window for the Dashboard "Top Contributors" panel — narrow
+// 7d/30d contract that the /api/stats/top-contributors route accepts.
+// The Members page no longer takes a window parameter (it ships both
+// 7d + 30d aggregates per row), so the only consumer of this type is
+// the dashboard top-contributors call.
 export type ContributorWindow = '7d' | '30d';
 
 // Phase 3 per-entity rollup endpoints. Shapes mirror the StatsStore result
@@ -162,11 +167,20 @@ export interface WorkspaceMember {
   displayName: string;
   username: string | null;
   email: string | null;
-  commitsWindow: number;
+  // Mirrors users.is_workspace_member — TRUE for current workspace
+  // members (discovered via member sync), FALSE for ex-employees /
+  // never-members / externals (auto-created during commit ingest or
+  // by the anonymous-sweep runner). Drives the Members table's
+  // muted styling for out-of-workspace contributors.
+  isWorkspaceMember: boolean;
+  // Both windows ship in every row so the table can render
+  // `{commits} ({repos})` cells side-by-side for 7d and 30d without
+  // re-fetching on toggle.
+  commits7d: number;
+  repos7d: number;
+  commits30d: number;
+  repos30d: number;
   commitsAllTime: number;
-  additionsWindow: number;
-  deletionsWindow: number;
-  reposWindow: number;
   reposAllTime: number;
   lastActiveAt: string | null;
   last30Days: number[];
@@ -307,7 +321,7 @@ export const api = {
     const qs = params.toString();
     return request<RepoContributorBreakdown[]>(`/api/stats/repo-contributors${qs.length > 0 ? `?${qs}` : ''}`);
   },
-  members: (window: ContributorWindow = '7d') => request<WorkspaceMember[]>(`/api/stats/members?window=${window}`),
+  members: () => request<WorkspaceMember[]>('/api/stats/members'),
   activityDaily: (query: { actor?: number; repo?: string; project?: string } = {}) => {
     const params = new URLSearchParams();
     if (query.actor !== undefined) params.set('actor', String(query.actor));

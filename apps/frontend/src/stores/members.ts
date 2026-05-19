@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
-import type { ContributorWindow, WorkspaceMember } from '@/api/client';
+import type { WorkspaceMember } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
 // Client-side cache for the /members page. Hydrates from
@@ -9,12 +9,13 @@ import { liveBus } from '@/lib/live';
 // instantly with the previous payload while a fresh fetch runs in
 // the background. Fuzzy search, sort, and pagination all run on the
 // frontend over `members.value` — the backend ships the full eligible
-// roster (commitsAllTime > 0) in one round-trip.
+// roster (commitsAllTime > 0) in one round-trip with BOTH 7d and 30d
+// aggregates per row, so the table can render `{commits} ({repos})`
+// cells for each window without any client-side toggling.
 export const useMembersStore = defineStore(
   'members',
   () => {
     const members = ref<WorkspaceMember[]>([]);
-    const window = ref<ContributorWindow>('7d');
     const lastFetchedAt = ref<string | null>(null);
     const loading = ref(false);
     const error = ref<string | null>(null);
@@ -23,19 +24,13 @@ export const useMembersStore = defineStore(
       loading.value = true;
       error.value = null;
       try {
-        members.value = await api.members(window.value);
+        members.value = await api.members();
         lastFetchedAt.value = new Date().toISOString();
       } catch (e) {
         error.value = e instanceof Error ? e.message : String(e);
       } finally {
         loading.value = false;
       }
-    }
-
-    async function setWindow(next: ContributorWindow): Promise<void> {
-      if (next === window.value) return;
-      window.value = next;
-      await fetch();
     }
 
     function clear(): void {
@@ -66,7 +61,7 @@ export const useMembersStore = defineStore(
       void applyTickComplete();
     });
 
-    return { members, window, lastFetchedAt, loading, error, fetch, setWindow, clear, applyTickComplete };
+    return { members, lastFetchedAt, loading, error, fetch, clear, applyTickComplete };
   },
-  { persist: { pick: ['members', 'window', 'lastFetchedAt'] } },
+  { persist: { pick: ['members', 'lastFetchedAt'] } },
 );

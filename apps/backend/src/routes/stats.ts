@@ -32,13 +32,13 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
     },
   );
 
-  app.get<{ Querystring: { window?: string } }>('/members', async (request, reply) => {
-    const parsed = windowSchema.safeParse(request.query.window ?? '7d');
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_window', allowed: ['7d', '30d'] });
-    }
-    const days = parsed.data === '7d' ? 7 : 30;
-    return opts.statsStore.listWorkspaceMembers(days);
+  // Members route — no window parameter. Every row carries both 7d
+  // and 30d aggregates (commits + distinct repos) plus all-time
+  // totals, so the table can render `{commits} ({repos})` per
+  // window without a query-string toggle. Any ?window= the client
+  // sends is ignored.
+  app.get('/members', async () => {
+    return opts.statsStore.listWorkspaceMembers();
   });
 
   app.get<{ Querystring: { window?: string } }>('/top-contributors', async (request, reply) => {

@@ -241,11 +241,12 @@ describe('GET /api/stats/members', () => {
       displayName: 'Alice',
       username: 'alice',
       email: 'alice@example.com',
-      commitsWindow: 12,
+      isWorkspaceMember: true,
+      commits7d: 12,
+      repos7d: 3,
+      commits30d: 45,
+      repos30d: 5,
       commitsAllTime: 200,
-      additionsWindow: 540,
-      deletionsWindow: 120,
-      reposWindow: 3,
       reposAllTime: 7,
       lastActiveAt: '2026-05-15T10:00:00.000Z',
       last30Days: Array.from({ length: 30 }, (_, i) => (i === 29 ? 4 : 0)),
@@ -256,18 +257,19 @@ describe('GET /api/stats/members', () => {
       displayName: 'Bob',
       username: null,
       email: null,
-      commitsWindow: 0,
+      isWorkspaceMember: false,
+      commits7d: 0,
+      repos7d: 0,
+      commits30d: 0,
+      repos30d: 0,
       commitsAllTime: 18,
-      additionsWindow: 0,
-      deletionsWindow: 0,
-      reposWindow: 0,
       reposAllTime: 2,
       lastActiveAt: '2026-04-02T08:00:00.000Z',
       last30Days: new Array(30).fill(0),
     },
   ];
 
-  it('defaults to a 7-day window when no query param is given', async () => {
+  it('returns the full members payload (no window query param)', async () => {
     const listWorkspaceMembers = vi.fn().mockResolvedValue(sampleMembers);
     const statsStore = makeStatsStore({ listWorkspaceMembers });
     appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
@@ -276,10 +278,15 @@ describe('GET /api/stats/members', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(sampleMembers);
-    expect(listWorkspaceMembers).toHaveBeenCalledWith(7);
+    expect(listWorkspaceMembers).toHaveBeenCalledWith();
   });
 
-  it('forwards a 30-day window when window=30d', async () => {
+  it("ignores a ?window= query param (legacy clients shouldn't 400)", async () => {
+    // Pre-V1_18 clients still send ?window=7d / ?window=30d / etc. The
+    // route used to map those to a windowDays argument; now it ignores
+    // them so a stale frontend cache doesn\'t cause a hard 400 during
+    // the rolling deploy. Backwards compatibility is cheap here —
+    // listWorkspaceMembers takes no arguments anyway.
     const listWorkspaceMembers = vi.fn().mockResolvedValue([]);
     const statsStore = makeStatsStore({ listWorkspaceMembers });
     appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
@@ -287,18 +294,7 @@ describe('GET /api/stats/members', () => {
     const res = await appInstance.inject({ method: 'GET', url: '/api/stats/members?window=30d' });
 
     expect(res.statusCode).toBe(200);
-    expect(listWorkspaceMembers).toHaveBeenCalledWith(30);
-  });
-
-  it('rejects invalid window with 400', async () => {
-    const statsStore = makeStatsStore();
-    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
-
-    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/members?window=ever' });
-
-    expect(res.statusCode).toBe(400);
-    expect(res.json()).toEqual({ error: 'invalid_window', allowed: ['7d', '30d'] });
-    expect(statsStore.listWorkspaceMembers).not.toHaveBeenCalled();
+    expect(listWorkspaceMembers).toHaveBeenCalledWith();
   });
 });
 

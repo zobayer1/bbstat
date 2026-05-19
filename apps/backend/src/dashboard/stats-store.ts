@@ -288,15 +288,24 @@ export interface WorkspaceMember {
   // user has yet landed a parseable address (or the user predates the
   // column on a not-yet-resynced deployment).
   email: string | null;
-  // Per-window aggregates. Additions / deletions read from commit_daily
-  // and so carry the same merge semantics as getUserSummary's totals — the
-  // dashboard treats them the same way.
-  commitsWindow: number;
+  // Mirrors users.is_workspace_member — TRUE for rows discovered via
+  // member sync (current workspace members), FALSE for rows auto-
+  // created during commit ingest (ex-employees, never-members,
+  // externals). Drives the Members table's muted/diffused styling
+  // for out-of-workspace contributors and any "active team only"
+  // filters.
+  isWorkspaceMember: boolean;
+  // Per-window commit + distinct-repo aggregates. The Members table
+  // renders both windows side-by-side as `{commits} ({repos})` cells,
+  // so we ship both in one round-trip rather than re-querying when
+  // the user toggles. additions / deletions used to live here too —
+  // they were dropped when the +/- column came off the table; no
+  // other consumer reads them from this endpoint.
+  commits7d: number;
+  repos7d: number;
+  commits30d: number;
+  repos30d: number;
   commitsAllTime: number;
-  additionsWindow: number;
-  deletionsWindow: number;
-  // Distinct repos this member committed to in the active window vs ever.
-  reposWindow: number;
   reposAllTime: number;
   // MAX(commits.authored_at) across all this member's commits. Null is
   // theoretically unreachable (the filter requires commitsAllTime > 0) but
@@ -355,13 +364,15 @@ export interface StatsStore {
   // and groups by `project` client-side to drive the Projects panel.
   listTrackedRepositoriesWithStats(): Promise<TrackedRepositorySummary[]>;
   // Workspace member roster for the /members page. One row per user with at
-  // least one ingested commit (commitsAllTime > 0) — window-zero rows still
-  // appear so a quiet week doesn't empty the page. Anonymous / unmatched-
-  // author commits are excluded. Ordered server-side by commitsWindow DESC,
-  // displayName ASC so the default render lands "most-active first" without
-  // a client sort. Pagination + fuzzy-search run on the frontend over this
-  // list (org-scale dataset, full payload fits in one round-trip).
-  listWorkspaceMembers(windowDays: number): Promise<WorkspaceMember[]>;
+  // least one ingested commit (commitsAllTime > 0); rows with zero commits
+  // in both windows still appear so a quiet week doesn't empty the page.
+  // Anonymous / unmatched-author commits are excluded. Ordered server-side
+  // by commits7d DESC, displayName ASC so the default render lands "most-
+  // active first" without a client sort. Pagination + fuzzy-search run on
+  // the frontend over this list (org-scale dataset, full payload fits in
+  // one round-trip). No window parameter — both 7d and 30d aggregates
+  // ship in every row.
+  listWorkspaceMembers(): Promise<WorkspaceMember[]>;
 
   // Phase 4 T23 — unified activity feed. UNION ALL of commits + PRs with
   // per-branch filter predicates, ordered by `occurredAt DESC` then by
@@ -1106,11 +1117,16 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       };
     },
 
-    async listWorkspaceMembers(windowDays) {
+    async listWorkspaceMembers() {
       // Single round-trip, four CTEs:
-      //   base        — per-user aggregates from commit_daily, filtered to
-      //                 users who've ever landed a commit (commits_all_time > 0
-      //                 via the GROUP BY HAVING). Window-zero rows still pass.
+      //   base        — per-user commit + distinct-repo aggregates from
+      //                 commit_daily, computed for BOTH 7d and 30d windows
+      //                 via FILTER clauses (no window query param — the
+      //                 table ships both windows in every row). Filtered
+      //                 to users who've ever landed a commit
+      //                 (commits_all_time > 0 via the GROUP BY HAVING);
+      //                 rows where both windows are zero still pass so
+      //                 the page doesn't empty out during a quiet week.
       //   last_active — MAX(authored_at) per user from `commits` (not
       //                 commit_daily, which has no timestamp — only day).
       //   daily       — last-30-day per-(user, day) commit counts, restricted
@@ -1121,24 +1137,24 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       //                 TopContributorWithSparkline.last30Days so the
       //                 frontend's Sparkline component renders unchanged.
       //
-      // Window is windowDays UTC day buckets ending today — e.g. windowDays=7
-      // → day >= current_date - 6 covers 7 days. The ::int cast on the bound
-      // param is load-bearing (see getTopContributors for the same note —
-      // without it, current_date - $1 falls back to the date-date overload).
-      //
-      // Order: commits_window DESC, display_name ASC. The frontend resorts
-      // client-side when the user picks a different sort column.
+      // Order: last_active_at DESC NULLS LAST, display_name ASC —
+      // matches the default Members table sort so the wire order
+      // is already "most-recently-active first" with never-active
+      // rows pushed to the end. The frontend re-sorts client-side
+      // when the user picks a different column, but the initial
+      // render needs no resort pass.
       const rows = await db.execute<{
         user_id: number;
         bitbucket_uuid: string;
         display_name: string;
         username: string | null;
         email: string | null;
-        commits_window: number;
+        is_workspace_member: boolean;
+        commits_7d: number;
+        repos_7d: number;
+        commits_30d: number;
+        repos_30d: number;
         commits_all_time: number;
-        additions_window: number;
-        deletions_window: number;
-        repos_window: number;
         repos_all_time: number;
         last_active_at: string | Date | null;
         last_30_days: number[];
@@ -1146,16 +1162,15 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         WITH base AS (
           SELECT
             cd.author_user_id AS user_id,
-            COALESCE(sum(cd.commit_count) FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int), 0)::int
-              AS commits_window,
+            COALESCE(sum(cd.commit_count) FILTER (WHERE cd.day >= current_date - 6), 0)::int
+              AS commits_7d,
+            count(DISTINCT cd.repository_id) FILTER (WHERE cd.day >= current_date - 6)::int
+              AS repos_7d,
+            COALESCE(sum(cd.commit_count) FILTER (WHERE cd.day >= current_date - 29), 0)::int
+              AS commits_30d,
+            count(DISTINCT cd.repository_id) FILTER (WHERE cd.day >= current_date - 29)::int
+              AS repos_30d,
             sum(cd.commit_count)::int AS commits_all_time,
-            COALESCE(sum(cd.additions) FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int), 0)::int
-              AS additions_window,
-            COALESCE(sum(cd.deletions) FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int), 0)::int
-              AS deletions_window,
-            count(DISTINCT cd.repository_id)
-              FILTER (WHERE cd.day >= current_date - ${windowDays - 1}::int)::int
-              AS repos_window,
             count(DISTINCT cd.repository_id)::int AS repos_all_time
           FROM commit_daily cd
           WHERE cd.author_user_id IS NOT NULL
@@ -1190,11 +1205,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           u.display_name,
           u.username,
           u.email,
-          b.commits_window,
+          u.is_workspace_member,
+          b.commits_7d,
+          b.repos_7d,
+          b.commits_30d,
+          b.repos_30d,
           b.commits_all_time,
-          b.additions_window,
-          b.deletions_window,
-          b.repos_window,
           b.repos_all_time,
           la.last_active_at,
           s.last_30_days
@@ -1202,7 +1218,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         JOIN users u ON u.id = b.user_id
         LEFT JOIN last_active la ON la.user_id = b.user_id
         JOIN spark s ON s.user_id = b.user_id
-        ORDER BY b.commits_window DESC, u.display_name ASC
+        ORDER BY la.last_active_at DESC NULLS LAST, u.display_name ASC
       `);
       return rows.rows.map((r) => ({
         userId: r.user_id,
@@ -1210,11 +1226,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         displayName: r.display_name,
         username: r.username,
         email: r.email,
-        commitsWindow: r.commits_window,
+        isWorkspaceMember: r.is_workspace_member,
+        commits7d: r.commits_7d,
+        repos7d: r.repos_7d,
+        commits30d: r.commits_30d,
+        repos30d: r.repos_30d,
         commitsAllTime: r.commits_all_time,
-        additionsWindow: r.additions_window,
-        deletionsWindow: r.deletions_window,
-        reposWindow: r.repos_window,
         reposAllTime: r.repos_all_time,
         lastActiveAt:
           r.last_active_at === null

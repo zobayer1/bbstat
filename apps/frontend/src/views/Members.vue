@@ -2,12 +2,12 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import Fuse from 'fuse.js';
-import ActivityStatusDonut, { type ActivityBucket } from '@/components/ActivityStatusDonut.vue';
+import ActiveMembersBar, { type ActivityBucket } from '@/components/ActiveMembersBar.vue';
 import LorenzCurve from '@/components/LorenzCurve.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import { useMembersStore } from '@/stores/members';
 import { useStatsStore } from '@/stores/stats';
-import type { ContributorWindow, WorkspaceMember } from '@/api/client';
+import type { WorkspaceMember } from '@/api/client';
 
 const store = useMembersStore();
 const stats = useStatsStore();
@@ -33,17 +33,39 @@ const inactiveMembers = computed<number | null>(() =>
   totalMembers.value === null ? null : Math.max(0, totalMembers.value - activeMembers.value),
 );
 
-const windows: ContributorWindow[] = ['7d', '30d'];
-const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Last 30 days');
+// Membership-status partition of the full ingested roster. Counts the
+// whole payload (NOT filtered by activity window) since these counts
+// describe roster shape, not recent activity. Sums to
+// store.members.length.
+//
+// `otherContributorCount` covers everyone whose BB UUID isn't in the
+// workspace's `/members` endpoint at sync time. That bucket is more
+// heterogeneous than "removed" suggests:
+//   - ex-employees who left the workspace,
+//   - external contributors who never joined,
+//   - current workspace members who happen to commit from a different
+//     BB account (i.e. their git email maps to a separate UUID that
+//     hasn't been added to the workspace).
+// "Other Contributors" is the umbrella label that doesn't overclaim
+// about any of those subgroups.
+const workspaceMemberCount = computed<number>(() => store.members.filter((m) => m.isWorkspaceMember).length);
+const otherContributorCount = computed<number>(() => store.members.filter((m) => !m.isWorkspaceMember).length);
+
+// Day constant — used by the activity-buckets chart at the bottom of
+// the file. The table itself no longer filters by recency window; it's
+// a straight paginated roster with 7d + 30d columns side-by-side.
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Sortable columns. `key` is the WorkspaceMember field used for the
-// comparator; `numeric` switches the comparator from locale-string to
-// numeric. `lastActiveAt` sorts on the raw ISO string (lexical order
-// is chronological for ISO-8601), with nulls pushed to the end so a
-// never-active row doesn't outrank an active one in either direction.
-type SortKey = 'commitsWindow' | 'commitsAllTime' | 'reposWindow' | 'lastActiveAt' | 'displayName';
+// comparator. `lastActiveAt` sorts on the raw ISO string (lexical
+// order is chronological for ISO-8601), with nulls pushed to the end
+// so a never-active row doesn't outrank an active one in either
+// direction. Default lands on `lastActiveAt` desc — most-recently-
+// active first — which also matches the backend's ORDER BY so the
+// wire order doesn't visibly reshuffle on first render.
+type SortKey = 'commits7d' | 'commits30d' | 'commitsAllTime' | 'lastActiveAt' | 'displayName';
 type SortDir = 'asc' | 'desc';
-const sortKey = ref<SortKey>('commitsWindow');
+const sortKey = ref<SortKey>('lastActiveAt');
 const sortDir = ref<SortDir>('desc');
 
 function toggleSort(key: SortKey): void {
@@ -60,12 +82,11 @@ function toggleSort(key: SortKey): void {
 
 const search = ref('');
 
-// Fuse index. Rebuilds when the members payload changes (refetch /
-// SSE refresh in a later commit). `keys` covers the two human-visible
-// identifiers; `threshold: 0.4` is forgiving enough for typos but not
-// so loose that unrelated names collide. `ignoreLocation` lets a match
-// anywhere in the string count, so a search for "han" hits "Zobayer
-// Hasan" without scoring proximity to position 0.
+// Fuzzy search runs straight over the full roster — no recency-window
+// filter anymore. `threshold: 0.4` is forgiving enough for typos but
+// not so loose that unrelated names collide; `ignoreLocation` lets a
+// match anywhere in the string count (so a search for "han" hits
+// "Zobayer Hasan" without scoring proximity to position 0).
 const fuse = computed(
   () =>
     new Fuse(store.members, {
@@ -105,7 +126,7 @@ const sorted = computed<WorkspaceMember[]>(() => {
   return list;
 });
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 const page = ref(1);
 const pageCount = computed(() => Math.max(1, Math.ceil(sorted.value.length / PAGE_SIZE)));
 const pageClamped = computed(() => Math.min(page.value, pageCount.value));
@@ -114,8 +135,8 @@ const paged = computed<WorkspaceMember[]>(() => {
   return sorted.value.slice(start, start + PAGE_SIZE);
 });
 
-// Reset to page 1 whenever the search query changes — a search result
-// of 12 rows shouldn't render an empty page 3.
+// Reset to page 1 whenever the search query changes — a search
+// result of 12 rows shouldn't render an empty page 3.
 watch(search, () => {
   page.value = 1;
 });
@@ -148,52 +169,58 @@ const sortIndicator = (key: SortKey): string => {
   return sortDir.value === 'asc' ? ' ▲' : ' ▼';
 };
 
-// Activity-status donut: buckets every member by how recently they last
-// committed, relative to now. Bucket boundaries are window-independent
-// (the 7d/30d toggle drives the table, not this chart) — the donut is
-// always answering "is the team alive *right now*?" across the same
-// 7/30/90-day recency ramp.
+// Active-members chart buckets: members counted across CUMULATIVE
+// recency ranges, restricted to the trailing year. Each bucket
+// counts every member active within its range — so by construction
+// count(7d) ≤ count(30d) ≤ count(1y); a 5-day-old commit lands in
+// all three, a 100-day-old commit lands in only 1y. The
+// ActiveMembersBar component renders each bucket as its own row
+// (no stacking, no partition) — the honest geometry for nested
+// ranges, since a stacked bar would double-count overlapping
+// members.
 //
-// Buckets are mutually exclusive (Active-30d here means active within
-// 30 days but NOT within 7) so the slices sum to total members and the
-// donut reads as a partition, not nested rings.
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Three shades of emerald — saturated → faded — read as a single
+// "activity, fading with time" axis: emerald-700 (7d, darkest
+// and shortest bar) for tightest recency; emerald-300 (1y, palest
+// and longest bar) for the widest range.
+//
+// Dormant (no commit in 365d, or never-active) is intentionally
+// excluded — after the anonymous-sweep added ex-employees, Dormant
+// dwarfs every other bucket and drowns out the comparison that
+// matters. The title "Active Members (1 year)" makes the inclusion
+// criterion explicit.
 const ACTIVITY_COLORS = {
-  active7d: '#10b981', // emerald-500
-  active30d: '#3b82f6', // blue-500
-  active90d: '#f59e0b', // amber-500
-  dormant: '#94a3b8', // slate-400
+  active7d: '#047857', // emerald-700
+  active30d: '#10b981', // emerald-500
+  active1y: '#6ee7b7', // emerald-300
 };
 
 const activityBuckets = computed<ActivityBucket[]>(() => {
   const now = Date.now();
-  const counts = { a7: 0, a30: 0, a90: 0, dormant: 0 };
+  const counts = { a7: 0, a30: 0, a1y: 0 };
   for (const m of store.members) {
-    if (m.lastActiveAt === null) {
-      counts.dormant++;
-      continue;
-    }
+    if (m.lastActiveAt === null) continue;
     const ageDays = (now - new Date(m.lastActiveAt).getTime()) / DAY_MS;
+    // Cumulative — a member active in the last 7 days also counts
+    // toward the 30d and 1y buckets. No `else if` chain.
+    if (ageDays < 365) counts.a1y++;
+    if (ageDays < 30) counts.a30++;
     if (ageDays < 7) counts.a7++;
-    else if (ageDays < 30) counts.a30++;
-    else if (ageDays < 90) counts.a90++;
-    else counts.dormant++;
   }
   return [
     { label: 'Active · 7d', count: counts.a7, color: ACTIVITY_COLORS.active7d },
     { label: 'Active · 30d', count: counts.a30, color: ACTIVITY_COLORS.active30d },
-    { label: 'Active · 90d', count: counts.a90, color: ACTIVITY_COLORS.active90d },
-    { label: 'Dormant', count: counts.dormant, color: ACTIVITY_COLORS.dormant },
+    { label: 'Active · 1y', count: counts.a1y, color: ACTIVITY_COLORS.active1y },
   ];
 });
 
-// Lorenz curve values are window-scoped — the curve answers "how
-// concentrated is contribution in the active window?" so it should
-// retract/expand as the user toggles 7d ↔ 30d. The component itself
-// filters zeros (a member who didn't commit in the window doesn't
-// inform concentration; including them would flatten the left tail
-// and visually understate the inequality).
-const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
+// Lorenz curve values: 30-day commit counts. The table dropped its
+// window-toggle UI, so the curve also stops responding to one —
+// fixed at 30d here, the same window the Trend sparkline column uses.
+// The component itself filters zeros (a member who didn't commit in
+// the window doesn't inform concentration; including them would flatten
+// the left tail and visually understate the inequality).
+const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 </script>
 
 <template>
@@ -240,22 +267,40 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
          the donut vs the Lorenz plot consume. -->
     <section class="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
       <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 class="mb-4 text-center text-xs font-medium uppercase tracking-wider text-slate-500">Activity status</h2>
+        <h2 class="mb-4 text-center text-xs font-medium uppercase tracking-wider text-slate-500">
+          Tracked Members
+          <span class="text-slate-400">({{ store.members.length }})</span>
+        </h2>
+        <!-- Membership-status partition of the full ingested roster,
+             above the bar so it frames the activity breakdown that
+             follows. Workspace Members is the current /members
+             roster; Other Contributors is everyone else (ex-employees,
+             externals, AND current members whose git email maps to a
+             BB account not in the workspace member list). The latter
+             is rendered muted to match the table-row treatment below. -->
+        <div class="mb-4 grid grid-cols-2 divide-x divide-slate-200 text-center">
+          <div>
+            <p class="text-2xl font-semibold tabular-nums text-slate-900">{{ workspaceMemberCount }}</p>
+            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">Workspace Members</p>
+          </div>
+          <div>
+            <p class="text-2xl font-semibold tabular-nums text-slate-400">{{ otherContributorCount }}</p>
+            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">Other Contributors</p>
+          </div>
+        </div>
         <div class="flex flex-1 items-center justify-center">
-          <ActivityStatusDonut
-            :buckets="activityBuckets"
-            center-label="Members"
-            :outer-radius="120"
-            :inner-radius="76"
-          />
+          <!-- Three nested-range bars (7d, 30d, 1y), each sized to
+               its own cumulative count. See activityBuckets above
+               for the semantic; ActiveMembersBar.vue for the layout. -->
+          <ActiveMembersBar :buckets="activityBuckets" :bar-height="32" :bar-gap="14" class="w-full max-w-[480px]" />
         </div>
         <p class="mt-4 text-center text-[10px] text-slate-400">
-          Members grouped by last-commit recency — green is most active, slate is dormant
+          Members active in the last 7 / 30 / 365 days. Ranges are cumulative — 30d includes 7d, 1y includes 30d.
         </p>
       </div>
       <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
         <h2 class="mb-4 text-center text-xs font-medium uppercase tracking-wider text-slate-500">
-          Commit concentration · {{ store.window }}
+          Commit concentration · 30d
         </h2>
         <div class="flex flex-1 items-center">
           <LorenzCurve :values="lorenzValues" :width="480" :height="260" class="w-full" />
@@ -300,22 +345,6 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
             aria-label="Search workspace members"
           />
         </div>
-        <div
-          class="inline-flex shrink-0 overflow-hidden rounded-md border border-slate-200 text-xs"
-          role="group"
-          aria-label="Activity window"
-        >
-          <button
-            v-for="w in windows"
-            :key="w"
-            type="button"
-            class="px-3 py-2 transition"
-            :class="store.window === w ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'"
-            @click="void store.setWindow(w)"
-          >
-            {{ windowLabel(w) }}
-          </button>
-        </div>
       </div>
       <span class="text-xs text-slate-500">
         {{ sorted.length }} <span v-if="search.trim() !== ''">match{{ sorted.length === 1 ? '' : 'es' }}</span>
@@ -326,14 +355,14 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
     <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
         <!-- Column layout:
-               [ Member | Commits (win) | +/- (win) | Repos (win) ‖ Trend 30d | Last active | All-time ]
-             The double-bar marks where the trailing window-independent
-             columns begin — `Trend (30d)`, `Last active` and `All-time`
-             aren't affected by the 7d/30d toggle, so they're grouped
-             together at the far right with a visible left border on the
-             first column of the group. Same border lives on the matching
-             header cell and on every body cell to draw an unbroken
-             vertical rule. -->
+               [ Member | Commits · 7d | Commits · 30d ‖ Trend 30d | Last active | All-time ]
+             Both per-window columns render `{commits} ({repos})` so the
+             primary commit count + the distinct-repo breadth are
+             side-by-side without a separate Repos column. The double-bar
+             marks where the trailing window-independent columns begin —
+             `Trend (30d)`, `Last active` and `All-time` are grouped at
+             the far right with a 2px left border drawing a vertical
+             rule from the header down through every body cell. -->
         <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
           <tr>
             <th class="px-4 py-2 text-left font-medium">
@@ -341,38 +370,22 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
                 Member{{ sortIndicator('displayName') }}
               </button>
             </th>
-            <th class="px-4 py-2 text-right font-medium">
-              <button type="button" class="hover:text-slate-700" @click="toggleSort('commitsWindow')">
-                Commits{{ sortIndicator('commitsWindow') }}
-              </button>
-            </th>
-            <!-- Same 3-column grid template as the cells below so the `/`
-                 in the header lines up with the `/` in every row. -->
-            <th class="px-4 py-2 font-medium">
-              <div class="grid grid-cols-[1fr_auto_1fr] gap-1">
-                <span class="text-right text-emerald-600">+</span>
-                <span class="text-slate-300">/</span>
-                <span class="text-left text-rose-600">−</span>
-              </div>
-            </th>
-            <th class="py-2 pr-6 text-right font-medium">
-              <button type="button" class="hover:text-slate-700" @click="toggleSort('reposWindow')">
-                Repos{{ sortIndicator('reposWindow') }}
-              </button>
-            </th>
-            <!-- Sparkline column carries the 2px left border that marks
-                 the start of the window-independent column group. Header
-                 is a plain label — no sort comparator makes sense for a
-                 30-day shape — and the `(30d)` suffix calls out that this
-                 column stays at 30 days regardless of the 7d/30d toggle. -->
-            <th class="border-l-2 border-slate-200 px-4 py-2 text-right font-medium">
-              Trend <span class="text-slate-400">(30d)</span>
-            </th>
             <th class="py-2 pr-4 text-right font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('lastActiveAt')">
                 Last active{{ sortIndicator('lastActiveAt') }}
               </button>
             </th>
+            <th class="px-4 py-2 text-right font-medium">
+              <button type="button" class="hover:text-slate-700" @click="toggleSort('commits7d')">
+                Commits · 7d{{ sortIndicator('commits7d') }}
+              </button>
+            </th>
+            <th class="px-4 py-2 text-right font-medium">
+              <button type="button" class="hover:text-slate-700" @click="toggleSort('commits30d')">
+                Commits · 30d{{ sortIndicator('commits30d') }}
+              </button>
+            </th>
+            <th class="px-4 py-2 text-right font-medium">Trend <span class="text-slate-400">(30d)</span></th>
             <th class="px-4 py-2 text-right font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('commitsAllTime')">
                 All-time{{ sortIndicator('commitsAllTime') }}
@@ -381,11 +394,33 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100">
-          <tr v-for="m in paged" :key="m.bitbucketUuid" class="hover:bg-slate-50">
+          <!-- Other Contributors — rows whose BB UUID isn't in the
+               workspace's /members endpoint. Covers ex-employees,
+               externals, AND current members who commit from a
+               separate BB account (their git email maps to a UUID
+               that's not in the member list). Rendered at reduced
+               opacity so sort order still works but the eye knows
+               these aren't fully-linked workspace identities.
+               `bg-slate-50/60` adds a faint wash to distinguish them
+               from in-workspace rows even before hover; the existing
+               `hover:bg-slate-50` still applies for consistency. -->
+          <tr
+            v-for="m in paged"
+            :key="m.bitbucketUuid"
+            :class="['hover:bg-slate-50', m.isWorkspaceMember ? '' : 'bg-slate-50/60 text-slate-400 opacity-70']"
+            :title="
+              m.isWorkspaceMember
+                ? ''
+                : 'BB account not in the workspace member list (ex-employee, external, or current member using a separate email)'
+            "
+          >
             <td class="px-4 py-2">
               <RouterLink
                 :to="{ name: 'user', params: { userId: m.userId } }"
-                class="block font-medium text-slate-900 hover:text-slate-600"
+                :class="[
+                  'block font-medium hover:text-slate-600',
+                  m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500',
+                ]"
               >
                 {{ m.displayName }}
                 <span v-if="m.username" class="ml-1 text-xs font-normal text-slate-400">@{{ m.username }}</span>
@@ -399,25 +434,28 @@ const lorenzValues = computed(() => store.members.map((m) => m.commitsWindow));
                 {{ m.email }}
               </div>
             </td>
-            <td class="px-4 py-2 text-right text-slate-900">{{ m.commitsWindow }}</td>
-            <!-- 3-column grid with the `/` in a fixed center column so the
-                 separator lines up vertically down the table — additions
-                 right-justify into the gap, deletions left-justify out of
-                 it. `tabular-nums` keeps digits the same width across
-                 rows. -->
-            <td class="px-4 py-2 text-xs tabular-nums">
-              <div class="grid grid-cols-[1fr_auto_1fr] items-baseline gap-1">
-                <span class="text-right text-emerald-600">+{{ m.additionsWindow }}</span>
-                <span class="text-slate-300">/</span>
-                <span class="text-left text-rose-600">−{{ m.deletionsWindow }}</span>
-              </div>
-            </td>
-            <td class="py-2 pr-6 text-right text-slate-900">{{ m.reposWindow }}</td>
-            <td class="border-l-2 border-slate-200 px-4 py-2">
-              <Sparkline :points="m.last30Days" :width="96" :height="18" class="ml-auto block text-slate-400" />
-            </td>
             <td class="py-2 pr-4 text-right text-slate-500" :title="m.lastActiveAt ?? ''">
               {{ relativeTime(m.lastActiveAt) }}
+            </td>
+            <!-- Per-window cells: primary commit count followed by the
+                 distinct-repo count in parens at half scale + slate-400
+                 so the breadth metric reads as supplementary context,
+                 not a competing number. `tabular-nums` keeps the
+                 commits column right-aligned cleanly across rows. -->
+            <td
+              :class="['px-4 py-2 text-right tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
+            >
+              {{ m.commits7d }}
+              <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos7d }})</span>
+            </td>
+            <td
+              :class="['px-4 py-2 text-right tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
+            >
+              {{ m.commits30d }}
+              <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos30d }})</span>
+            </td>
+            <td class="px-4 py-2">
+              <Sparkline :points="m.last30Days" :width="96" :height="18" class="ml-auto block text-slate-400" />
             </td>
             <td class="px-4 py-2 text-right text-slate-500">{{ m.commitsAllTime }}</td>
           </tr>
