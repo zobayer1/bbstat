@@ -50,12 +50,22 @@ export const pullRequestStateEnum = pgEnum('pull_request_state', ['OPEN', 'MERGE
 // column. Plumbed in commits.ts forward sync + deepen-backfill.ts via
 // CommitStore.setUserEmailsIfMissing; surfaced in the WorkspaceMember
 // payload + /members table.
+// `is_workspace_member` distinguishes rows discovered via
+// `/workspaces/{ws}/members` (TRUE) from rows auto-created during
+// commit ingest when BB attributed a commit to a UUID we hadn't seen
+// before (FALSE — typically ex-employees, never-members, or external
+// contributors who pushed to a public repo). Member sync forces TRUE on
+// every current member it sees, so a previously-auto-created user who
+// rejoins the workspace flips back to TRUE on the next tick. The UI
+// uses the flag to mute out-of-workspace contributors in member lists
+// and filter "active team" vs "all-time contributors" leaderboards.
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
   displayName: text('display_name').notNull(),
   username: text('username'),
   email: text('email'),
+  isWorkspaceMember: boolean('is_workspace_member').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -179,6 +189,21 @@ export const commits = pgTable(
     // icon when count >= threshold.
     diffStatsFailureCount: integer('diff_stats_failure_count').notNull().default(0),
     diffStatsSyncedAt: timestamp('diff_stats_synced_at', { withTimezone: true }),
+    // Author-snapshot columns. Populated at ingest from BB's
+    // `author.raw` + `author.user.display_name`. NULL when BB doesn't
+    // carry enough metadata (e.g. malformed author.raw) — `author_email`
+    // additionally NULL for noreply-filtered addresses (see
+    // parseAuthorEmail). Stored on the commit (not just on `users`) for
+    // three reasons: (1) the value is immutable per commit and shouldn't
+    // drift if the user later renames; (2) anonymous rows (no
+    // author_user_id) can still carry the email/name they were pushed
+    // with, leaving a hook for future reprocessing; (3) the
+    // forthcoming step-2 backfill pulls from `users` for already-
+    // attributed rows without a BB call, so anything keyed on these
+    // columns can stop joining once they're populated. Both columns
+    // are read-only from the application's perspective after ingest.
+    authorEmail: text('author_email'),
+    authorDisplayName: text('author_display_name'),
     authoredAt: timestamp('authored_at', { withTimezone: true }).notNull(),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
     // FTS index target for the dedicated Activity page's commit-message

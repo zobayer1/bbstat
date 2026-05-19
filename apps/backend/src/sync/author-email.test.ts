@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseAuthorEmail } from './author-email.js';
+import { parseAuthorDisplayName, parseAuthorEmail } from './author-email.js';
 
 describe('parseAuthorEmail', () => {
   it('extracts an email from a standard "Display Name <email>" string', () => {
@@ -60,5 +60,32 @@ describe('parseAuthorEmail', () => {
 
   it('accepts subdomain addresses', () => {
     expect(parseAuthorEmail('Alice <alice@dev.team.example.com>')).toBe('alice@dev.team.example.com');
+  });
+});
+
+describe('parseAuthorDisplayName', () => {
+  it('extracts the name portion before the angle bracket', () => {
+    expect(parseAuthorDisplayName('Alice Example <alice@example.com>')).toBe('Alice Example');
+  });
+
+  it('trims trailing whitespace before the angle bracket', () => {
+    expect(parseAuthorDisplayName('Alice Example   <alice@example.com>')).toBe('Alice Example');
+  });
+
+  it('returns null when there is no usable name (just an angle-bracketed email)', () => {
+    expect(parseAuthorDisplayName('<alice@example.com>')).toBeNull();
+    expect(parseAuthorDisplayName('  <alice@example.com>')).toBeNull();
+  });
+
+  it('falls back to the whole trimmed string when no angle bracket exists', () => {
+    expect(parseAuthorDisplayName('Alice Example')).toBe('Alice Example');
+    expect(parseAuthorDisplayName('   Alice Example   ')).toBe('Alice Example');
+  });
+
+  it('returns null for empty / null / undefined inputs', () => {
+    expect(parseAuthorDisplayName('')).toBeNull();
+    expect(parseAuthorDisplayName('   ')).toBeNull();
+    expect(parseAuthorDisplayName(null)).toBeNull();
+    expect(parseAuthorDisplayName(undefined)).toBeNull();
   });
 });

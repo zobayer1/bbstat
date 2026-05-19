@@ -23,7 +23,7 @@ import { BitbucketApiError } from '../bitbucket/errors.js';
 import type { EventBus } from '../events/bus.js';
 import type { CommitInsertInput, CommitStore, PendingDiffStatCommit } from './commit-store.js';
 import type { DiscoveryStore } from './discovery-store.js';
-import { parseAuthorEmail } from './author-email.js';
+import { parseAuthorDisplayName, parseAuthorEmail } from './author-email.js';
 import { fetchDiffStatsForCommits, type DiffStatsSyncResult } from './diff-stats.js';
 
 export interface RepositoryHandle {
@@ -82,6 +82,15 @@ export interface RepoCommitSyncResult {
   diffStatsUpdated: number;
   diffStatsFailed: number;
   diffStatsRange: { sinceDay: string; untilDay: string } | null;
+  // UTC day window covering every commit whose author_user_id transitioned
+  // NULL → known on this run (BB now resolves the author to a workspace
+  // member that was unknown at original ingest). The rollup hook unions
+  // this with insertedRange / diffStatsRange before recomputing
+  // commit_daily so the stale (day, repo, NULL) row gets replaced by the
+  // attributed (day, repo, user) row in the same window — without this
+  // step the dashboard would double-count those days. Null when no rows
+  // were reattributed on this run.
+  reattributedRange: { sinceDay: string; untilDay: string } | null;
   // Populated when the auto-trip in this run flipped the repo's
   // sync_excluded flag. NULL on a healthy outcome. Surfaced so
   // log lines and operator-facing payloads can show what triggered
@@ -181,36 +190,90 @@ export async function syncRepositoryCommits(
     );
     const userIdByUuid = await deps.store.resolveUserIdsByUuid(uuids);
 
-    // Best-effort write-once email capture. For each commit whose
-    // author.user.uuid resolved to a local user, parse `<email>` out of
-    // author.raw and queue it for the bulk UPDATE. Dedupe happens in
-    // the store; noreply / malformed addresses are filtered upstream
-    // in parseAuthorEmail. Runs before insertCommits so the email
-    // lands on the user row even if the commit itself loses the
-    // ON CONFLICT race.
+    // Pre-extract author metadata per commit so the email-capture,
+    // auto-create, and insert-input building below all read from the
+    // same parsed view. parseAuthorEmail filters noreply / malformed
+    // addresses; parseAuthorDisplayName is the fallback name source
+    // when BB omits author.user.display_name.
+    const parsed = pull.batch.map((c) => ({
+      commit: c,
+      uuid: c.author.user?.uuid,
+      email: parseAuthorEmail(c.author.raw),
+      // Snapshot display name: prefer BB's authoritative
+      // author.user.display_name (set when BB resolved the author),
+      // fall back to the name portion of author.raw, else NULL.
+      displayNameSnapshot: c.author.user?.display_name ?? parseAuthorDisplayName(c.author.raw),
+    }));
+
+    // Auto-create user rows for any BB-resolved UUID that isn't in our
+    // `users` table yet AND carries a parseable email. Typically
+    // ex-employees, never-members, or external pushers — BB still
+    // attributes the commit, we just hadn't seen the UUID before.
+    // Email gate is the operator's explicit rule: no auto-create
+    // without a real email. Display-name fallback chain handles BB
+    // commits that omit `author.user.display_name` (rare but
+    // possible) — we prefer parsed-from-raw, then the email itself.
+    const autoCreateInputs: Array<{ bitbucketUuid: string; displayName: string; email: string }> = [];
+    const seenAutoCreate = new Set<string>();
+    for (const p of parsed) {
+      if (p.uuid === undefined) continue;
+      if (userIdByUuid.has(p.uuid)) continue;
+      if (p.email === null) continue;
+      if (seenAutoCreate.has(p.uuid)) continue;
+      seenAutoCreate.add(p.uuid);
+      autoCreateInputs.push({
+        bitbucketUuid: p.uuid,
+        displayName: p.displayNameSnapshot ?? p.email,
+        email: p.email,
+      });
+    }
+    if (autoCreateInputs.length > 0) {
+      const created = await deps.store.upsertAuthorUsers(autoCreateInputs);
+      for (const [uuid, id] of created) userIdByUuid.set(uuid, id);
+      deps.logger?.info?.(
+        { ...repo, autoCreatedCount: autoCreateInputs.length },
+        'commit sync: auto-created out-of-workspace user rows',
+      );
+    }
+
+    // Best-effort write-once email capture for commits whose UUID was
+    // ALREADY in our `users` table at the start of this run (i.e.,
+    // current workspace members). The auto-create path above sets
+    // email at INSERT time for newly-discovered authors, so it doesn't
+    // need this step. Dedupe happens in setUserEmailsIfMissing.
     const emailEntries: Array<{ bitbucketUuid: string; email: string }> = [];
-    for (const c of pull.batch) {
-      const uuid = c.author.user?.uuid;
-      if (uuid === undefined || !userIdByUuid.has(uuid)) continue;
-      const email = parseAuthorEmail(c.author.raw);
-      if (email !== null) emailEntries.push({ bitbucketUuid: uuid, email });
+    for (const p of parsed) {
+      if (p.uuid === undefined || p.email === null) continue;
+      if (seenAutoCreate.has(p.uuid)) continue; // INSERTed with email above
+      if (!userIdByUuid.has(p.uuid)) continue;
+      emailEntries.push({ bitbucketUuid: p.uuid, email: p.email });
     }
     if (emailEntries.length > 0) {
       await deps.store.setUserEmailsIfMissing(emailEntries);
     }
 
-    const inserts: CommitInsertInput[] = pull.batch.map((c) => ({
+    const inserts: CommitInsertInput[] = parsed.map((p) => ({
       repositoryId: repo.repositoryId,
-      authorUserId: c.author.user ? (userIdByUuid.get(c.author.user.uuid) ?? null) : null,
-      sha: c.hash,
-      message: c.message,
+      // Two-condition gate: author_user_id is set only when BB carries
+      // a UUID AND we have a parseable email. With UUID-only (no
+      // email) the user policy is "stays anonymous" — the auto-create
+      // path was skipped above and there's no existing-user fallback
+      // to take. Either condition missing → NULL.
+      authorUserId: p.uuid !== undefined && p.email !== null ? (userIdByUuid.get(p.uuid) ?? null) : null,
+      sha: p.commit.hash,
+      message: p.commit.message,
       // BB returns one entry in `parents` for a normal commit, two+ for a
       // merge. Captured at insert time so downstream aggregates can
       // default-exclude merges without an extra fetch.
-      isMerge: c.parents.length > 1,
-      authoredAt: new Date(c.date),
+      isMerge: p.commit.parents.length > 1,
+      authoredAt: new Date(p.commit.date),
+      // Snapshot columns — always populated when available, even when
+      // author_user_id ends up NULL (e.g. UUID present but email missing).
+      // Leaves a forensic hook for later reprocessing.
+      authorEmail: p.email,
+      authorDisplayName: p.displayNameSnapshot,
     }));
-    const { inserted, insertedRows } = await deps.store.insertCommits(inserts);
+    const { inserted, insertedRows, reattributedRows } = await deps.store.insertCommits(inserts);
 
     await deps.store.markSyncSuccess(repo.repositoryId, {
       lastSeenSha: newCursor,
@@ -291,6 +354,7 @@ export async function syncRepositoryCommits(
       diffStatsUpdated: diffStatsResult.updated,
       diffStatsFailed: diffStatsResult.failed,
       diffStatsRange: diffStatsResult.diffStatsRange,
+      reattributedRange: rangeOfRows(reattributedRows),
       autoExcluded: null,
     };
   } catch (err) {
@@ -370,6 +434,7 @@ function emptyResult(repo: RepositoryHandle, mode: SyncMode): RepoCommitSyncResu
     diffStatsUpdated: 0,
     diffStatsFailed: 0,
     diffStatsRange: null,
+    reattributedRange: null,
     autoExcluded: null,
   };
 }
@@ -386,5 +451,25 @@ function rangeOfBatch(batch: BitbucketCommit[]): { sinceDay: string; untilDay: s
   return {
     sinceDay: new Date(oldest).toISOString().slice(0, 10),
     untilDay: new Date(newest).toISOString().slice(0, 10),
+  };
+}
+
+// Day-window helper for rows that didn't come from BB in order — used for
+// `reattributedRows` (RETURNING order is unspecified for ON CONFLICT DO
+// UPDATE), so we scan instead of indexing the head/tail like rangeOfBatch.
+// Same UTC YYYY-MM-DD slice convention so the resulting range plugs
+// directly into `commit_daily` day predicates.
+function rangeOfRows(rows: Array<{ authoredAt: Date }>): { sinceDay: string; untilDay: string } | null {
+  if (rows.length === 0) return null;
+  let minMs = rows[0]!.authoredAt.getTime();
+  let maxMs = minMs;
+  for (let i = 1; i < rows.length; i++) {
+    const t = rows[i]!.authoredAt.getTime();
+    if (t < minMs) minMs = t;
+    if (t > maxMs) maxMs = t;
+  }
+  return {
+    sinceDay: new Date(minMs).toISOString().slice(0, 10),
+    untilDay: new Date(maxMs).toISOString().slice(0, 10),
   };
 }

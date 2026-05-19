@@ -25,7 +25,7 @@
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
-import { parseAuthorEmail } from './author-email.js';
+import { parseAuthorDisplayName, parseAuthorEmail } from './author-email.js';
 import { BitbucketApiError, BitbucketRateLimitError } from '../bitbucket/errors.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
@@ -273,24 +273,64 @@ export async function deepenOneRepo(
   }
 
   // Resolve authors for the just-pulled batch (same path the cold/delta
-  // commit sync uses).
+  // commit sync uses, including the auto-create-for-unknown-uuid step).
   const uuids = Array.from(new Set(inserts.map((i) => i.bitbucketUuid).filter((u): u is string => u !== undefined)));
   if (uuids.length > 0) {
     const userIdByUuid = await deps.store.resolveUserIdsByUuid(uuids);
+
+    // Auto-create user rows for BB-resolved UUIDs not yet in `users`
+    // (ex-employees, never-members, externals) when the commit
+    // carries a parseable email — same email-gated policy as the
+    // forward sync. New rows land with is_workspace_member=false.
+    // Existing rows are left untouched.
+    const autoCreateInputs: Array<{ bitbucketUuid: string; displayName: string; email: string }> = [];
+    const seenAutoCreate = new Set<string>();
     for (const input of inserts) {
-      if (input.bitbucketUuid !== undefined) {
+      const uuid = input.bitbucketUuid;
+      const email = input.parsedEmail;
+      if (uuid === undefined || email === undefined) continue;
+      if (userIdByUuid.has(uuid)) continue;
+      if (seenAutoCreate.has(uuid)) continue;
+      seenAutoCreate.add(uuid);
+      autoCreateInputs.push({
+        bitbucketUuid: uuid,
+        // Use the snapshot display-name we already computed in
+        // buildInsertInput when present; fall back to the email so
+        // users.display_name (NOT NULL) always has a meaningful value.
+        displayName: input.authorDisplayName ?? email,
+        email,
+      });
+    }
+    if (autoCreateInputs.length > 0) {
+      const created = await deps.store.upsertAuthorUsers(autoCreateInputs);
+      for (const [uuid, id] of created) userIdByUuid.set(uuid, id);
+      deps.logger?.info?.(
+        {
+          repositoryId: candidate.repositoryId,
+          fullName: candidate.fullName,
+          autoCreatedCount: autoCreateInputs.length,
+        },
+        'deepen-backfill: auto-created out-of-workspace user rows',
+      );
+    }
+
+    for (const input of inserts) {
+      if (input.bitbucketUuid !== undefined && input.parsedEmail !== undefined) {
         input.authorUserId = userIdByUuid.get(input.bitbucketUuid) ?? null;
       }
     }
-    // Write-once email capture, same shape as the forward sync. Only
-    // entries whose uuid resolved (the user exists locally) are sent —
-    // a row with no matching user can't have its email updated anyway.
+
+    // Write-once email capture for commits whose UUID was ALREADY in
+    // our `users` table before this run (current workspace members
+    // missing email). Auto-created rows already had email set at
+    // INSERT time; skip them here.
     const emailEntries: Array<{ bitbucketUuid: string; email: string }> = [];
     for (const input of inserts) {
       if (
         input.bitbucketUuid !== undefined &&
         input.parsedEmail !== undefined &&
-        userIdByUuid.has(input.bitbucketUuid)
+        userIdByUuid.has(input.bitbucketUuid) &&
+        !seenAutoCreate.has(input.bitbucketUuid)
       ) {
         emailEntries.push({ bitbucketUuid: input.bitbucketUuid, email: input.parsedEmail });
       }
@@ -378,6 +418,10 @@ export async function deepenOneRepo(
 
 function buildInsertInput(repositoryId: number, commit: BitbucketCommit): DeepenInsertStaging {
   const parsedEmail = parseAuthorEmail(commit.author.raw);
+  // Snapshot display name: prefer BB's authoritative
+  // author.user.display_name (present whenever BB resolved the
+  // author), fall back to the name portion of author.raw, else NULL.
+  const displayNameSnapshot = commit.author.user?.display_name ?? parseAuthorDisplayName(commit.author.raw);
   return {
     repositoryId,
     authorUserId: null, // resolved in the batch step below
@@ -385,6 +429,10 @@ function buildInsertInput(repositoryId: number, commit: BitbucketCommit): Deepen
     message: commit.message,
     isMerge: commit.parents.length > 1,
     authoredAt: new Date(commit.date),
+    // Snapshot columns — populated regardless of whether the author
+    // ends up resolved to a local user. Captured at ingest only.
+    authorEmail: parsedEmail,
+    authorDisplayName: displayNameSnapshot,
     ...(commit.author.user !== undefined ? { bitbucketUuid: commit.author.user.uuid } : {}),
     ...(parsedEmail !== null ? { parsedEmail } : {}),
   };

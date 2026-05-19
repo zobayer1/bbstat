@@ -36,6 +36,9 @@ function makeStore(): { store: CommitStore; state: FakeState } {
     resolveUserIdsByUuid: unreachable,
     setUserEmailsIfMissing: unreachable,
     listUsersMissingEmailWithLastCommit: unreachable,
+    listAnonymousCommits: unreachable,
+    reattributeAnonymousCommits: unreachable,
+    upsertAuthorUsers: unreachable,
     async incrementDiffStatsFailure(commitId, weight) {
       // Mirrors the Drizzle impl's atomic increment-then-return — the
       // inline-eager path in fetchDiffStatsForCommits now calls this on

@@ -47,6 +47,7 @@ function makeResult(over: Partial<RepoCommitSyncResult> = {}): RepoCommitSyncRes
     diffStatsUpdated: 0,
     diffStatsFailed: 0,
     diffStatsRange: null,
+    reattributedRange: null,
     autoExcluded: null,
     ...over,
   };
@@ -207,6 +208,54 @@ describe('withRollupRecompute', () => {
     await wrapped({} as CommitSyncDeps, makeRepo(), {});
 
     expect(rollup.recomputeCommitDailyForRepo).not.toHaveBeenCalled();
+  });
+
+  it('triggers recompute when only reattribution happened (no inserts, no diff stats)', async () => {
+    // Scenario: cold re-sync filled author_user_id on previously
+    // anonymous rows. No new commits, no new diff stats — but
+    // commit_daily must still be rebuilt for the affected day window
+    // so the stale (day, repo, NULL) row gets swapped out for the
+    // new (day, repo, user) row.
+    const rollup = makeRollupStore();
+    const inner = vi.fn(async () =>
+      makeResult({
+        inserted: 0,
+        insertedRange: null,
+        diffStatsUpdated: 0,
+        diffStatsRange: null,
+        reattributedRange: { sinceDay: '2026-05-18', untilDay: '2026-05-18' },
+      }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(rollup.recomputeCommitDailyForRepo).toHaveBeenCalledWith(1, {
+      sinceDay: '2026-05-18',
+      untilDay: '2026-05-18',
+    });
+  });
+
+  it('unions reattributedRange with insertedRange and diffStatsRange', async () => {
+    const rollup = makeRollupStore();
+    const inner = vi.fn(async () =>
+      makeResult({
+        inserted: 1,
+        insertedRange: { sinceDay: '2026-05-19', untilDay: '2026-05-19' },
+        diffStatsUpdated: 1,
+        diffStatsRange: { sinceDay: '2026-05-17', untilDay: '2026-05-17' },
+        // Reattribution reaches further back than either of the other two.
+        reattributedRange: { sinceDay: '2026-05-10', untilDay: '2026-05-18' },
+      }),
+    );
+    const wrapped = withRollupRecompute(inner, { rollupStore: rollup });
+
+    await wrapped({} as CommitSyncDeps, makeRepo(), {});
+
+    expect(rollup.recomputeCommitDailyForRepo).toHaveBeenCalledWith(1, {
+      sinceDay: '2026-05-10',
+      untilDay: '2026-05-19',
+    });
   });
 
   it('recomputes rollup before invalidating cache (ordering)', async () => {

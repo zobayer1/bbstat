@@ -5,9 +5,17 @@
 //
 // Sole writer to commit_daily: this module. The sync runner calls
 // `recomputeCommitDailyForRepo` once per repo per tick (after commits land),
-// scoped to the touched day range. Steady state on an inserts-only commits
-// table makes ON CONFLICT DO UPDATE sufficient — no DELETE pass needed —
-// and the operation is idempotent against re-runs.
+// scoped to the touched day range. The recompute is authoritative-for-the-
+// window: DELETE every (day, repo, *) row in `[sinceDay, untilDay]`, then
+// INSERT the freshly aggregated GROUP BY result, both inside one
+// transaction. The earlier "INSERT … ON CONFLICT DO UPDATE only" path
+// assumed an inserts-only commits table — that broke once we allowed
+// `author_user_id` to transition NULL → known on re-sync (BB linking a
+// workspace member to a previously anonymous commit). After such a
+// transition the GROUP BY no longer produces a (day, repo, NULL) row,
+// so an UPSERT-only recompute would leave the stale anonymous row in
+// place and double-count the day. The DELETE pass fixes that, at the
+// cost of one extra index scan per repo per tick.
 
 import { sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -47,30 +55,36 @@ export interface RollupStore {
 export function createDrizzleRollupStore(db: Database): RollupStore {
   return {
     async recomputeCommitDailyForRepo(repositoryId, { sinceDay, untilDay }) {
-      // One statement: aggregate from `commits` over the day window, then
-      // UPSERT into `commit_daily`. The NULLS NOT DISTINCT constraint
-      // collapses anonymous-author commits to a single (day, repo, NULL) row.
-      const result = await db.execute(sql`
-        INSERT INTO commit_daily (day, repository_id, author_user_id, commit_count, additions, deletions, updated_at)
-        SELECT
-          (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date AS day,
-          repository_id,
-          author_user_id,
-          count(*)::int,
-          sum(additions)::int,
-          sum(deletions)::int,
-          now()
-        FROM commits
-        WHERE repository_id = ${repositoryId}
-          AND (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date BETWEEN ${sinceDay} AND ${untilDay}
-        GROUP BY 1, 2, 3
-        ON CONFLICT ON CONSTRAINT commit_daily_day_repo_user_unique DO UPDATE SET
-          commit_count = EXCLUDED.commit_count,
-          additions = EXCLUDED.additions,
-          deletions = EXCLUDED.deletions,
-          updated_at = now()
-      `);
-      return { rowsAffected: result.rowCount ?? 0 };
+      // Authoritative rebuild for `[sinceDay, untilDay]`: DELETE the
+      // window, then INSERT the freshly aggregated GROUP BY result.
+      // Both statements run in one transaction so dashboard reads
+      // never see the intermediate "window deleted but not yet
+      // rebuilt" state. The NULLS NOT DISTINCT constraint on
+      // `commit_daily_day_repo_user_unique` collapses anonymous-author
+      // commits to a single (day, repo, NULL) row, same as before.
+      return await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          DELETE FROM commit_daily
+          WHERE repository_id = ${repositoryId}
+            AND day BETWEEN ${sinceDay}::date AND ${untilDay}::date
+        `);
+        const result = await tx.execute(sql`
+          INSERT INTO commit_daily (day, repository_id, author_user_id, commit_count, additions, deletions, updated_at)
+          SELECT
+            (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date AS day,
+            repository_id,
+            author_user_id,
+            count(*)::int,
+            sum(additions)::int,
+            sum(deletions)::int,
+            now()
+          FROM commits
+          WHERE repository_id = ${repositoryId}
+            AND (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date BETWEEN ${sinceDay}::date AND ${untilDay}::date
+          GROUP BY 1, 2, 3
+        `);
+        return { rowsAffected: result.rowCount ?? 0 };
+      });
     },
 
     async listAffectedUserIdsForRepo(repositoryId, { sinceDay, untilDay }) {

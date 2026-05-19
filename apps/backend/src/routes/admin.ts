@@ -551,4 +551,209 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       fetchFailed,
     };
   });
+
+  // Per-user retroactive reattribution of anonymous commits.
+  //
+  // Why this exists: when a commit is first ingested, we resolve the
+  // author via BB's `author.user.uuid` and write `author_user_id`. If
+  // the commit was authored from an email BB hadn't yet linked to a
+  // workspace member, `author.user` is absent on ingest and we store
+  // NULL. Adding that email to a workspace member LATER makes BB
+  // attribute the same commit on future reads — but our row stays
+  // anonymous until something re-fetches it. The in-place fix in
+  // insertCommits handles re-attribution on cold-mode re-sync; this
+  // endpoint backfills the long tail (commits older than the
+  // cold-mode cap, or rows where the operator doesn't want to wait
+  // for `/include` + a runner tick).
+  //
+  // Strategy: walk anonymous commits in our DB (newest first, bounded
+  // by `limit`), hit BB `paginateCommits include=<sha>` to read the
+  // current `author.user.uuid`, bulk-UPDATE the matches into the
+  // target user, recompute `commit_daily` for affected days, invalidate
+  // the user's summary cache. Cost is one BB call per anonymous
+  // commit walked, no `/diffstat` calls (UPDATE only touches
+  // `author_user_id`).
+  //
+  // Idempotent: re-calling with the same uuid converges (matches that
+  // already updated drop out of the candidate list on the next pass).
+  // Race-safe: the UPDATE is guarded by `author_user_id IS NULL`, so a
+  // concurrent commit-sync landing the same row first wins and we
+  // no-op.
+  //
+  // Optional `workspace` + `slug` scope the walk to one repo. Both or
+  // neither — partial scope is a 400.
+  const DEFAULT_REATTRIBUTE_LIMIT = 200;
+  const MAX_REATTRIBUTE_LIMIT = 2000;
+  const uuidPattern = /^\{[0-9a-fA-F-]{36}\}$/;
+  app.post<{
+    Params: { uuid: string };
+    Querystring: { limit?: string; workspace?: string; slug?: string };
+  }>('/users/:uuid/reattribute-anonymous', async (request, reply) => {
+    const { uuid } = request.params;
+    if (!uuidPattern.test(uuid)) {
+      return reply.code(400).send({ error: 'invalid_uuid', expected: '{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}' });
+    }
+
+    const userMap = await opts.syncDeps.commitStore.resolveUserIdsByUuid([uuid]);
+    const userId = userMap.get(uuid);
+    if (userId === undefined) {
+      return reply.code(404).send({
+        error: 'user_not_in_workspace',
+        uuid,
+        hint: 'Run the workspace member sync first so this UUID lands in the users table.',
+      });
+    }
+
+    const limitParsed = z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(MAX_REATTRIBUTE_LIMIT)
+      .safeParse(request.query.limit ?? DEFAULT_REATTRIBUTE_LIMIT);
+    if (!limitParsed.success) {
+      return reply.code(400).send({ error: 'invalid_limit', max: MAX_REATTRIBUTE_LIMIT });
+    }
+    const limit = limitParsed.data;
+
+    const { workspace, slug } = request.query;
+    if ((workspace === undefined) !== (slug === undefined)) {
+      return reply.code(400).send({
+        error: 'partial_repo_scope',
+        message: 'workspace and slug must both be present or both omitted.',
+      });
+    }
+
+    const candidates = await opts.syncDeps.commitStore.listAnonymousCommits({
+      ...(workspace !== undefined && slug !== undefined ? { workspace, slug } : {}),
+      limit,
+    });
+
+    // Walk each candidate, hitting BB's commits endpoint anchored at
+    // the sha. paginateCommits with `include=<sha>` yields the
+    // requested sha as the FIRST item — we break after one. A per-
+    // commit try/catch isolates failures so one BB hiccup (404 from a
+    // recreated repo, transient 5xx) doesn't poison the whole batch.
+    const matches: Array<{ commitId: number; userId: number }> = [];
+    let walked = 0;
+    let bbMatched = 0;
+    let bbDifferentUser = 0;
+    let bbStillAnonymous = 0;
+    let bbFailed = 0;
+
+    for (const c of candidates) {
+      walked++;
+      try {
+        let bbUuid: string | undefined;
+        for await (const commit of paginateCommits(opts.syncDeps.client, c.workspace, c.slug, { include: c.sha })) {
+          bbUuid = commit.author.user?.uuid;
+          break;
+        }
+        if (bbUuid === undefined) {
+          bbStillAnonymous++;
+          continue;
+        }
+        if (bbUuid !== uuid) {
+          bbDifferentUser++;
+          continue;
+        }
+        bbMatched++;
+        matches.push({ commitId: c.commitId, userId });
+      } catch (err) {
+        bbFailed++;
+        opts.syncDeps.logger?.warn?.(
+          {
+            fullName: c.fullName,
+            sha: c.sha,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'reattribute: BB fetch failed',
+        );
+      }
+    }
+
+    const updatedRows = matches.length > 0 ? await opts.syncDeps.commitStore.reattributeAnonymousCommits(matches) : [];
+
+    // Group affected rows by repo + compute UTC day ranges so the
+    // rollup hook recomputes only what changed. `recomputeCommitDailyForRepo`
+    // is authoritative-for-the-window post-fix (DELETE + INSERT), so the
+    // stale (day, repo, NULL) rows disappear and the new (day, repo,
+    // user) rows take their place in one shot.
+    const rangeByRepo = new Map<number, { sinceMs: number; untilMs: number }>();
+    for (const row of updatedRows) {
+      const t = row.authoredAt.getTime();
+      const existing = rangeByRepo.get(row.repositoryId);
+      if (existing === undefined) {
+        rangeByRepo.set(row.repositoryId, { sinceMs: t, untilMs: t });
+      } else {
+        if (t < existing.sinceMs) existing.sinceMs = t;
+        if (t > existing.untilMs) existing.untilMs = t;
+      }
+    }
+    if (opts.syncDeps.rollupStore !== undefined && rangeByRepo.size > 0) {
+      for (const [repositoryId, range] of rangeByRepo) {
+        const sinceDay = new Date(range.sinceMs).toISOString().slice(0, 10);
+        const untilDay = new Date(range.untilMs).toISOString().slice(0, 10);
+        try {
+          await opts.syncDeps.rollupStore.recomputeCommitDailyForRepo(repositoryId, { sinceDay, untilDay });
+        } catch (err) {
+          opts.syncDeps.logger?.warn?.(
+            {
+              repositoryId,
+              sinceDay,
+              untilDay,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            'reattribute: rollup recompute failed — commits already updated; will recover on next sync',
+          );
+        }
+      }
+    }
+
+    if (opts.syncDeps.userSummaryCache !== undefined && updatedRows.length > 0) {
+      try {
+        await opts.syncDeps.userSummaryCache.invalidate(userId);
+      } catch (err) {
+        opts.syncDeps.logger?.warn?.(
+          { userId, err: err instanceof Error ? err.message : String(err) },
+          'reattribute: user-summary cache invalidation failed — will fall out via TTL',
+        );
+      }
+    }
+
+    // `hasMore=true` whenever we filled the limit; operator should
+    // re-call to drain the tail. Conservative — if the limit was
+    // exactly the remaining count, the next call returns 0 candidates
+    // and is a cheap no-op.
+    const hasMore = walked === limit;
+
+    opts.syncDeps.logger?.info?.(
+      {
+        uuid,
+        userId,
+        ...(workspace !== undefined && slug !== undefined ? { scope: `${workspace}/${slug}` } : { scope: 'all-repos' }),
+        walked,
+        bbMatched,
+        bbDifferentUser,
+        bbStillAnonymous,
+        bbFailed,
+        updated: updatedRows.length,
+        affectedRepos: rangeByRepo.size,
+        hasMore,
+      },
+      'reattribute-anonymous complete',
+    );
+
+    return reply.code(200).send({
+      uuid,
+      userId,
+      walked,
+      bbMatched,
+      bbDifferentUser,
+      bbStillAnonymous,
+      bbFailed,
+      updated: updatedRows.length,
+      affectedRepos: rangeByRepo.size,
+      hasMore,
+    });
+  });
 };

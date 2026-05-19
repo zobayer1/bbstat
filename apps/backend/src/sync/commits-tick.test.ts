@@ -28,6 +28,9 @@ function fakeStore(): CommitStore {
     resolveUserIdsByUuid: fail,
     setUserEmailsIfMissing: fail,
     listUsersMissingEmailWithLastCommit: fail,
+    listAnonymousCommits: fail,
+    reattributeAnonymousCommits: fail,
+    upsertAuthorUsers: fail,
     incrementDiffStatsFailure: fail,
     insertCommits: fail,
     getSyncState: fail,
@@ -86,6 +89,7 @@ function makeOkResult(repo: RepositoryHandle): RepoCommitSyncResult {
     diffStatsUpdated: 0,
     diffStatsFailed: 0,
     diffStatsRange: null,
+    reattributedRange: null,
     autoExcluded: null,
   };
 }

@@ -150,16 +150,25 @@ export interface DiscoveryStore {
 export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
   return {
     async upsertUser(input) {
+      // `is_workspace_member` is set to TRUE on every member-sync upsert
+      // (both INSERT and ON CONFLICT UPDATE). This is the rejoin-flip
+      // seam: a previously-auto-created ex-employee row (FALSE, written
+      // by the commit-ingest auto-create path) gets flipped back to
+      // TRUE the moment they reappear in `/workspaces/{ws}/members`.
+      // The commit-ingest auto-create path is the only other writer
+      // and it INSERTs with FALSE + does nothing on conflict, so the
+      // two paths can't fight each other.
       const result = await db
         .insert(users)
         .values({
           bitbucketUuid: input.bitbucketUuid,
           displayName: input.displayName,
           username: input.username,
+          isWorkspaceMember: true,
         })
         .onConflictDoUpdate({
           target: users.bitbucketUuid,
-          set: { displayName: input.displayName, username: input.username },
+          set: { displayName: input.displayName, username: input.username, isWorkspaceMember: true },
         })
         .returning({ id: users.id, createdAt: users.createdAt });
       // Postgres' INSERT ... ON CONFLICT doesn't natively expose "was it new?"

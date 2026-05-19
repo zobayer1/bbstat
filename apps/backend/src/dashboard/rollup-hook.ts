@@ -36,14 +36,22 @@ export type SyncOneFn = (
 export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps): SyncOneFn {
   return async (deps, repo, opts) => {
     const result = await inner(deps, repo, opts);
-    // commit_daily aggregates both commit counts and additions/deletions
-    // from `commits`. We refresh the rollup whenever either dimension
-    // changed: new commits landed in `inserted` (covered by insertedRange),
-    // OR existing commits' diff stats just landed (covered by
-    // diffStatsRange). The merged range is the union of both.
+    // commit_daily aggregates commit counts AND additions/deletions AND
+    // per-user attribution from `commits`. We refresh the rollup whenever
+    // any of those dimensions changed:
+    //   - new commits landed in `inserted` → insertedRange
+    //   - existing commits' diff stats just landed → diffStatsRange
+    //   - existing commits' author_user_id transitioned NULL → known
+    //     (BB linked a workspace member to a previously anonymous commit)
+    //     → reattributedRange
+    // The merged range is the union of all three. The reattribution case
+    // is the load-bearing one for fixing the stale (day, repo, NULL) row
+    // — without it the new attributed row would coexist with the old
+    // anonymous row and the dashboard would double-count.
     const insertedRange = result.inserted > 0 ? result.insertedRange : null;
     const diffStatsRange = result.diffStatsUpdated > 0 ? result.diffStatsRange : null;
-    const range = mergeDayRanges(insertedRange, diffStatsRange);
+    const reattributedRange = result.reattributedRange;
+    const range = mergeDayRanges(mergeDayRanges(insertedRange, diffStatsRange), reattributedRange);
     if (range === null) {
       return result;
     }
@@ -55,6 +63,7 @@ export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps):
           fullName: result.fullName,
           inserted: result.inserted,
           diffStatsUpdated: result.diffStatsUpdated,
+          reattributed: result.reattributedRange !== null,
           range,
           rowsAffected,
         },

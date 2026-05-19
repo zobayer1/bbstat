@@ -28,6 +28,7 @@ yarn-error.log*
 # --- Editors / IDEs ---
 # Per-developer prefs are private; a small allowlist of shared editor config
 # is committed (Vue/TS plugin nudges so a fresh clone "just works" in VSCode).
+.editorconfig
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
@@ -48,6 +49,7 @@ Thumbs.db
 .env.development
 .env.test
 .env.production
+.env.docker
 !.env.example
 
 # --- Local TLS material ---

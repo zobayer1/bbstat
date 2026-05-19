@@ -12,6 +12,8 @@ import type {
   UserUpsertInput,
 } from '../src/sync/discovery-store.js';
 import type { SyncRunnerDeps } from '../src/sync/runner.js';
+import type { DayRange, RollupStore } from '../src/dashboard/rollup-store.js';
+import type { UserSummaryCache } from '../src/dashboard/user-summary-cache.js';
 
 const testConfig: AppConfig = {
   NODE_ENV: 'test',
@@ -60,6 +62,9 @@ function noopCommitStore(): CommitStore {
     resolveUserIdsByUuid: fail,
     setUserEmailsIfMissing: fail,
     listUsersMissingEmailWithLastCommit: fail,
+    listAnonymousCommits: fail,
+    reattributeAnonymousCommits: fail,
+    upsertAuthorUsers: fail,
     incrementDiffStatsFailure: fail,
     insertCommits: fail,
     getSyncState: fail,
@@ -156,11 +161,26 @@ function createFakePrStore(): { store: PrStore; state: FakePrStoreState } {
   return { store, state };
 }
 
+interface AnonymousCandidateRow {
+  commitId: number;
+  sha: string;
+  repositoryId: number;
+  workspace: string;
+  slug: string;
+  fullName: string;
+  authoredAt: Date;
+}
+
 interface FakeCommitStoreState {
   commits: Map<string, CommitInsertInput>;
   syncStateByRepo: Map<number, SyncStateRow>;
   successCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
   isMergeBackfillCalls: Array<{ repositoryId: number; entries: Array<{ sha: string; isMerge: boolean }> }>;
+  // Seed-able state used only by the reattribute-anonymous admin tests.
+  // Other suites leave these empty and the methods become benign no-ops.
+  knownUsersByUuid: Map<string, number>;
+  anonymousCandidates: AnonymousCandidateRow[];
+  reattributeCalls: Array<{ commitId: number; userId: number }>;
 }
 
 function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreState } {
@@ -169,10 +189,21 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
     syncStateByRepo: new Map(),
     successCalls: [],
     isMergeBackfillCalls: [],
+    knownUsersByUuid: new Map(),
+    anonymousCandidates: [],
+    reattributeCalls: [],
   };
   const store: CommitStore = {
-    async resolveUserIdsByUuid() {
-      return new Map(); // no users seeded — every commit lands as anonymous
+    async resolveUserIdsByUuid(uuids) {
+      // Default: empty map (every commit lands as anonymous). Reattribute
+      // tests pre-seed state.knownUsersByUuid so this resolves the
+      // target user without touching real Drizzle.
+      const map = new Map<string, number>();
+      for (const u of uuids) {
+        const id = state.knownUsersByUuid.get(u);
+        if (id !== undefined) map.set(u, id);
+      }
+      return map;
     },
     async setUserEmailsIfMissing() {
       // No-op for admin tests — write-once email capture is exercised in
@@ -182,6 +213,46 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
       // No-op default — dedicated email-backfill tests construct a
       // fresh CommitStore stub that returns seed data inline.
       return [];
+    },
+    async listAnonymousCommits({ workspace, slug, limit }) {
+      // Filter by repo scope when supplied, else return everything. The
+      // admin endpoint pre-validates that workspace+slug come together,
+      // so we don't re-check here.
+      const scoped =
+        workspace !== undefined && slug !== undefined
+          ? state.anonymousCandidates.filter((c) => c.workspace === workspace && c.slug === slug)
+          : state.anonymousCandidates;
+      return scoped.slice(0, limit);
+    },
+    async reattributeAnonymousCommits(entries) {
+      // Record what was attempted so tests can assert on the bulk batch
+      // shape, then "succeed" by returning matching candidates with
+      // their repo + day metadata for the rollup recompute call.
+      const updated: Array<{ id: number; repositoryId: number; authoredAt: Date }> = [];
+      for (const e of entries) {
+        state.reattributeCalls.push(e);
+        const candidate = state.anonymousCandidates.find((c) => c.commitId === e.commitId);
+        if (candidate !== undefined) {
+          updated.push({
+            id: candidate.commitId,
+            repositoryId: candidate.repositoryId,
+            authoredAt: candidate.authoredAt,
+          });
+        }
+      }
+      return updated;
+    },
+    async upsertAuthorUsers(inputs) {
+      // Admin tests don't exercise commit ingest end-to-end — return
+      // synthetic ids so the forward-sync runs in any test that hits
+      // syncRepositoryCommits via the admin route can resolve unknown
+      // UUIDs without failing.
+      const map = new Map<string, number>();
+      let nextId = 9000;
+      for (const e of inputs) {
+        map.set(e.bitbucketUuid, nextId++);
+      }
+      return map;
     },
     async incrementDiffStatsFailure() {
       // No-op default — diff-stats failure budgeting is tested in
@@ -198,7 +269,9 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
           insertedRows.push({ id: nextId++, sha: c.sha, authoredAt: c.authoredAt });
         }
       }
-      return { inserted: insertedRows.length, insertedRows };
+      // Admin tests don't exercise the reattribution path; mirror the
+      // Drizzle impl's shape so the type contract is satisfied.
+      return { inserted: insertedRows.length, insertedRows, reattributedRows: [] };
     },
     async getSyncState(repositoryId) {
       return state.syncStateByRepo.get(repositoryId) ?? null;
@@ -1726,6 +1799,337 @@ describe('admin routes', () => {
       expect(res.statusCode).toBe(400);
       expect(res.json()).toEqual({ error: 'invalid_limit', max: 2000 });
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /api/admin/users/:uuid/reattribute-anonymous', () => {
+    // Helpers local to this suite. Reuses createFakeCommitStore's
+    // state.knownUsersByUuid / state.anonymousCandidates seams so the
+    // endpoint's resolveUserIdsByUuid + listAnonymousCommits +
+    // reattributeAnonymousCommits all flow through one in-memory store.
+
+    function makeRollupStore(): { rollupStore: RollupStore; calls: Array<{ repositoryId: number; range: DayRange }> } {
+      const calls: Array<{ repositoryId: number; range: DayRange }> = [];
+      const rollupStore: RollupStore = {
+        async recomputeCommitDailyForRepo(repositoryId, range) {
+          calls.push({ repositoryId, range });
+          return { rowsAffected: 1 };
+        },
+        async listAffectedUserIdsForRepo() {
+          return [];
+        },
+        async rebuildAll() {
+          return { rowsAffected: 0 };
+        },
+      };
+      return { rollupStore, calls };
+    }
+
+    function makeUserSummaryCache(): {
+      userSummaryCache: UserSummaryCache;
+      invalidated: number[];
+    } {
+      const invalidated: number[] = [];
+      const userSummaryCache: UserSummaryCache = {
+        async get() {
+          return null;
+        },
+        async set() {},
+        async invalidate(userId) {
+          invalidated.push(userId);
+        },
+      };
+      return { userSummaryCache, invalidated };
+    }
+
+    // BB single-commit fetch: paginateCommits with include=<sha> yields
+    // the requested sha first. Build a one-item page for each sha the
+    // endpoint will fetch, in order.
+    function bbCommitPage(sha: string, opts: { uuid?: string } = {}): Response {
+      return jsonResponse({
+        pagelen: 100,
+        values: [
+          {
+            hash: sha,
+            message: `commit ${sha}`,
+            date: '2026-05-18T10:00:00+00:00',
+            parents: [],
+            author: {
+              raw: 'Foysal <thisisfoysal@gmail.com>',
+              ...(opts.uuid ? { user: { uuid: opts.uuid, display_name: 'Foysal' } } : {}),
+            },
+          },
+        ],
+      });
+    }
+
+    it('rejects malformed uuid with 400', async () => {
+      const { store: commitStore } = createFakeCommitStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/users/not-a-uuid/reattribute-anonymous',
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid_uuid' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the uuid is not a known workspace member', async () => {
+      const { store: commitStore } = createFakeCommitStore(); // no users seeded
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/users/%7Bfdc5c167-6eb0-43ec-b46c-59983574b07e%7D/reattribute-anonymous',
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toMatchObject({ error: 'user_not_in_workspace' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects partial repo scope (workspace without slug) with 400', async () => {
+      const { store: commitStore, state } = createFakeCommitStore();
+      state.knownUsersByUuid.set('{fdc5c167-6eb0-43ec-b46c-59983574b07e}', 142);
+      const { deps } = makeSyncDeps(fetchMock, { commitStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/users/%7Bfdc5c167-6eb0-43ec-b46c-59983574b07e%7D/reattribute-anonymous?workspace=tigerit',
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'partial_repo_scope' });
+    });
+
+    it('updates matched commits, recomputes commit_daily, invalidates user-summary cache', async () => {
+      const targetUuid = '{fdc5c167-6eb0-43ec-b46c-59983574b07e}';
+      const otherUuid = '{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}';
+      const { store: commitStore, state } = createFakeCommitStore();
+      state.knownUsersByUuid.set(targetUuid, 142);
+      state.anonymousCandidates.push(
+        {
+          commitId: 1,
+          sha: 'sha-foysal-a',
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'signalmessenger',
+          fullName: 'tigerit/signalmessenger',
+          authoredAt: new Date('2026-05-18T10:00:00Z'),
+        },
+        {
+          commitId: 2,
+          sha: 'sha-someone-else',
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'signalmessenger',
+          fullName: 'tigerit/signalmessenger',
+          authoredAt: new Date('2026-05-15T08:00:00Z'),
+        },
+        {
+          commitId: 3,
+          sha: 'sha-still-anon',
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'signalmessenger',
+          fullName: 'tigerit/signalmessenger',
+          authoredAt: new Date('2026-05-12T08:00:00Z'),
+        },
+      );
+      // BB now resolves sha-foysal-a to the target; sha-someone-else
+      // to a different user; sha-still-anon stays anonymous on BB.
+      fetchMock
+        .mockResolvedValueOnce(bbCommitPage('sha-foysal-a', { uuid: targetUuid }))
+        .mockResolvedValueOnce(bbCommitPage('sha-someone-else', { uuid: otherUuid }))
+        .mockResolvedValueOnce(bbCommitPage('sha-still-anon'));
+
+      const { rollupStore, calls: recomputeCalls } = makeRollupStore();
+      const { userSummaryCache, invalidated } = makeUserSummaryCache();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore, rollupStore, userSummaryCache });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        uuid: targetUuid,
+        userId: 142,
+        walked: 3,
+        bbMatched: 1,
+        bbDifferentUser: 1,
+        bbStillAnonymous: 1,
+        bbFailed: 0,
+        updated: 1,
+        affectedRepos: 1,
+        hasMore: false,
+      });
+      // Exactly one bulk UPDATE call carrying just the matched commit.
+      expect(state.reattributeCalls).toEqual([{ commitId: 1, userId: 142 }]);
+      // Recompute window scoped to the day the matched commit was authored.
+      expect(recomputeCalls).toEqual([{ repositoryId: 10, range: { sinceDay: '2026-05-18', untilDay: '2026-05-18' } }]);
+      expect(invalidated).toEqual([142]);
+    });
+
+    it('scopes the walk when workspace + slug are both supplied', async () => {
+      const targetUuid = '{fdc5c167-6eb0-43ec-b46c-59983574b07e}';
+      const { store: commitStore, state } = createFakeCommitStore();
+      state.knownUsersByUuid.set(targetUuid, 142);
+      // Two candidates: one in the scoped repo, one outside it.
+      state.anonymousCandidates.push(
+        {
+          commitId: 1,
+          sha: 'sha-in-scope',
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'signalmessenger',
+          fullName: 'tigerit/signalmessenger',
+          authoredAt: new Date('2026-05-18T10:00:00Z'),
+        },
+        {
+          commitId: 2,
+          sha: 'sha-out-of-scope',
+          repositoryId: 11,
+          workspace: 'tigerit',
+          slug: 'other-repo',
+          fullName: 'tigerit/other-repo',
+          authoredAt: new Date('2026-05-18T10:00:00Z'),
+        },
+      );
+      fetchMock.mockResolvedValueOnce(bbCommitPage('sha-in-scope', { uuid: targetUuid }));
+
+      const { rollupStore } = makeRollupStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore, rollupStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous?workspace=tigerit&slug=signalmessenger`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ walked: 1, bbMatched: 1, updated: 1 });
+      // Only the in-scope sha was walked — fetchMock got exactly one call.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(state.reattributeCalls).toEqual([{ commitId: 1, userId: 142 }]);
+    });
+
+    it('does NOT touch already-attributed rows (UPDATE guard) — verified via the WHERE-NULL contract', async () => {
+      // The endpoint never *sees* attributed rows because listAnonymousCommits
+      // only returns NULL-author rows. This test confirms that contract:
+      // even with no candidates, the endpoint succeeds with a zero summary
+      // and does NOT hit BB.
+      const targetUuid = '{fdc5c167-6eb0-43ec-b46c-59983574b07e}';
+      const { store: commitStore, state } = createFakeCommitStore();
+      state.knownUsersByUuid.set(targetUuid, 142);
+      // anonymousCandidates intentionally empty — every commit is already
+      // attributed.
+
+      const { rollupStore, calls: recomputeCalls } = makeRollupStore();
+      const { userSummaryCache, invalidated } = makeUserSummaryCache();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore, rollupStore, userSummaryCache });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({
+        walked: 0,
+        bbMatched: 0,
+        updated: 0,
+        affectedRepos: 0,
+        hasMore: false,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(state.reattributeCalls).toEqual([]);
+      expect(recomputeCalls).toEqual([]);
+      // No updates means no cache invalidation needed.
+      expect(invalidated).toEqual([]);
+    });
+
+    it('reports hasMore=true when the walk fills the limit (operator should re-call)', async () => {
+      const targetUuid = '{fdc5c167-6eb0-43ec-b46c-59983574b07e}';
+      const { store: commitStore, state } = createFakeCommitStore();
+      state.knownUsersByUuid.set(targetUuid, 142);
+      // Three candidates total, but limit=2 means we only walk 2.
+      for (let i = 1; i <= 3; i++) {
+        state.anonymousCandidates.push({
+          commitId: i,
+          sha: `sha-${i}`,
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'r',
+          fullName: 'tigerit/r',
+          authoredAt: new Date('2026-05-18T10:00:00Z'),
+        });
+      }
+      fetchMock
+        .mockResolvedValueOnce(bbCommitPage('sha-1', { uuid: targetUuid }))
+        .mockResolvedValueOnce(bbCommitPage('sha-2', { uuid: targetUuid }));
+
+      const { rollupStore } = makeRollupStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore, rollupStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous?limit=2`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ walked: 2, bbMatched: 2, updated: 2, hasMore: true });
+    });
+
+    it('isolates per-commit BB failures so one 404 doesn’t poison the batch', async () => {
+      const targetUuid = '{fdc5c167-6eb0-43ec-b46c-59983574b07e}';
+      const { store: commitStore, state } = createFakeCommitStore();
+      state.knownUsersByUuid.set(targetUuid, 142);
+      state.anonymousCandidates.push(
+        {
+          commitId: 1,
+          sha: 'sha-gone',
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'r',
+          fullName: 'tigerit/r',
+          authoredAt: new Date('2026-05-18T10:00:00Z'),
+        },
+        {
+          commitId: 2,
+          sha: 'sha-live',
+          repositoryId: 10,
+          workspace: 'tigerit',
+          slug: 'r',
+          fullName: 'tigerit/r',
+          authoredAt: new Date('2026-05-18T10:00:00Z'),
+        },
+      );
+      fetchMock
+        .mockResolvedValueOnce(jsonResponse({ error: { message: 'Not Found' } }, 404))
+        .mockResolvedValueOnce(bbCommitPage('sha-live', { uuid: targetUuid }));
+
+      const { rollupStore } = makeRollupStore();
+      const { deps } = makeSyncDeps(fetchMock, { commitStore, rollupStore });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ walked: 2, bbMatched: 1, bbFailed: 1, updated: 1 });
     });
   });
 });

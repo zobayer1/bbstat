@@ -54,6 +54,25 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
       // is the only caller.
       return [];
     },
+    async listAnonymousCommits() {
+      // Per-user retroactive reattribution lives on the admin path; not
+      // exercised by the deepen tick.
+      return [];
+    },
+    async reattributeAnonymousCommits() {
+      return [];
+    },
+    async upsertAuthorUsers(inputs) {
+      // Deepen tests don't assert on user creation — return synthetic
+      // ids so the forward-resolution step gets a value. Real
+      // semantics are covered by commits.test.ts.
+      const map = new Map<string, number>();
+      let nextId = 9000;
+      for (const e of inputs) {
+        map.set(e.bitbucketUuid, nextId++);
+      }
+      return map;
+    },
     async incrementDiffStatsFailure() {
       // Not exercised by deepen tests.
       return 0;
@@ -71,7 +90,11 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
           insertedRows.push({ id: nextId++, sha: c.sha, authoredAt: c.authoredAt });
         }
       }
-      return { inserted: insertedRows.length, insertedRows };
+      // deepen-backfill never reattributes (it walks history backward
+      // into a window already covered by the cursor; the rows it might
+      // hit are the same ones cold-mode already processed). The fake
+      // mirrors the real semantics: brand-new shas only.
+      return { inserted: insertedRows.length, insertedRows, reattributedRows: [] };
     },
     async getSyncState(repositoryId) {
       return state.syncStateByRepo.get(repositoryId) ?? null;

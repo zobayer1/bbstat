@@ -27,6 +27,10 @@ interface FakeCommitStoreState {
   // Mirrors users.email — write-once semantics enforced in
   // setUserEmailsIfMissing below so tests can assert capture behavior.
   emailsByUuid: Map<string, string>;
+  // UUIDs the auto-create path freshly inserted on this run. Tests
+  // assert presence to confirm the ex-employee / never-member flow
+  // fired without also asserting against the broader usersByUuid map.
+  autoCreatedUuids: Set<string>;
   markRunningCalls: number[]; // repositoryId, in order
   markSuccessCalls: Array<{ repositoryId: number; update: SyncSuccessUpdate }>;
   markFailedCalls: Array<{ repositoryId: number; error: string }>;
@@ -48,6 +52,7 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     syncStateByRepo: new Map(),
     usersByUuid: new Map(),
     emailsByUuid: new Map(),
+    autoCreatedUuids: new Set(),
     markRunningCalls: [],
     markSuccessCalls: [],
     markFailedCalls: [],
@@ -73,10 +78,38 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
         state.emailsByUuid.set(e.bitbucketUuid, e.email);
       }
     },
+    async upsertAuthorUsers(inputs) {
+      // Mirrors the Drizzle impl: INSERT (with is_workspace_member=false
+      // + email) if the UUID is new; leave the existing row untouched
+      // if it's already there. Returns uuid → id for every input.
+      const map = new Map<string, number>();
+      for (const e of inputs) {
+        let id = state.usersByUuid.get(e.bitbucketUuid);
+        if (id === undefined) {
+          id = ++state.idSeq;
+          state.usersByUuid.set(e.bitbucketUuid, id);
+          // Record the email at INSERT time — the auto-create path
+          // sets it directly, so it's no longer NULL.
+          state.emailsByUuid.set(e.bitbucketUuid, e.email);
+          state.autoCreatedUuids.add(e.bitbucketUuid);
+        }
+        map.set(e.bitbucketUuid, id);
+      }
+      return map;
+    },
     async listUsersMissingEmailWithLastCommit() {
       // Not exercised by these per-repo sync tests — the admin email
       // backfill endpoint is the only caller, and its tests live in
       // tests/admin.test.ts.
+      return [];
+    },
+    async listAnonymousCommits() {
+      // Per-user retroactive reattribution is admin-driven; not
+      // exercised by these per-repo sync tests.
+      return [];
+    },
+    async reattributeAnonymousCommits() {
+      // Same as above — the admin endpoint is the only caller.
       return [];
     },
     async incrementDiffStatsFailure() {
@@ -85,17 +118,30 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
       return 0;
     },
     async insertCommits(input) {
+      // Mirrors the Drizzle impl's ON CONFLICT DO UPDATE … WHERE
+      // commits.author_user_id IS NULL AND EXCLUDED.author_user_id IS NOT NULL
+      // semantics. Brand-new shas land in `insertedRows`; existing shas
+      // whose stored author_user_id is NULL get their author backfilled
+      // when the incoming row carries a known author and land in
+      // `reattributedRows`. Everything else is a no-op (commit content
+      // is immutable, and we never overwrite an established attribution).
       const insertedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
+      const reattributedRows: Array<{ id: number; sha: string; authoredAt: Date }> = [];
       for (const c of input) {
         const key = `${c.repositoryId}:${c.sha}`;
-        if (!state.commits.has(key)) {
+        const existing = state.commits.get(key);
+        if (existing === undefined) {
           state.commits.set(key, c);
           const id = ++state.idSeq;
           state.idBySha.set(key, id);
           insertedRows.push({ id, sha: c.sha, authoredAt: c.authoredAt });
+        } else if (existing.authorUserId === null && c.authorUserId !== null) {
+          state.commits.set(key, { ...existing, authorUserId: c.authorUserId });
+          const id = state.idBySha.get(key)!;
+          reattributedRows.push({ id, sha: c.sha, authoredAt: existing.authoredAt });
         }
       }
-      return { inserted: insertedRows.length, insertedRows };
+      return { inserted: insertedRows.length, insertedRows, reattributedRows };
     },
     async getSyncState(repositoryId) {
       return state.syncStateByRepo.get(repositoryId) ?? null;
@@ -348,7 +394,16 @@ describe('syncRepositoryCommits — cold mode', () => {
     expect(result).toMatchObject({ fetched: 5, inserted: 5, hitDateCap: true, newCursor: 'new-0' });
   });
 
-  it('resolves authors: matched user, unmatched UUID, anonymous (no user)', async () => {
+  it('resolves authors: matched user, AUTO-CREATED for unmatched UUID with email, anonymous (no user)', async () => {
+    // Three commit shapes covering the full forward-sync author flow:
+    //   * sha-known: BB UUID is already in our users table → resolves
+    //     directly to the existing user id (id=42 for {u1}).
+    //   * sha-unknown: BB UUID NOT in users table, but author.raw
+    //     carries a parseable email → auto-create path fires. The
+    //     fake store mints a new id and tracks the UUID in
+    //     state.autoCreatedUuids so we can assert the path ran.
+    //   * sha-anon: BB returned no author.user at all → stays
+    //     anonymous regardless of what author.raw looks like.
     const commits = [
       makeCommit('sha-known', { user: { uuid: '{u1}', display_name: 'Alice' } }),
       makeCommit('sha-unknown', { user: { uuid: '{u-missing}', display_name: 'Stranger' } }),
@@ -366,7 +421,17 @@ describe('syncRepositoryCommits — cold mode', () => {
     );
 
     expect(state.commits.get('1:sha-known')?.authorUserId).toBe(42);
-    expect(state.commits.get('1:sha-unknown')?.authorUserId).toBeNull();
+    // Unknown UUID + parseable email → auto-created with a fresh id.
+    // The exact id depends on the fake's idSeq; just check it's set
+    // and the UUID landed in autoCreatedUuids.
+    const unknownAuthor = state.commits.get('1:sha-unknown')?.authorUserId;
+    expect(unknownAuthor).not.toBeNull();
+    expect(unknownAuthor).not.toBe(42);
+    expect(state.autoCreatedUuids.has('{u-missing}')).toBe(true);
+    // No author.user from BB → stays anonymous, even though author.raw
+    // has a parseable email. This is the "BB didn't resolve the
+    // author to any account" case; without a UUID we have nothing to
+    // upsert against (users.bitbucket_uuid is the unique key).
     expect(state.commits.get('1:sha-anon')?.authorUserId).toBeNull();
   });
 
@@ -716,5 +781,344 @@ describe('syncRepositoryCommits — auto-exclusion', () => {
         makeRepo(1),
       ),
     ).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-create user rows for unknown UUIDs (ex-employees, externals)
+//
+// The scenario this guards: a commit lands whose BB author.user.uuid
+// isn't currently in `/workspaces/{ws}/members` — typically because
+// the contributor left the workspace, never joined, or is an external
+// pusher. Pre-fix this dropped to author_user_id = NULL forever; the
+// auto-create path now mints a `users` row with is_workspace_member=false
+// and the commit attributes to it. Snapshot columns (author_email,
+// author_display_name) land regardless of attribution outcome.
+// ---------------------------------------------------------------------------
+
+describe('syncRepositoryCommits — auto-create out-of-workspace users', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+  });
+
+  it('auto-creates a user when BB UUID is unknown and author.raw has a parseable email', async () => {
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-ex-employee', {
+          user: { uuid: '{u-ex-employee}', display_name: 'Ex Employee' },
+        }),
+      ]),
+    );
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1)] });
+
+    await syncRepositoryCommits(
+      { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+      makeRepo(1),
+    );
+
+    // The unknown UUID got minted into the users map and the commit
+    // attributes to the new id (not null).
+    expect(state.autoCreatedUuids.has('{u-ex-employee}')).toBe(true);
+    const newId = state.usersByUuid.get('{u-ex-employee}');
+    expect(newId).toBeDefined();
+    expect(state.commits.get('1:sha-ex-employee')?.authorUserId).toBe(newId);
+    // Email was set at INSERT time on the auto-create path (parsed
+    // from author.raw "Author <author@example.com>" — the fixture's
+    // default).
+    expect(state.emailsByUuid.get('{u-ex-employee}')).toBe('author@example.com');
+  });
+
+  it('email gate: BB UUID without parseable email stays anonymous (no auto-create)', async () => {
+    // Author.raw is a noreply-filtered address — parseAuthorEmail
+    // returns null, so the auto-create path is skipped per the
+    // operator policy ("no auto-create without a real email").
+    const commits = [
+      {
+        hash: 'sha-noreply-author',
+        message: 'web merge from BB UI',
+        date: '2026-05-01T00:00:00+00:00',
+        parents: [],
+        author: {
+          raw: 'BB User <noreply@bitbucket.org>',
+          user: { uuid: '{u-noreply}', display_name: 'BB User' },
+        },
+      },
+    ];
+    fetchMock.mockResolvedValueOnce(commitsPage(commits));
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1)] });
+
+    await syncRepositoryCommits(
+      { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+      makeRepo(1),
+    );
+
+    expect(state.autoCreatedUuids.has('{u-noreply}')).toBe(false);
+    expect(state.usersByUuid.has('{u-noreply}')).toBe(false);
+    expect(state.commits.get('1:sha-noreply-author')?.authorUserId).toBeNull();
+    // Snapshot columns: author_email stays null (parser filtered it
+    // out), but author_display_name is populated from author.user.display_name.
+    expect(state.commits.get('1:sha-noreply-author')?.authorEmail).toBeNull();
+    expect(state.commits.get('1:sha-noreply-author')?.authorDisplayName).toBe('BB User');
+  });
+
+  it('no overwrite: existing users (member-sync-discovered) are not touched by the auto-create path', async () => {
+    // {u1} is already in users (a current workspace member, id=42).
+    // The auto-create path should NOT fire for this UUID — established
+    // attribution paths through the normal resolveUserIdsByUuid match.
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([makeCommit('sha-member', { user: { uuid: '{u1}', display_name: 'Alice' } })]),
+    );
+    const { store, state } = createFakeCommitStore({
+      syncState: [makeSyncStateRow(1)],
+      users: [['{u1}', 42]],
+    });
+
+    await syncRepositoryCommits(
+      { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+      makeRepo(1),
+    );
+
+    // {u1} maps to existing id 42 (was seeded). The fake's
+    // autoCreatedUuids only tracks UUIDs minted by upsertAuthorUsers,
+    // and that path was bypassed for the already-known UUID.
+    expect(state.autoCreatedUuids.has('{u1}')).toBe(false);
+    expect(state.commits.get('1:sha-member')?.authorUserId).toBe(42);
+  });
+
+  it('snapshot columns: author_email + author_display_name land on every commit when available', async () => {
+    const commits = [
+      // Standard case: BB carries everything.
+      makeCommit('sha-full', { user: { uuid: '{u1}', display_name: 'Alice' } }),
+      // No BB user but parseable raw — display_name parsed from raw, email parsed too.
+      {
+        hash: 'sha-external',
+        message: 'external contribution',
+        date: '2026-05-01T00:00:00+00:00',
+        parents: [],
+        author: { raw: 'External Contributor <external@elsewhere.com>' },
+      },
+    ];
+    fetchMock.mockResolvedValueOnce(commitsPage(commits));
+    const { store, state } = createFakeCommitStore({
+      syncState: [makeSyncStateRow(1)],
+      users: [['{u1}', 42]],
+    });
+
+    await syncRepositoryCommits(
+      { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+      makeRepo(1),
+    );
+
+    // BB-resolved author: snapshot columns reflect what BB sent.
+    expect(state.commits.get('1:sha-full')?.authorEmail).toBe('author@example.com');
+    expect(state.commits.get('1:sha-full')?.authorDisplayName).toBe('Alice');
+    // No BB user: stays anonymous (no UUID to upsert against), but
+    // snapshot columns are still populated from author.raw — leaves
+    // the forensic hook for future re-processing.
+    expect(state.commits.get('1:sha-external')?.authorUserId).toBeNull();
+    expect(state.commits.get('1:sha-external')?.authorEmail).toBe('external@elsewhere.com');
+    expect(state.commits.get('1:sha-external')?.authorDisplayName).toBe('External Contributor');
+  });
+
+  it('deduplicates auto-create calls when the same unknown UUID appears in multiple commits', async () => {
+    // Three commits from the same unknown UUID — the auto-create
+    // path should fire once for the UUID (not three times) and all
+    // three commits should attribute to the same resulting id.
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-a', { user: { uuid: '{u-dup}', display_name: 'Dup' } }),
+        makeCommit('sha-b', { user: { uuid: '{u-dup}', display_name: 'Dup' } }),
+        makeCommit('sha-c', { user: { uuid: '{u-dup}', display_name: 'Dup' } }),
+      ]),
+    );
+    const { store, state } = createFakeCommitStore({ syncState: [makeSyncStateRow(1)] });
+
+    await syncRepositoryCommits(
+      { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store },
+      makeRepo(1),
+    );
+
+    expect(state.autoCreatedUuids.size).toBe(1);
+    const dupId = state.usersByUuid.get('{u-dup}');
+    expect(dupId).toBeDefined();
+    expect(state.commits.get('1:sha-a')?.authorUserId).toBe(dupId);
+    expect(state.commits.get('1:sha-b')?.authorUserId).toBe(dupId);
+    expect(state.commits.get('1:sha-c')?.authorUserId).toBe(dupId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reattribution on re-sync (anonymous → workspace member)
+//
+// Scenario this guards against: a commit was originally pushed with an
+// author email that wasn't yet linked to any workspace member's BB
+// account, so BB returned `author.user = undefined` at first ingest and
+// we stored `author_user_id = NULL`. The same email is later added to a
+// workspace member's account. BB now resolves `author.user.uuid` for the
+// SAME commit, and a subsequent cold-mode re-sync (kicked off by
+// POST /repositories/:ws/:slug/include, which clears `last_seen_sha`)
+// fetches that commit again. The fix: ON CONFLICT DO UPDATE narrowly
+// fills `author_user_id` when transitioning NULL → known, and we surface
+// the affected day window so the rollup recompute swaps the stale
+// (day, repo, NULL) row for the new (day, repo, user) row.
+// ---------------------------------------------------------------------------
+
+describe('syncRepositoryCommits — reattribution on re-sync', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn();
+  });
+
+  it('fills author_user_id when a previously anonymous commit comes back with a known UUID', async () => {
+    // First pass: BB does not yet associate the commit's email with a
+    // workspace member — author.user is absent, so we land the row with
+    // author_user_id = NULL.
+    fetchMock.mockResolvedValueOnce(commitsPage([makeCommit('sha-anon', { date: '2026-05-18T10:28:18+00:00' })]));
+    const { store, state } = createFakeCommitStore({
+      syncState: [makeSyncStateRow(1)],
+      users: [['{u-foysal}', 142]],
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    await syncRepositoryCommits(deps, makeRepo(1));
+    expect(state.commits.get('1:sha-anon')?.authorUserId).toBeNull();
+
+    // Second pass: simulate POST /include resetting the cursor to cold,
+    // and BB now resolving the commit's author to a workspace member.
+    const row = state.syncStateByRepo.get(1)!;
+    state.syncStateByRepo.set(1, { ...row, lastSeenSha: null });
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-anon', {
+          date: '2026-05-18T10:28:18+00:00',
+          user: { uuid: '{u-foysal}', display_name: 'Foysal Ahamed' },
+        }),
+      ]),
+    );
+
+    const result = await syncRepositoryCommits(deps, makeRepo(1));
+
+    expect(state.commits.get('1:sha-anon')?.authorUserId).toBe(142);
+    // Re-attributed rows are not counted as "inserted" — the row already
+    // existed. They're surfaced via reattributedRange so the rollup hook
+    // can rebuild the affected day window.
+    expect(result.inserted).toBe(0);
+    expect(result.reattributedRange).toEqual({ sinceDay: '2026-05-18', untilDay: '2026-05-18' });
+  });
+
+  it('does NOT overwrite an established attribution if BB later returns a different UUID', async () => {
+    // Original ingest: commit belongs to Alice (uuid {u-alice} → user id 42).
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-pinned', {
+          date: '2026-05-18T10:00:00+00:00',
+          user: { uuid: '{u-alice}', display_name: 'Alice' },
+        }),
+      ]),
+    );
+    const { store, state } = createFakeCommitStore({
+      syncState: [makeSyncStateRow(1)],
+      users: [
+        ['{u-alice}', 42],
+        ['{u-bob}', 99],
+      ],
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    await syncRepositoryCommits(deps, makeRepo(1));
+    expect(state.commits.get('1:sha-pinned')?.authorUserId).toBe(42);
+
+    // Cold re-sync: BB returns the same sha but suddenly attributes it
+    // to Bob. We MUST NOT overwrite Alice — established attribution is
+    // immutable, only NULL → known transitions are allowed.
+    const row = state.syncStateByRepo.get(1)!;
+    state.syncStateByRepo.set(1, { ...row, lastSeenSha: null });
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-pinned', {
+          date: '2026-05-18T10:00:00+00:00',
+          user: { uuid: '{u-bob}', display_name: 'Bob' },
+        }),
+      ]),
+    );
+
+    const result = await syncRepositoryCommits(deps, makeRepo(1));
+
+    expect(state.commits.get('1:sha-pinned')?.authorUserId).toBe(42); // unchanged
+    expect(result.reattributedRange).toBeNull();
+  });
+
+  it('reattributedRange spans the min/max authored day across multiple reattributed rows', async () => {
+    // Seed two anonymous commits on different days.
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-newer', { date: '2026-05-18T12:00:00+00:00' }),
+        makeCommit('sha-older', { date: '2026-05-15T08:00:00+00:00' }),
+      ]),
+    );
+    const { store, state } = createFakeCommitStore({
+      syncState: [makeSyncStateRow(1)],
+      users: [['{u-foysal}', 142]],
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+    await syncRepositoryCommits(deps, makeRepo(1));
+
+    // Re-sync: both commits now resolve to the workspace member.
+    const row = state.syncStateByRepo.get(1)!;
+    state.syncStateByRepo.set(1, { ...row, lastSeenSha: null });
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-newer', {
+          date: '2026-05-18T12:00:00+00:00',
+          user: { uuid: '{u-foysal}', display_name: 'Foysal' },
+        }),
+        makeCommit('sha-older', {
+          date: '2026-05-15T08:00:00+00:00',
+          user: { uuid: '{u-foysal}', display_name: 'Foysal' },
+        }),
+      ]),
+    );
+
+    const result = await syncRepositoryCommits(deps, makeRepo(1));
+
+    expect(result.reattributedRange).toEqual({ sinceDay: '2026-05-15', untilDay: '2026-05-18' });
+  });
+
+  it('inline-eager diff-stats does NOT fetch /diffstat for reattributed rows', async () => {
+    // Seed an anonymous commit (no diff-stats opt-in on the first run so
+    // it stays plain).
+    fetchMock.mockResolvedValueOnce(commitsPage([makeCommit('sha-anon', { date: '2026-05-18T10:00:00+00:00' })]));
+    const { store, state } = createFakeCommitStore({
+      syncState: [makeSyncStateRow(1)],
+      users: [['{u-foysal}', 142]],
+    });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+    await syncRepositoryCommits(deps, makeRepo(1));
+
+    // Cold re-sync WITH diffStats opt-in. The commit gets reattributed
+    // but is NOT a new row — inline-eager should leave it alone and let
+    // the backfill tick handle any pending diff-stats work.
+    const row = state.syncStateByRepo.get(1)!;
+    state.syncStateByRepo.set(1, { ...row, lastSeenSha: null });
+    fetchMock.mockResolvedValueOnce(
+      commitsPage([
+        makeCommit('sha-anon', {
+          date: '2026-05-18T10:00:00+00:00',
+          user: { uuid: '{u-foysal}', display_name: 'Foysal' },
+        }),
+      ]),
+    );
+
+    const result = await syncRepositoryCommits(deps, makeRepo(1), {
+      diffStats: { budgetThreshold: 10 },
+    });
+
+    expect(result.inserted).toBe(0);
+    expect(result.reattributedRange).not.toBeNull();
+    expect(result.diffStatsUpdated).toBe(0);
+    expect(state.diffStatsUpdates).toHaveLength(0);
+    // Only the /commits page was fetched — no /diffstat call.
+    expect(fetchMock).toHaveBeenCalledTimes(2); // first run + second run /commits
   });
 });

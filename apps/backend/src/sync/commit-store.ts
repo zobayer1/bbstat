@@ -2,11 +2,15 @@
 // domain logic in commits.ts injects a CommitStore (real or fake) so it stays
 // testable without spinning up Postgres.
 //
-// Idempotency: insertCommits uses ON CONFLICT DO NOTHING on the
-// commits_sha_repo_unique constraint — re-running a sync that races another
-// trigger never errors and never duplicates. The cursor helpers
-// (getSyncState, markSync{Running,Success,Failed}) own the sync_state row
-// lifecycle for a single repository.
+// Idempotency: insertCommits uses ON CONFLICT … DO UPDATE on
+// commits_sha_repo_unique with a narrow `commits.author_user_id IS NULL AND
+// EXCLUDED.author_user_id IS NOT NULL` guard — re-running a sync that races
+// another trigger never errors, never duplicates, never overwrites an
+// established attribution, but DOES fill in attribution for rows that were
+// previously anonymous (e.g. BB linked the author's email to a workspace
+// member after the original ingest). The cursor helpers (getSyncState,
+// markSync{Running,Success,Failed}) own the sync_state row lifecycle for a
+// single repository.
 
 import { and, asc, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -39,6 +43,15 @@ export interface CommitInsertInput {
   message: string;
   isMerge: boolean;
   authoredAt: Date;
+  // Snapshot columns — populated from BB's `author.raw` (email parsed
+  // via parseAuthorEmail; name parsed via parseAuthorDisplayName, with
+  // `author.user.display_name` preferred when present). Both may be
+  // NULL when BB doesn't carry enough metadata or the email is
+  // synthetic / noreply-filtered. Captured at first ingest only; the
+  // ON CONFLICT path leaves them alone so the value reflects what was
+  // pushed at the time of the commit, not whatever BB returns now.
+  authorEmail: string | null;
+  authorDisplayName: string | null;
 }
 
 export interface CommitInsertResult {
@@ -48,6 +61,17 @@ export interface CommitInsertResult {
   // per-repo commit sync can fetch /diffstat for just-inserted shas
   // without going back to the DB. Empty when `inserted === 0`.
   insertedRows: InsertedCommitRow[];
+  // Rows whose `author_user_id` transitioned NULL → known on this call
+  // because BB now resolves the author to a workspace member. Surfaced
+  // separately from `insertedRows` so:
+  //   * the inline-eager diff-stats path stays scoped to *new* commits
+  //     (their diff stats may not be persisted yet); reattributed rows
+  //     already have whatever diff stats they had.
+  //   * the rollup hook can refresh `commit_daily` for the affected
+  //     day window so the stale `(day, repo, NULL)` row disappears
+  //     and the new `(day, repo, user)` row reflects the count.
+  // Empty when no rows were reattributed on this call.
+  reattributedRows: InsertedCommitRow[];
 }
 
 export interface InsertedCommitRow {
@@ -95,8 +119,25 @@ export interface PendingDiffStatCommitWithRepo extends PendingDiffStatCommit {
 export interface CommitStore {
   // Resolve a batch of BitBucket user UUIDs to local users.id values. Missing
   // UUIDs (anonymous commits, users not yet synced) are absent from the
-  // result map; callers translate that absence into author_user_id = null.
+  // result map; callers translate that absence into author_user_id = null,
+  // OR (since the auto-create path landed) hand the unresolved UUIDs to
+  // `upsertAuthorUsers` to create out-of-workspace user rows for them.
   resolveUserIdsByUuid(uuids: string[]): Promise<Map<string, number>>;
+
+  // Bulk auto-create user rows for BB UUIDs not currently in our `users`
+  // table — typically ex-employees, never-members, or external pushers
+  // whose accounts BB still resolves on commits but who aren't in
+  // `/workspaces/{ws}/members`. INSERTed rows land with
+  // `is_workspace_member = false`; existing rows are left alone (no
+  // overwrite of display_name / username / email / member flag — keeps
+  // member-sync's TRUE intact and preserves write-once email). Each
+  // entry MUST carry a parseable email (caller enforces) since the
+  // policy is "no auto-create without a real email." Returns a map of
+  // bitbucket_uuid → users.id covering every input so the caller can
+  // resolve `author_user_id` in one pass without a follow-up SELECT.
+  upsertAuthorUsers(
+    inputs: Array<{ bitbucketUuid: string; displayName: string; email: string }>,
+  ): Promise<Map<string, number>>;
 
   // Write-once email capture from commits.author.raw. For each (uuid, email)
   // entry, sets users.email = email only when the current value IS NULL —
@@ -126,8 +167,52 @@ export interface CommitStore {
     }>
   >;
 
-  // Bulk insert commits. Conflicts on (repository_id, sha) are skipped — commits
-  // are immutable, so re-runs converge. Returns the count of newly inserted rows.
+  // Per-user reattribution backfill seed list. Returns anonymous
+  // commits (`author_user_id IS NULL`) in non-archived / non-excluded
+  // repos, newest-authored first, capped by `limit`. Carries the repo
+  // identity needed for the BB lookup. When `opts.workspace` and
+  // `opts.slug` are both set, the result is scoped to that single repo;
+  // either both must be set or both must be omitted (caller enforces).
+  // Archived + sync-excluded are filtered out — same rationale as
+  // listUsersMissingEmailWithLastCommit: fetching against them
+  // unreliable, and the operator wouldn't be reattributing on a dead
+  // repo anyway.
+  listAnonymousCommits(opts: { workspace?: string; slug?: string; limit: number }): Promise<
+    Array<{
+      commitId: number;
+      sha: string;
+      repositoryId: number;
+      workspace: string;
+      slug: string;
+      fullName: string;
+      authoredAt: Date;
+    }>
+  >;
+
+  // Bulk reattribute previously-anonymous commits to a user. Each entry
+  // is a (commitId, userId) pair the caller has BB-confirmed (BB's
+  // `author.user.uuid` for this sha resolved to the workspace member
+  // identified by userId). The UPDATE is guarded by `author_user_id
+  // IS NULL` so an established attribution (or a concurrent commit-sync
+  // landing the same row first) is never overwritten — race-safe by
+  // construction. Only touches `author_user_id`; diff-stats columns
+  // (`additions`, `deletions`, `files_changed`, `diff_stats_synced_at`,
+  // `diff_stats_failure_count`) stay exactly as they were so this
+  // operation costs zero `/diffstat` BB calls. Returns rows actually
+  // updated so the caller can scope `commit_daily` recompute to the
+  // affected (repository_id, day) windows.
+  reattributeAnonymousCommits(
+    entries: Array<{ commitId: number; userId: number }>,
+  ): Promise<Array<{ id: number; repositoryId: number; authoredAt: Date }>>;
+
+  // Bulk upsert commits. Conflicts on (repository_id, sha) trigger a narrow
+  // DO UPDATE that only fills `author_user_id` when the stored value IS NULL
+  // and the incoming value IS NOT NULL — never overwrites established
+  // attribution. Everything else about a commit (message, parents, authored
+  // timestamp) is treated as immutable, so re-runs converge. Returns truly
+  // inserted rows in `insertedRows` and reattributed rows in
+  // `reattributedRows` (`xmax = 0` split on the RETURNING tuple — the
+  // canonical Postgres trick for distinguishing the two outcomes).
   insertCommits(input: CommitInsertInput[]): Promise<CommitInsertResult>;
 
   getSyncState(repositoryId: number): Promise<SyncStateRow | null>;
@@ -304,6 +389,49 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
       return new Map(rows.map((r) => [r.uuid, r.id]));
     },
 
+    async upsertAuthorUsers(inputs) {
+      if (inputs.length === 0) return new Map();
+      // INSERT … ON CONFLICT DO UPDATE with a no-op SET so the row is
+      // always returned via RETURNING (either the inserted row or the
+      // existing one). The "no-op" — SET bitbucket_uuid =
+      // EXCLUDED.bitbucket_uuid — is the canonical PG trick for
+      // achieving DO-NOTHING-but-still-RETURNING. Critically the SET
+      // touches NO mutable column: display_name, username, email, and
+      // is_workspace_member on an existing row are NEVER overwritten
+      // by this path. That keeps member-sync's TRUE intact when the
+      // same UUID is seen by both paths, preserves write-once email
+      // capture, and means a benign concurrent auto-create can't
+      // step on member-sync data.
+      //
+      // Dedupe by UUID before the SQL build — multiple commits in the
+      // same batch can carry the same author, and emitting duplicate
+      // VALUES rows for one uuid trips ON CONFLICT's "command cannot
+      // affect row a second time" rule. The Map preserves "first
+      // observed wins" within the batch, which is fine because all
+      // values for one uuid carry equivalent data anyway.
+      const byUuid = new Map<string, { displayName: string; email: string }>();
+      for (const e of inputs) {
+        if (!byUuid.has(e.bitbucketUuid)) {
+          byUuid.set(e.bitbucketUuid, { displayName: e.displayName, email: e.email });
+        }
+      }
+      const tuples = sql.join(
+        Array.from(
+          byUuid,
+          ([uuid, v]) => sql`(${uuid}::text, ${v.displayName}::text, ${v.email}::text, false::boolean)`,
+        ),
+        sql`, `,
+      );
+      const result = await db.execute<{ id: number; bitbucket_uuid: string }>(sql`
+        INSERT INTO users (bitbucket_uuid, display_name, email, is_workspace_member)
+        VALUES ${tuples}
+        ON CONFLICT (bitbucket_uuid) DO UPDATE
+          SET bitbucket_uuid = EXCLUDED.bitbucket_uuid
+        RETURNING id, bitbucket_uuid
+      `);
+      return new Map(result.rows.map((r) => [r.bitbucket_uuid, r.id]));
+    },
+
     async listUsersMissingEmailWithLastCommit(limit) {
       // DISTINCT ON (author_user_id) picks the newest commit per user in
       // one pass, backed by the `commits_author_authored_idx` index on
@@ -341,6 +469,87 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
       }));
     },
 
+    async listAnonymousCommits({ workspace, slug, limit }) {
+      // ORDER BY authored_at DESC mirrors how an operator naturally
+      // reasons about backfill — newest anonymous commits first, so a
+      // partial run (hit the `limit`, hasMore=true) leaves the older
+      // tail for the next call rather than stranding fresh activity.
+      // INNER JOIN to repositories filters archived + sync_excluded in
+      // one round-trip and lets us pull repo identity for the BB
+      // lookup without a second query.
+      const scopeBoth = workspace !== undefined && slug !== undefined;
+      const rows = await db.execute<{
+        commit_id: number;
+        sha: string;
+        repository_id: number;
+        workspace: string;
+        slug: string;
+        full_name: string;
+        authored_at: Date;
+      }>(sql`
+        SELECT
+          c.id           AS commit_id,
+          c.sha,
+          r.id           AS repository_id,
+          r.workspace,
+          r.slug,
+          r.full_name,
+          c.authored_at
+        FROM commits c
+        JOIN repositories r ON r.id = c.repository_id
+        WHERE c.author_user_id IS NULL
+          AND r.archived = false
+          AND r.sync_excluded = false
+          ${scopeBoth ? sql`AND r.workspace = ${workspace} AND r.slug = ${slug}` : sql``}
+        ORDER BY c.authored_at DESC
+        LIMIT ${limit}::int
+      `);
+      return rows.rows.map((r) => ({
+        commitId: r.commit_id,
+        sha: r.sha,
+        repositoryId: r.repository_id,
+        workspace: r.workspace,
+        slug: r.slug,
+        fullName: r.full_name,
+        authoredAt: r.authored_at instanceof Date ? r.authored_at : new Date(r.authored_at),
+      }));
+    },
+
+    async reattributeAnonymousCommits(entries) {
+      if (entries.length === 0) return [];
+      // Single bulk UPDATE FROM (VALUES …) — one round-trip regardless
+      // of batch size. Per-parameter casts mirror updateIsMergeBatch /
+      // setUserEmailsIfMissing: pg-node sends parameters untyped and
+      // Postgres infers VALUES column types from the first row only.
+      // `commits.author_user_id IS NULL` is load-bearing — established
+      // attribution is never overwritten, and a concurrent commit-sync
+      // landing the same row first wins (we no-op). The SET clause
+      // intentionally touches only author_user_id, so diff-stats
+      // columns and synced_at stay untouched (no /diffstat re-fetch
+      // ever required from this path).
+      const tuples = sql.join(
+        entries.map((e) => sql`(${e.commitId}::int, ${e.userId}::int)`),
+        sql`, `,
+      );
+      const result = await db.execute<{
+        id: number;
+        repository_id: number;
+        authored_at: Date;
+      }>(sql`
+        UPDATE commits
+        SET author_user_id = data.user_id
+        FROM (VALUES ${tuples}) AS data(commit_id, user_id)
+        WHERE commits.id = data.commit_id
+          AND commits.author_user_id IS NULL
+        RETURNING commits.id, commits.repository_id, commits.authored_at
+      `);
+      return result.rows.map((r) => ({
+        id: r.id,
+        repositoryId: r.repository_id,
+        authoredAt: r.authored_at instanceof Date ? r.authored_at : new Date(r.authored_at),
+      }));
+    },
+
     async setUserEmailsIfMissing(entries) {
       if (entries.length === 0) return;
       // Dedupe by uuid before the SQL build — multiple commits in the same
@@ -371,13 +580,70 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async insertCommits(input) {
-      if (input.length === 0) return { inserted: 0, insertedRows: [] };
-      const result = await db
-        .insert(commits)
-        .values(input)
-        .onConflictDoNothing({ target: [commits.repositoryId, commits.sha] })
-        .returning({ id: commits.id, sha: commits.sha, authoredAt: commits.authoredAt });
-      return { inserted: result.length, insertedRows: result };
+      if (input.length === 0) return { inserted: 0, insertedRows: [], reattributedRows: [] };
+      // Single round-trip bulk upsert with reattribution. The DO UPDATE
+      // WHERE clause is the load-bearing bit: it ONLY fires when the
+      // stored row is anonymous and the incoming row carries a known
+      // author, so established attribution is preserved. `(xmax = 0)`
+      // in RETURNING distinguishes truly-inserted rows (xmax stays 0
+      // on a fresh tuple) from updated rows (xmax = current xid on the
+      // superseded tuple). Filtered-out rows (no conflict resolution
+      // taken) don't appear in RETURNING at all per PG semantics.
+      // Explicit per-column casts: pg-node sends parameters untyped
+      // and Postgres infers VALUES column types from the first row;
+      // without the casts an all-NULL `author_user_id` in row 0 would
+      // poison the whole column to text. Same gotcha as
+      // updateIsMergeBatch / setUserEmailsIfMissing.
+      const tuples = sql.join(
+        input.map(
+          (c) => sql`(
+            ${c.repositoryId}::int,
+            ${c.authorUserId}::int,
+            ${c.sha}::text,
+            ${c.message}::text,
+            ${c.isMerge}::boolean,
+            ${c.authoredAt}::timestamptz,
+            ${c.authorEmail}::text,
+            ${c.authorDisplayName}::text
+          )`,
+        ),
+        sql`, `,
+      );
+      // Snapshot columns (author_email, author_display_name) are
+      // captured at first ingest only — the ON CONFLICT path doesn't
+      // touch them. Re-syncs converge on author_user_id (NULL → known
+      // attribution) but leave the historical email/name intact so the
+      // value reflects what was pushed at the time, not whatever BB
+      // returns later.
+      const result = await db.execute<{
+        id: number;
+        sha: string;
+        authored_at: Date;
+        was_inserted: boolean;
+      }>(sql`
+        INSERT INTO commits (
+          repository_id, author_user_id, sha, message, is_merge, authored_at,
+          author_email, author_display_name
+        )
+        VALUES ${tuples}
+        ON CONFLICT (repository_id, sha) DO UPDATE
+          SET author_user_id = EXCLUDED.author_user_id
+        WHERE commits.author_user_id IS NULL
+          AND EXCLUDED.author_user_id IS NOT NULL
+        RETURNING id, sha, authored_at, (xmax = 0) AS was_inserted
+      `);
+      const insertedRows: InsertedCommitRow[] = [];
+      const reattributedRows: InsertedCommitRow[] = [];
+      for (const r of result.rows) {
+        const row: InsertedCommitRow = {
+          id: r.id,
+          sha: r.sha,
+          authoredAt: r.authored_at instanceof Date ? r.authored_at : new Date(r.authored_at),
+        };
+        if (r.was_inserted) insertedRows.push(row);
+        else reattributedRows.push(row);
+      }
+      return { inserted: insertedRows.length, insertedRows, reattributedRows };
     },
 
     async getSyncState(repositoryId) {
