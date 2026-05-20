@@ -4,6 +4,13 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   BACKEND_HOST: z.string().default('bbstat.localhost'),
   BACKEND_PORT: z.coerce.number().int().positive().default(8443),
+  // TLS toggle. In local dev the backend terminates HTTPS itself against the
+  // self-signed cert under etc/tls/. In containerized deployments TLS is
+  // terminated upstream (Traefik in dev-stack, the production reverse proxy
+  // in prod), and the backend listens on plain HTTP behind it. Set 'off' in
+  // those environments. When 'on' (the default), TLS_KEY_PATH / TLS_CERT_PATH
+  // must resolve to readable files.
+  BACKEND_TLS: z.enum(['on', 'off']).default('on'),
   TLS_KEY_PATH: z.string().default('etc/tls/server.key'),
   TLS_CERT_PATH: z.string().default('etc/tls/server.crt'),
   DATABASE_URL: z.string().url(),

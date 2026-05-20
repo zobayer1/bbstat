@@ -14,6 +14,7 @@ const sample: RepoActivity = {
     workspace: 'tigerit',
     slug: 'r1',
     fullName: 'tigerit/r1',
+    project: 'COMM',
     syncStatus: 'ok',
   },
   dailyCommits: [{ date: '2026-05-12', commits: 4, additions: 0, deletions: 0 }],

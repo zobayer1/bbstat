@@ -64,14 +64,21 @@ Any time you do one of the following:
 ```
 bbstat/
 ├── apps/
-│   ├── backend/        # Fastify HTTPS API + sync runner (Node.js, TS, Drizzle, Redis, Vitest)
-│   └── frontend/       # Vue 3 SPA (Vite, Pinia, vue-router, Tailwind 4, Vitest)
-├── etc/tls/            # Local self-signed CA + server cert for bbstat.localhost (NOT committed)
-├── docker-compose.yml  # postgres + redis for local dev
-├── eslint.config.js    # Flat config, applies to all workspaces
-├── tsconfig.base.json  # Shared strict TS settings
-├── pnpm-workspace.yaml # Workspaces: apps/*, packages/*
-├── .env.example        # Copy to .env at repo root for both apps
+│   ├── backend/                # Fastify HTTPS API + sync runner (Node.js, TS, Drizzle, Redis, Vitest)
+│   │   └── Dockerfile          # Multi-stage → distroless nodejs22 runtime (backend + sync + migrate)
+│   └── frontend/               # Vue 3 SPA (Vite, Pinia, vue-router, Tailwind 4, Vitest)
+│       ├── Dockerfile          # Multi-stage → nginx-unprivileged runtime
+│       └── nginx.conf          # SPA fallback + /api/* proxy to backend service
+├── etc/
+│   ├── tls/                    # Local self-signed CA + server cert (NOT committed)
+│   └── traefik/                # Traefik dynamic config (TLS file provider)
+├── compose.yaml                # Production base — 4 services (migrate, backend, sync, frontend)
+├── compose.override.yaml       # Dev-only overlay — adds postgres, redis, traefik + dev wiring
+├── eslint.config.js            # Flat config, applies to all workspaces
+├── tsconfig.base.json          # Shared strict TS settings
+├── pnpm-workspace.yaml         # Workspaces: apps/*, packages/*; pnpm.overrides
+├── .env.example                # Host workflow env (`make dev` + `make up-deps`)
+├── .env.docker.example         # Containerized stack env (loaded by compose `env_file:`)
 └── tracked-repos.yaml.example  # Copy to tracked-repos.yaml — curated seed list (gitignored)
 ```
 
@@ -83,11 +90,20 @@ The root `Makefile` is the canonical entry point — prefer `make <target>` when
 
 ```bash
 make install                 # pnpm install (all workspaces)
-make up         / make down  # docker compose up -d / down (postgres + redis)
-make ps         / make logs  # service status / tail logs
-make reset                   # docker compose down -v (wipes pg/redis volumes)
 
-make dev                     # backend + frontend in parallel (HTTPS)
+# Containerized stack — full image-built parity with prod (compose.yaml + override).
+make up                      # Full stack: pg + redis + traefik + migrate + backend + sync + frontend
+make up-deps                 # Just pg + redis (for the `make dev` host workflow)
+make down                    # Stop everything (volumes preserved)
+make reset                   # Stop AND drop volumes (wipes pg + redis data)
+make ps          / make logs # Service status / tail logs across the stack
+make logs-pg / -redis / -backend / -frontend / -sync / -traefik
+make build-images            # docker compose build backend frontend
+make stack-migrate           # Re-run the one-shot Drizzle migrator against the stack pg
+make stack-rebuild           # `compose up -d --build` — rebuild + rolling-restart
+
+# Host hot-reload workflow — backend via tsx, frontend via Vite, both on the host.
+make dev                     # backend + frontend in parallel (HTTPS, host pnpm)
 make dev-backend             # backend only (https://bbstat.localhost:8443)
 make dev-frontend            # frontend only (https://bbstat.localhost:5173)
 make dev-sync                # background sync runner (cron-mode stub)
@@ -127,7 +143,7 @@ pnpm --filter @bbstat/frontend exec vitest run tests/StatCard.test.ts
 2. **Trust the local CA** — `etc/tls/ca.crt` must be imported into the OS / browser trust store, otherwise the dev server will throw cert warnings. Each developer does this once on their machine.
 3. **Copy `.env.example` to `.env`** at the repo root. Both apps load it (backend via `node --env-file`, frontend via Vite's `loadEnv`). Fill in BitBucket credentials when ready to ingest.
 4. **Copy `tracked-repos.yaml.example` to `tracked-repos.yaml`** at the repo root and edit the `repos:` list. The file is **seed-only**: each `<workspace>/<slug>` entry is auto-inserted into `repositories` on the next `runReposSync` / `runDiscoverySync` (no restart needed), and per-flag values like `diffStats` / `archived` seed the initial column values. Once a row exists, the DB is canonical — admin endpoints (`POST /repositories/:ws/:slug/archive`, `/unarchive`) or direct SQL flip the flags, and those changes survive every subsequent discovery sync. Removing a repo from YAML does **not** untrack it; use the archive endpoint. Override the location with `SEED_REPO_FILE_PATH` in `.env` (default: `tracked-repos.yaml` at the repo root; a missing default file is a no-op).
-5. **Postgres + Redis** — start via `docker compose up -d` before running the backend.
+5. **Postgres + Redis** — start via `make up-deps` (just pg + redis) before running the backend with `make dev`. Or use `make up` to launch the full containerized stack instead (see below).
 
 ## Local TLS (`etc/tls/`)
 
@@ -139,6 +155,39 @@ Both Vite and Fastify load these at startup:
 - Frontend: `apps/frontend/vite.config.ts` reads the same files.
 
 Do **not** regenerate `ca.crt` / `ca.key` casually once developers have trusted them — they'll have to re-trust the new CA. Server cert can be re-issued from the same CA without breaking trust.
+
+## Container stack (compose) — two workflows
+
+The project supports two coexisting development workflows. Pick based on what you're working on:
+
+| Workflow                 | Command                     | What runs where                                                                                                                                                   | When to use                                                                                           |
+| ------------------------ | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Host hot-reload**      | `make up-deps` + `make dev` | pg + redis in containers; backend (`tsx watch`) + Vite dev server on the host. HMR, cross-origin to backend via CORS (`https://bbstat.localhost:5173` → `:8443`). | Default for iterative work. Edits land instantly.                                                     |
+| **Containerized parity** | `make up`                   | Everything in containers behind Traefik at `https://bbstat.localhost`. nginx serves the built SPA, proxies same-origin `/api/*` to the backend service. No HMR.   | Validating the production wire format — nginx config, same-origin routing, the migrate one-shot, etc. |
+
+### Compose file split
+
+- **`compose.yaml`** (production base) defines 4 services: `migrate` (one-shot Drizzle migrator), `backend`, `sync`, `frontend`. No postgres, no redis, no Traefik — those are externally managed in production. `DATABASE_URL` / `REDIS_URL` are required at deploy time (`${VAR:?msg}` syntax fails fast if missing).
+- **`compose.override.yaml`** (auto-loaded for dev only — production deploys pass `-f compose.yaml` to skip it) adds `postgres` + `redis` + `traefik`, rewires `DATABASE_URL` / `REDIS_URL` to those internal services, mounts `tracked-repos.yaml` into backend + sync, and attaches Traefik routing labels to the frontend.
+
+### What changes in the container vs host
+
+- **Backend listens on plain HTTP** (`BACKEND_TLS=off`) on port 8080. The reverse proxy (Traefik in dev, deployer's proxy in prod) is the public TLS edge. The backend image doesn't ship certs and won't start with `BACKEND_TLS=on`.
+- **Frontend is built (not Vite-dev) and served by nginx**. `VITE_API_BASE_URL=""` is baked at build time so `/api/*` resolves same-origin; nginx then proxies internally to `backend:8080` over the compose network. The legacy cross-origin `:8443` route is unused in the containerized stack.
+- **One image, three roles**: backend, sync, and migrate are all the same `apps/backend/Dockerfile` artifact with different `command:` overrides (`dist/index.js`, `dist/sync/index.js`, `dist/scripts/migrate.js`). Keep changes that affect all three lockstep — there's no per-role image.
+- **Migrate gates the rest**: backend + sync use compose's `depends_on: service_completed_successfully` against the migrate one-shot. A failed migration prevents the dependents from ever starting.
+- **`SEED_REPO_FILE_PATH` is pinned to `/app/tracked-repos.yaml`** in `compose.yaml`. The source-relative `repoRoot` calculation in `index.ts` resolves to `/` inside the flat container layout, so explicit pinning keeps the seed loader pointed somewhere sensible. The dev override bind-mounts the host file at that path.
+
+### Env files
+
+- **`.env`** (host workflow) — loaded by `node --env-file` and Vite's `loadEnv()`. Has `DATABASE_URL` / `REDIS_URL` pointing at the host ports (`localhost:15432`, `localhost:16379`) and all the dev-server config.
+- **`.env.docker`** (containerized stack, gitignored) — loaded by compose's `env_file:` for migrate / backend / sync. Trimmed shape documented in `.env.docker.example`. Does NOT contain `DATABASE_URL` / `REDIS_URL` (compose sets those) or `VITE_*` (frontend bundle is built, runtime overrides have no effect).
+
+### Reverse proxy: dev vs production
+
+The dev Traefik in `compose.override.yaml` is a **dev fixture** — it mirrors the production wire format (TLS termination upstream, plain HTTP to the frontend container, frontend proxies `/api/*` to backend internally) so you catch nginx/Traefik config bugs locally. **In production, the deployer's existing reverse proxy plays Traefik's role** — `compose.yaml` ships no proxy, only publishes the frontend container's port.
+
+If a change touches the public wire format (nginx config, frontend's `/api` proxy_pass, Traefik labels), validate with `make up` (containerized parity) before merging — `make dev` doesn't go through nginx and can mask the bug.
 
 ## Quality bar — zero errors, zero warnings
 

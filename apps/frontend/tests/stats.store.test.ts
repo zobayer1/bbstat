@@ -27,6 +27,9 @@ const sampleContributors = [
     displayName: 'Alice',
     commits: 42,
     last30Days: new Array(30).fill(0),
+    additionsWindow: 0,
+    deletionsWindow: 0,
+    reposWindow: 1,
   },
   {
     userId: 2,
@@ -34,6 +37,9 @@ const sampleContributors = [
     displayName: 'Bob',
     commits: 17,
     last30Days: new Array(30).fill(0),
+    additionsWindow: 0,
+    deletionsWindow: 0,
+    reposWindow: 1,
   },
 ];
 const sampleRepositories = [
@@ -44,6 +50,8 @@ const sampleRepositories = [
     project: 'COMM',
     commits30d: 30,
     contributors30d: 4,
+    additions30d: 0,
+    deletions30d: 0,
     lastCommitAt: '2026-05-12T00:00:00.000Z',
     syncStatus: 'ok' as const,
   },
@@ -106,7 +114,16 @@ describe('stats store', () => {
 
   it('setContributorsWindow() refetches with the new window', async () => {
     vi.mocked(api.topContributors).mockResolvedValueOnce([
-      { userId: 9, bitbucketUuid: '{u9}', displayName: 'Carol', commits: 200, last30Days: new Array(30).fill(0) },
+      {
+        userId: 9,
+        bitbucketUuid: '{u9}',
+        displayName: 'Carol',
+        commits: 200,
+        last30Days: new Array(30).fill(0),
+        additionsWindow: 0,
+        deletionsWindow: 0,
+        reposWindow: 1,
+      },
     ]);
     const store = useStatsStore();
 

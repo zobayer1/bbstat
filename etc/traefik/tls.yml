@@ -1,0 +1,38 @@
+# Dynamic TLS configuration for Traefik (file provider).
+#
+# compose.override.yaml mounts `./etc/traefik` at `/etc/traefik/dynamic` and
+# `./etc/tls` at `/etc/tls` inside the Traefik container, and Traefik watches
+# the dynamic directory for changes. Edits here land without restarting.
+#
+# The certificate referenced below is the per-developer self-signed leaf
+# under etc/tls/ (gitignored — see CLAUDE.md's "Local TLS" section). It must
+# be signed by the local CA whose root cert (etc/tls/ca.crt) has been trusted
+# in the developer's OS / browser store, and its SAN must include every host
+# routed through Traefik:
+#
+#   bbstat.localhost
+#   traefik.localhost
+#   localhost
+#   127.0.0.1
+#
+# If you see a Traefik default-cert warning in the browser, the leaf cert's
+# SAN list is missing the hostname being requested — regenerate from
+# etc/tls/server.san.
+
+tls:
+  certificates:
+    - certFile: /etc/tls/server.crt
+      keyFile: /etc/tls/server.key
+
+  # Pin the same cert as Traefik's default so SNI mismatches don't fall
+  # through to Traefik's built-in self-signed cert (which the OS trust store
+  # has never seen).
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/tls/server.crt
+        keyFile: /etc/tls/server.key
+
+  options:
+    default:
+      minVersion: VersionTLS12

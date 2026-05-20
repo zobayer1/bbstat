@@ -51,6 +51,7 @@ Thumbs.db
 .env.production
 .env.docker
 !.env.example
+!.env.docker.example
 
 # --- Local TLS material ---
 # Per-developer self-signed CA + server cert. See CLAUDE.md / etc/tls/README.

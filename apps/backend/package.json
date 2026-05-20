@@ -15,6 +15,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
     "start:sync": "node --env-file-if-exists=../../.env dist/sync/index.js",
+    "start:migrate": "node --env-file-if-exists=../../.env dist/scripts/migrate.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

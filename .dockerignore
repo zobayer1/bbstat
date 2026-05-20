@@ -1,0 +1,42 @@
+# Keep the build context lean — anything excluded here never ships to the
+# Docker daemon and never appears inside any image layer.
+
+# Build outputs
+**/dist
+**/build
+**/.vite
+**/coverage
+**/*.tsbuildinfo
+
+# Local installs (re-created inside the image)
+**/node_modules
+
+# VCS + IDE
+.git
+.github
+.idea
+.vscode
+
+# Local-only TLS material (mounted into the dev Traefik container at runtime;
+# never baked into app images)
+etc/tls
+etc/traefik
+
+# Local env (compose injects env separately; images must never bake env in).
+# Example files are allowlisted so .dockerignore matches .gitignore behavior.
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# Seed file is mounted at runtime, not baked into the image
+tracked-repos.yaml
+
+# Orchestration files — used by docker compose on the host, never inside images
+compose*.yaml
+docker-compose.yml
+Makefile
+
+# Logs, OS junk
+**/*.log
+.DS_Store

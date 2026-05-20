@@ -9,5 +9,11 @@ allowBuilds:
 
 # Force-bump transitive deps that ship deprecated versions to keep
 # `pnpm install` quiet (zero-warnings policy — see README/CLAUDE.md).
+#
+# - `vite`: deduplicates vitest@2's transitive vite@5 against the frontend's
+#   direct vite@6. Without this, `vue-tsc -b` fails with two Plugin<> type
+#   identities (vite@5 vs vite@6) when walking node_modules. vitest@2 runs
+#   fine against vite@6 in practice.
 overrides:
   glob: '^11.0.0'
+  vite: '^6.0.0'

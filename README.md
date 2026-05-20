@@ -16,8 +16,8 @@ A dashboard-style web application for reviewing developer contributions across a
 | Server-side cache      | Redis 7 — _scoped to user-summary rollups only_                                                        |
 | Background sync        | node-cron + shared `runSync()` for manual / cron / webhook triggers (see [docs/sync.md](docs/sync.md)) |
 | Admin endpoints        | `/api/admin/*` for sync triggers + curated-repo management (see [docs/admin.md](docs/admin.md))        |
-| Reverse proxy / TLS    | Traefik (planned), self-signed CA for local dev (`etc/tls/`)                                           |
-| Container runtime      | Docker CE (Postgres + Redis via `docker-compose.yml`)                                                  |
+| Reverse proxy / TLS    | Traefik 3 in dev (`compose.override.yaml`), deployer's proxy in prod; self-signed CA for local dev     |
+| Container runtime      | Docker CE — full stack via `compose.yaml` + `compose.override.yaml` (multi-stage, distroless backend)  |
 | Tests / lint / format  | Vitest, ESLint flat config, Prettier                                                                   |
 | Package mgr / monorepo | pnpm workspaces                                                                                        |
 
@@ -26,13 +26,16 @@ A dashboard-style web application for reviewing developer contributions across a
 ```
 bbstat/
 ├── apps/
-│   ├── backend/        # Fastify HTTPS API + sync runner
-│   └── frontend/       # Vue 3 SPA
-├── etc/tls/            # Local self-signed CA + server cert (gitignored)
-├── docker-compose.yml  # postgres + redis for local dev
-├── eslint.config.js    # Flat config, applies to all workspaces
-├── tsconfig.base.json  # Shared strict TS settings
-└── pnpm-workspace.yaml # Workspaces, build allowlist, dep overrides
+│   ├── backend/                # Fastify HTTPS API + sync runner + Dockerfile (distroless)
+│   └── frontend/               # Vue 3 SPA + Dockerfile (nginx) + nginx.conf
+├── etc/
+│   ├── tls/                    # Local self-signed CA + server cert (gitignored)
+│   └── traefik/                # Traefik dynamic TLS config
+├── compose.yaml                # Production base — migrate/backend/sync/frontend
+├── compose.override.yaml       # Dev overlay — adds postgres, redis, traefik
+├── eslint.config.js            # Flat config, applies to all workspaces
+├── tsconfig.base.json          # Shared strict TS settings
+└── pnpm-workspace.yaml         # Workspaces, build allowlist, dep overrides
 ```
 
 ## Prerequisites
@@ -46,29 +49,50 @@ bbstat/
 ## Quick start
 
 ```bash
-corepack enable                              # one-time, enables pnpm
-make install                                 # install all workspaces
-cp .env.example .env                         # fill in BitBucket creds when ready
-cp tracked-repos.yaml.example tracked-repos.yaml  # curated tracked-repo seed list (gitignored)
-make up                                      # start postgres + redis
-make dev                                     # backend on :8443, frontend on :5173 (both HTTPS)
+corepack enable                                   # one-time, enables pnpm
+make install                                      # install all workspaces
+cp .env.example .env                              # fill in BitBucket creds when ready
+cp tracked-repos.yaml.example tracked-repos.yaml  # curated seed list (gitignored)
 ```
 
-Open `https://bbstat.localhost:5173`.
+Then pick a run mode from the table below.
+
+## Run modes
+
+Five ways to run the stack — local without containers (HTTP or HTTPS), full local Docker (with Traefik), or production-base Docker (with or without an external Traefik). Use this table to pick the one that matches what you're working on.
+
+| #   | Mode                                 | When to reach for it                                                          | Prerequisites                                                                                                                                                                        | Commands                                                                                         | URL                                            |
+| --- | ------------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| 1   | **Local HTTP** (host pnpm)           | Quick API iteration without cert hassle; debugging mixed-content edge cases   | In `.env`: `BACKEND_TLS=off`, `FRONTEND_TLS=off`, `VITE_API_BASE_URL=http://bbstat.localhost:8443`. Browsers refuse to mix HTTP+HTTPS — both servers must flip together.             | `make up-deps` (pg + redis) <br/> `make dev`                                                     | `http://bbstat.localhost:5173`                 |
+| 2   | **Local HTTPS** (host pnpm, default) | Day-to-day iterative work — HMR, instant restarts                             | `etc/tls/server.{crt,key}` generated; `etc/tls/ca.crt` trusted in your OS/browser store                                                                                              | `make up-deps` <br/> `make dev`                                                                  | `https://bbstat.localhost:5173`                |
+| 3   | **Local Docker + Traefik HTTPS**     | Validating the containerized wire format — nginx config, same-origin `/api/*` | `etc/tls/` populated; `.env.docker` (auto-created from `.env.docker.example` on first `make up`) with BitBucket creds                                                                | `make up` <br/>(brings up pg + redis + traefik + migrate + backend + sync + frontend)            | `https://bbstat.localhost`                     |
+| 4   | **Prod base + external Traefik**     | Dry-running the production wire format with managed pg + redis                | `DATABASE_URL` + `REDIS_URL` exported in shell pointing at your external pg/redis; a Traefik you operate elsewhere configured to upstream to the frontend container's published port | `docker compose -f compose.yaml up -d` <br/>(NO override file — opt-out of dev pg/redis/traefik) | Whatever your reverse proxy exposes            |
+| 5   | **Prod base, no Traefik (HTTP)**     | Quick HTTP smoke against the production-base stack with no TLS layer          | Same as #4 minus the proxy                                                                                                                                                           | `docker compose -f compose.yaml up -d` <br/>Hit the frontend container's published port directly | `http://localhost:${FRONTEND_HOST_PORT:-8080}` |
+
+**Notes**
+
+- Mode 3 is what `make up` runs — `compose.override.yaml` is auto-loaded alongside `compose.yaml` (compose convention). Modes 4 and 5 opt out of the override via the explicit `-f compose.yaml` flag.
+- Modes 4 + 5 need `DATABASE_URL` and `REDIS_URL` set in the shell, since `compose.yaml` declares them with `${VAR:?msg}` (fails fast if missing).
+- The backend always listens on plain HTTP inside containers (`BACKEND_TLS=off` baked into the image); modes 4 and 5 rely on the external proxy (or none) for the public TLS layer, never the backend.
+- The frontend image bakes `VITE_API_BASE_URL=""` at build time, so the SPA always requests same-origin `/api/*`. Modes 4 + 5 inherit that; whatever proxy fronts the frontend container must forward `/api/*` paths to the same upstream (nginx-in-container already does this internally — see `apps/frontend/nginx.conf`).
 
 ## Common commands
 
 The root `Makefile` is the canonical entry point for everyday workflows. `make help` lists every target. Most common:
 
 ```bash
-# Docker dependencies
-make up              # start postgres + redis
+# Container stack (compose.yaml + compose.override.yaml)
+make up              # full stack: pg + redis + traefik + backend + sync + frontend
+make up-deps         # just pg + redis (for the host hot-reload workflow)
 make down            # stop (keeps volumes)
 make reset           # stop AND drop volumes
 make ps              # service status
-make logs            # tail all service logs
+make logs            # tail all service logs (use logs-backend / logs-frontend / etc. for per-service)
+make build-images    # docker compose build backend frontend
+make stack-migrate   # one-shot Drizzle migrator against the stack's postgres
+make stack-rebuild   # rebuild images + rolling-restart
 
-# Dev servers
+# Host hot-reload (Vite HMR + tsx watch)
 make dev             # both apps in parallel
 make dev-backend     # backend only (https://bbstat.localhost:8443)
 make dev-frontend    # frontend only (https://bbstat.localhost:5173)

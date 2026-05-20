@@ -1,0 +1,145 @@
+# Dev-only overlay. Auto-loaded by `docker compose up` (no `-f` flag) when it
+# sits next to compose.yaml — so it must NEVER apply in production. Production
+# deploys pass `-f compose.yaml` explicitly to skip this file.
+#
+# What this file adds:
+#   * postgres + redis      — local dev backing services on non-standard host
+#                             ports (15432 / 16379) to avoid colliding with
+#                             host installs or other projects' containers.
+#   * traefik (v3)          — terminates HTTPS at bbstat.localhost using the
+#                             self-signed CA under etc/tls/, mirroring how the
+#                             production reverse proxy fronts the stack.
+#   * frontend labels       — route Host(bbstat.localhost) → frontend service
+#                             via Traefik (HTTP→HTTPS redirect included).
+#   * DATABASE_URL/REDIS_URL — override the deploy-env values from compose.yaml
+#                              to point at the internal `postgres` / `redis`
+#                              service names on the bbstat_default network.
+#   * tracked-repos.yaml    — bind-mounted into backend + sync at the path
+#                              compose.yaml pinned (/app/tracked-repos.yaml).
+#                              File must exist on the host (`make dev` workflow
+#                              already requires it).
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: bbstat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bbstat
+      POSTGRES_PASSWORD: bbstat
+      POSTGRES_DB: bbstat
+    # 127.0.0.1 binding keeps the dev port off public interfaces. Override
+    # via POSTGRES_HOST_PORT in .env if 15432 is taken.
+    ports:
+      - '127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432'
+    volumes:
+      - bbstat-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U bbstat -d bbstat']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: bbstat-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '127.0.0.1:${REDIS_HOST_PORT:-16379}:6379'
+    volumes:
+      - bbstat-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  traefik:
+    image: traefik:v3.6.2
+    container_name: bbstat-traefik
+    restart: unless-stopped
+    command:
+      - '--providers.docker=true'
+      - '--providers.docker.exposedbydefault=false'
+      # Dashboard at https://traefik.localhost — `api.insecure=true` is fine
+      # for local dev (no public exposure).
+      - '--api.insecure=true'
+      # Dynamic config (TLS cert pointers) — see etc/traefik/tls.yml.
+      - '--providers.file.directory=/etc/traefik/dynamic'
+      - '--providers.file.watch=true'
+      - '--entrypoints.web.address=:80'
+      - '--entrypoints.websecure.address=:443'
+      - '--log.level=INFO'
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./etc/traefik:/etc/traefik/dynamic:ro
+      - ./etc/tls:/etc/tls:ro
+    labels:
+      # Traefik routes itself so the dashboard is reachable on the same TLS.
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.traefik.rule=Host(`traefik.localhost`)'
+      - 'traefik.http.routers.traefik.entrypoints=websecure'
+      - 'traefik.http.routers.traefik.tls=true'
+      - 'traefik.http.routers.traefik.service=api@internal'
+
+  # ─── Overrides on the production services ─────────────────────────────────
+  # compose merges these into the base entries from compose.yaml: environment
+  # is merged per-key, depends_on lists are unioned, volumes are appended.
+
+  migrate:
+    environment:
+      DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    environment:
+      DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./tracked-repos.yaml:/app/tracked-repos.yaml:ro
+
+  sync:
+    environment:
+      DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./tracked-repos.yaml:/app/tracked-repos.yaml:ro
+
+  frontend:
+    labels:
+      - 'traefik.enable=true'
+      # Tell Traefik which docker network to use to reach this service. The
+      # compose project name is `bbstat` (= the directory), so the auto-
+      # created default network is `bbstat_default`.
+      - 'traefik.docker.network=bbstat_default'
+      - 'traefik.http.services.bbstat-frontend.loadbalancer.server.port=8080'
+      # HTTPS router on :443
+      - 'traefik.http.routers.bbstat-frontend-secure.rule=Host(`bbstat.localhost`)'
+      - 'traefik.http.routers.bbstat-frontend-secure.entrypoints=websecure'
+      - 'traefik.http.routers.bbstat-frontend-secure.tls=true'
+      - 'traefik.http.routers.bbstat-frontend-secure.service=bbstat-frontend'
+      # HTTP router on :80 → permanent redirect to HTTPS
+      - 'traefik.http.routers.bbstat-frontend-http.rule=Host(`bbstat.localhost`)'
+      - 'traefik.http.routers.bbstat-frontend-http.entrypoints=web'
+      - 'traefik.http.routers.bbstat-frontend-http.middlewares=bbstat-redirect'
+      - 'traefik.http.middlewares.bbstat-redirect.redirectscheme.scheme=https'
+
+volumes:
+  bbstat-pg-data:
+  bbstat-redis-data:

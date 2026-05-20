@@ -7,6 +7,7 @@ const testConfig: AppConfig = {
   NODE_ENV: 'test',
   BACKEND_HOST: 'localhost',
   BACKEND_PORT: 0,
+  BACKEND_TLS: 'on',
   TLS_KEY_PATH: 'etc/tls/server.key',
   TLS_CERT_PATH: 'etc/tls/server.crt',
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',

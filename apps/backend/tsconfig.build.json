@@ -5,7 +5,11 @@
     "declaration": false,
     "sourceMap": true,
     "module": "NodeNext",
-    "moduleResolution": "NodeNext"
+    "moduleResolution": "NodeNext",
+    // Scope rootDir to src/ so emit is flat under dist/ (dist/index.js,
+    // dist/scripts/migrate.js, …). The base tsconfig.json's rootDir is "."
+    // because it has to include both src/ and tests/ for typecheck.
+    "rootDir": "src"
   },
   "include": ["src/**/*"],
   "exclude": ["tests/**/*", "**/*.test.ts", "vitest.config.ts", "drizzle.config.ts"]

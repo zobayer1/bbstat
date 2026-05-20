@@ -19,19 +19,30 @@ help: ## Show this help
 		/^[a-zA-Z_-]+:.*##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 # ---------------------------------------------------------------------------
-# Docker dependencies (postgres + redis)
+# Container stack (compose.yaml + compose.override.yaml)
+#
+# Two workflows live side-by-side:
+#   * Host hot-reload (`make dev`)         — needs only postgres + redis in
+#                                            containers. Use `make up-deps`.
+#   * Containerized parity (`make up`)     — full stack (pg, redis, traefik,
+#                                            migrate, backend, sync, frontend)
+#                                            served at https://bbstat.localhost.
 # ---------------------------------------------------------------------------
 
 .PHONY: up
-up: ## Start postgres + redis in the background
+up: env-init env-docker-init ## Start the full containerized stack (pg, redis, traefik, backend, sync, frontend)
 	$(COMPOSE) up -d
 
+.PHONY: up-deps
+up-deps: env-init ## Start only postgres + redis (for the `make dev` host workflow)
+	$(COMPOSE) up -d postgres redis
+
 .PHONY: down
-down: ## Stop postgres + redis (preserves volumes)
+down: ## Stop the stack (preserves volumes)
 	$(COMPOSE) down
 
 .PHONY: reset
-reset: ## Stop services AND drop volumes (wipes Postgres/Redis data)
+reset: ## Stop the stack AND drop volumes (wipes Postgres/Redis data)
 	$(COMPOSE) down -v
 
 .PHONY: ps
@@ -50,6 +61,34 @@ logs-pg: ## Tail logs for Postgres only
 logs-redis: ## Tail logs for Redis only
 	$(COMPOSE) logs -f --tail=100 redis
 
+.PHONY: logs-backend
+logs-backend: ## Tail logs for the backend container
+	$(COMPOSE) logs -f --tail=100 backend
+
+.PHONY: logs-frontend
+logs-frontend: ## Tail logs for the frontend (nginx) container
+	$(COMPOSE) logs -f --tail=100 frontend
+
+.PHONY: logs-sync
+logs-sync: ## Tail logs for the sync runner container
+	$(COMPOSE) logs -f --tail=100 sync
+
+.PHONY: logs-traefik
+logs-traefik: ## Tail logs for the dev Traefik container
+	$(COMPOSE) logs -f --tail=100 traefik
+
+.PHONY: build-images
+build-images: ## Build backend + frontend Docker images
+	$(COMPOSE) build backend frontend
+
+.PHONY: stack-migrate
+stack-migrate: ## Run the one-shot Drizzle migrator against the stack's postgres
+	$(COMPOSE) run --rm migrate
+
+.PHONY: stack-rebuild
+stack-rebuild: ## Rebuild images and restart the stack (use after code changes)
+	$(COMPOSE) up -d --build
+
 # ---------------------------------------------------------------------------
 # Install / dev
 # ---------------------------------------------------------------------------
@@ -58,14 +97,22 @@ logs-redis: ## Tail logs for Redis only
 install: env-init ## Install all workspace dependencies
 	$(PNPM) install
 
-# .env is auto-created from .env.example on first run. Declared as a real
-# file rule so the copy fires only when .env is missing.
+# .env / .env.docker are auto-created from their respective .example files on
+# first run. Declared as real file rules so the copy fires only when the
+# target is missing.
 .env:
 	@cp .env.example .env
 	@echo "→ Created .env from .env.example (edit it to add BitBucket credentials)"
 
+.env.docker:
+	@cp .env.docker.example .env.docker
+	@echo "→ Created .env.docker from .env.docker.example (edit it to add BitBucket credentials)"
+
 .PHONY: env-init
 env-init: .env ## Bootstrap .env from .env.example if missing
+
+.PHONY: env-docker-init
+env-docker-init: .env.docker ## Bootstrap .env.docker from .env.docker.example if missing
 
 .PHONY: dev
 dev: env-init ## Run backend + frontend dev servers in parallel

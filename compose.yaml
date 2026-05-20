@@ -1,0 +1,112 @@
+# ShipShow! / bbstat — production base.
+#
+# This file describes the four containerized services that ship in production:
+#
+#   migrate   — one-shot Drizzle migrator; gates backend + sync via
+#               `service_completed_successfully`. Exits 0 on success, 1 on
+#               failure (which keeps the dependents from ever starting).
+#   backend   — Fastify API. Plain HTTP behind your reverse proxy (which
+#               terminates TLS). Same-origin /api/* served on the public host.
+#   sync      — Cron-driven sync runner. Same image as backend, different
+#               command. Hits BitBucket on schedules from env.
+#   frontend  — nginx serving the Vite-built SPA. Proxies /api/* internally
+#               to the backend service. The only service that publishes a
+#               host port — your reverse proxy upstreams to it.
+#
+# Intentionally absent from this file:
+#   * postgres / redis — production uses externally managed services. The
+#     compose.override.yaml adds local containers for dev only.
+#   * traefik — production already has a reverse proxy in front of this
+#     stack; the override adds Traefik to mirror that wire format in dev.
+#
+# DATABASE_URL and REDIS_URL are NOT in `.env.docker`; they come from the
+# deploy environment (`:?` syntax fails fast if they're missing). Everything
+# else with sensible defaults lives in `.env.docker` (see .env.docker.example).
+#
+# Image policy: `${BACKEND_IMAGE}` / `${FRONTEND_IMAGE}` let prod deployers
+# pull a registry-tagged build; the `build:` blocks make `docker compose
+# build` work locally and in CI.
+
+# Anchors: backend image config is reused by all three backend-role services.
+x-backend-image: &backend-image
+  image: ${BACKEND_IMAGE:-bbstat-backend:latest}
+  build:
+    context: .
+    dockerfile: apps/backend/Dockerfile
+
+# Shared env for the API + sync containers. Migrate gets only what it needs.
+x-backend-env: &backend-env
+  env_file:
+    - .env.docker
+  environment:
+    DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in the deploy environment}
+    REDIS_URL: ${REDIS_URL:?REDIS_URL must be set in the deploy environment}
+    # The image's flat /app/{dist,drizzle,...} layout makes the source-relative
+    # `repoRoot` calculation in index.ts resolve to "/" inside the container.
+    # Pin SEED_REPO_FILE_PATH explicitly to /app/tracked-repos.yaml so the seed
+    # loader doesn't go hunting in / — and so bind-mounting the file at that
+    # path lights it up without any other config. Default is unmounted ⇒ the
+    # loader treats it as a no-op (admin uses POST /api/admin/repositories).
+    SEED_REPO_FILE_PATH: /app/tracked-repos.yaml
+
+services:
+  migrate:
+    <<: *backend-image
+    command: ['dist/scripts/migrate.js']
+    env_file:
+      - .env.docker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in the deploy environment}
+    restart: 'no'
+
+  backend:
+    <<: [*backend-image, *backend-env]
+    # Default CMD is dist/index.js — no override needed.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      # Distroless has no shell or curl, only /nodejs/bin/node. Use Node 22's
+      # built-in fetch to hit the in-container /healthz route.
+      test:
+        - CMD
+        - /nodejs/bin/node
+        - -e
+        - "fetch('http://127.0.0.1:8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  sync:
+    <<: [*backend-image, *backend-env]
+    command: ['dist/sync/index.js']
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # No healthcheck: the sync runner is a long-lived process with no HTTP
+    # surface. If it crashes, the restart policy takes over; we'd rather
+    # avoid surfacing false-positive "unhealthy" between cron ticks.
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-bbstat-frontend:latest}
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # The deployer's reverse proxy upstreams to this host port. Override
+      # via FRONTEND_HOST_PORT if 8080 collides with something else on the
+      # host. The container itself always listens on 8080 (nginx-unprivileged
+      # default; can't go below 1024 without CAP_NET_BIND_SERVICE).
+      - '${FRONTEND_HOST_PORT:-8080}:8080'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1:8080/healthz']
+      interval: 30s
+      timeout: 3s
+      retries: 3

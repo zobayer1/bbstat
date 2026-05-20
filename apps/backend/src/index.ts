@@ -31,10 +31,13 @@ async function main(): Promise<void> {
   const logger = createLogger(config.NODE_ENV);
 
   const repoRoot = resolve(import.meta.dirname, '..', '..', '..');
-  const https = {
-    key: readFileSync(resolve(repoRoot, config.TLS_KEY_PATH)),
-    cert: readFileSync(resolve(repoRoot, config.TLS_CERT_PATH)),
-  };
+  const https =
+    config.BACKEND_TLS === 'on'
+      ? {
+          key: readFileSync(resolve(repoRoot, config.TLS_KEY_PATH)),
+          cert: readFileSync(resolve(repoRoot, config.TLS_CERT_PATH)),
+        }
+      : undefined;
 
   // The DB is always available (it's a hard requirement), so the read-side
   // stats store is always constructed and the dashboard endpoints are always
@@ -121,7 +124,7 @@ async function main(): Promise<void> {
   const app = await buildApp({
     config,
     logger,
-    https,
+    ...(https ? { https } : {}),
     syncDeps,
     statsStore,
     bus,
@@ -130,7 +133,8 @@ async function main(): Promise<void> {
 
   try {
     await app.listen({ host: '0.0.0.0', port: config.BACKEND_PORT });
-    app.log.info(`Listening on https://${config.BACKEND_HOST}:${config.BACKEND_PORT}`);
+    const scheme = https ? 'https' : 'http';
+    app.log.info(`Listening on ${scheme}://${config.BACKEND_HOST}:${config.BACKEND_PORT}`);
   } catch (err) {
     app.log.error(err);
     process.exit(1);
