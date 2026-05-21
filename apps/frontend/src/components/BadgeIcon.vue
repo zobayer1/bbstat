@@ -63,13 +63,20 @@ const META: Record<UserBadge, { label: string; tone: string; shape: Shape; title
 
 const meta = computed(() => (props.badge === null ? null : META[props.badge]));
 
-// Tier ring classes. The ring is `inset` so it sits flush against the
-// icon's rounded container without ballooning the layout, and uses a
-// muted ring-offset so it reads as a frame, not a halo.
-const TIER_RING: Record<UserBadgeTier, string> = {
-  bronze: 'ring-2 ring-inset ring-amber-700',
-  silver: 'ring-2 ring-inset ring-slate-400',
-  gold: 'ring-2 ring-inset ring-yellow-500',
+// Background tint by tier — bronze / silver / gold. Replaces the default
+// soft tinted-by-icon-color circle when a tier is present. The icon glyph
+// keeps its persona color (meta.tone) on top, so steady_eddie still
+// reads as emerald regardless of tier; the metallic halo around it
+// communicates the tier on its own.
+//
+// Opacity tuned so the persona icon stays legible against each tier
+// color: slate-400 (silver) at /30 reads cooler, yellow-500 (gold) and
+// amber-700 (bronze) at /25 give a warm halo without overpowering the
+// glyph.
+const TIER_BG: Record<UserBadgeTier, string> = {
+  bronze: 'bg-amber-700/25',
+  silver: 'bg-slate-400/30',
+  gold: 'bg-yellow-500/30',
 };
 
 const TIER_LABEL: Record<UserBadgeTier, string> = {
@@ -78,7 +85,10 @@ const TIER_LABEL: Record<UserBadgeTier, string> = {
   gold: 'Gold',
 };
 
-const ringClass = computed(() => (props.tier ? TIER_RING[props.tier] : ''));
+// Non-tiered badges get a soft circle in their own color (the "default"
+// circle so the column doesn't look ragged). Tiered badges replace it
+// with the tier color so the medal reads from across the room.
+const bgClass = computed(() => (props.tier ? TIER_BG[props.tier] : 'bg-current/10'));
 
 const fullTitle = computed(() => {
   if (!meta.value) return '';
@@ -96,7 +106,7 @@ const fullAriaLabel = computed(() => {
 <template>
   <span
     v-if="meta"
-    :class="['inline-flex h-6 w-6 items-center justify-center rounded-full', meta.tone, ringClass]"
+    :class="['inline-flex h-6 w-6 items-center justify-center rounded-full', meta.tone, bgClass]"
     :title="fullTitle"
     :aria-label="fullAriaLabel"
     role="img"

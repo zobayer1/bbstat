@@ -129,8 +129,12 @@ describe('classifyBadge', () => {
     deletions90d: 500,
   };
 
-  it('returns null for a Regular contributor', () => {
-    expect(classifyBadge(baseline)).toBeNull();
+  it('returns steady_eddie (catch-all) for a baseline Regular contributor', () => {
+    // The cascade is exhaustive for active devs — anyone who doesn't
+    // match a specialty lands in steady_eddie. The tier (assigned
+    // separately by classifyBadgeTier) is what reflects within-cohort
+    // strength.
+    expect(classifyBadge(baseline)).toBe('steady_eddie');
   });
 
   it('fresh_meat — too few days since first commit', () => {
@@ -138,26 +142,30 @@ describe('classifyBadge', () => {
   });
 
   it('returns null for dormant rows even if other persona signals are present', () => {
-    // active_days_90d=0 → dormant. UI grays the row; the badge is suppressed
-    // so a long-quiet veteran doesn't get tagged Fresh Meat or anything else.
+    // active_days_90d=0 → dormant. UI grays the row; the badge is
+    // suppressed so a long-quiet veteran doesn't get tagged Steady
+    // Eddie just because the cascade is otherwise exhaustive.
     expect(
       classifyBadge({
         ...baseline,
         activeDays90d: 0,
         consistency90d: null,
         regularity90d: null,
-        // Even if other thresholds would match, dormancy wins:
         medianChurn90d: 500,
       }),
     ).toBeNull();
   });
 
-  it('returns null for a long-tenured dev with 1–2 active days (insufficient data, not fresh)', () => {
-    // Old behavior tagged this as fresh_meat. New behavior: no badge —
-    // there's not enough recent signal for a persona, but they're not
-    // genuinely new either.
-    expect(classifyBadge({ ...baseline, activeDays90d: 2 })).toBeNull();
-    expect(classifyBadge({ ...baseline, activeDays90d: 1 })).toBeNull();
+  it('1–2 active days (cold-start) lands in steady_eddie (catch-all)', () => {
+    // Previously these returned null ("insufficient data"). Under the
+    // exhaustive cascade they get steady_eddie; tier classifier
+    // collapses null/low consistency to bronze.
+    expect(classifyBadge({ ...baseline, activeDays90d: 2, consistency90d: null, regularity90d: null })).toBe(
+      'steady_eddie',
+    );
+    expect(classifyBadge({ ...baseline, activeDays90d: 1, consistency90d: null, regularity90d: null })).toBe(
+      'steady_eddie',
+    );
   });
 
   it('fresh_meat overrides every other badge', () => {
@@ -193,31 +201,22 @@ describe('classifyBadge', () => {
     ).toBe('ai_alex');
   });
 
-  it('ai_alex — does not fire when p95 itself is below the floor', () => {
+  it('ai_alex — does not fire when p95 itself is below the floor (falls through to steady_eddie)', () => {
     expect(
       classifyBadge({
         ...baseline,
         medianChurn90d: 1,
         p95Churn90d: 100, // ratio 100 ≥ 20, but absolute p95 < 2000
       }),
-    ).toBeNull();
-  });
-
-  it('steady_eddie — high consistency and high active-day count', () => {
-    expect(
-      classifyBadge({
-        ...baseline,
-        consistency90d: 0.4,
-        activeDays90d: 30,
-      }),
     ).toBe('steady_eddie');
   });
 
-  it('steady_eddie — fires at the (relaxed) 0.33 threshold', () => {
-    // Before the threshold relaxation, 0.34 wouldn't qualify; now it does.
-    // Sanity check that the boundary still excludes 0.32.
-    expect(classifyBadge({ ...baseline, consistency90d: 0.34, activeDays90d: 30 })).toBe('steady_eddie');
-    expect(classifyBadge({ ...baseline, consistency90d: 0.32, activeDays90d: 30 })).toBeNull();
+  it('steady_eddie — the catch-all has no consistency / active-days minimum', () => {
+    // Used to require consistency ≥ 0.33 AND active_days ≥ 25. Now anyone
+    // active in the window lands in steady_eddie; the tier reflects
+    // where they sit on consistency.
+    expect(classifyBadge({ ...baseline, consistency90d: 0.4, activeDays90d: 30 })).toBe('steady_eddie');
+    expect(classifyBadge({ ...baseline, consistency90d: 0.05, activeDays90d: 4 })).toBe('steady_eddie');
   });
 
   it('batch_betty — regular spacing but few active days', () => {
@@ -242,7 +241,7 @@ describe('classifyBadge', () => {
     ).toBe('cleanup_crew');
   });
 
-  it('cleanup_crew — does not fire below the commits floor (noise guard)', () => {
+  it('cleanup_crew — does not fire below the commits floor (falls through to steady_eddie)', () => {
     expect(
       classifyBadge({
         ...baseline,
@@ -250,11 +249,10 @@ describe('classifyBadge', () => {
         deletions90d: 200,
         commits90d: 5,
       }),
-    ).toBeNull();
+    ).toBe('steady_eddie');
   });
 
-  it('null consistency does not crash the cascade', () => {
-    // dev passed fresh_meat but consistency couldn't be computed
+  it('null consistency lands in steady_eddie (catch-all) without crashing the cascade', () => {
     expect(
       classifyBadge({
         ...baseline,
@@ -262,7 +260,7 @@ describe('classifyBadge', () => {
         regularity90d: null,
         activeDays90d: 4,
       }),
-    ).toBeNull();
+    ).toBe('steady_eddie');
   });
 });
 
@@ -276,14 +274,14 @@ describe('classifyBadgeTier', () => {
     expect(classifyBadgeTier(null, 0.5)).toBeNull();
   });
 
-  it('returns null when consistency is null (cold-start)', () => {
-    expect(classifyBadgeTier('steady_eddie', null)).toBeNull();
+  it('collapses null consistency (cold-start) to bronze for steady_eddie', () => {
+    expect(classifyBadgeTier('steady_eddie', null)).toBe('bronze');
   });
 
   it('tiers steady_eddie by consistency', () => {
-    expect(classifyBadgeTier('steady_eddie', 0.33)).toBe('bronze');
-    expect(classifyBadgeTier('steady_eddie', 0.36)).toBe('bronze');
-    expect(classifyBadgeTier('steady_eddie', 0.37)).toBe('silver');
+    expect(classifyBadgeTier('steady_eddie', 0.0)).toBe('bronze');
+    expect(classifyBadgeTier('steady_eddie', 0.34)).toBe('bronze');
+    expect(classifyBadgeTier('steady_eddie', 0.35)).toBe('silver');
     expect(classifyBadgeTier('steady_eddie', 0.4)).toBe('silver');
     expect(classifyBadgeTier('steady_eddie', 0.41)).toBe('gold');
     expect(classifyBadgeTier('steady_eddie', 0.5)).toBe('gold');

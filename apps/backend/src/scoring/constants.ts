@@ -56,21 +56,27 @@ export const DEEP_DIVER_CONSISTENCY_MAX = 0.35;
 export const AI_ALEX_P95_MEDIAN_RATIO = 20;
 export const AI_ALEX_P95_MIN = 2000;
 
-// Steady Eddie tier thresholds. The base entry (`_MIN`) is what
-// qualifies a dev for the persona at all — currently set at the p50 of
-// consistency among active devs on the live corpus (relaxed from the
-// original p75=0.38 after the smoke test showed the threshold was
-// splitting a tight cohort and producing absurd inversions, e.g. the
-// org's top-momentum dev not getting the badge while the #2 did). The
-// tier cutoffs spread the population into bronze / silver / gold so
-// the leaderboard reflects within-persona gradation.
+// Steady Eddie is the **catch-all** persona for any active dev (commits
+// in the last 90 days) who doesn't match a specialty (fresh_meat,
+// deep_diver, ai_alex, cleanup_crew, batch_betty). There are no entry
+// minimums — every active contributor lands here at least at bronze.
+// Tier cutoffs spread the population by consistency:
+//
+//   Bronze: any active dev not at silver/gold (including cold-start
+//           with active_days < 3 where consistency is null)
+//   Silver: consistency ≥ STEADY_EDDIE_SILVER_MIN (p50 of active cohort)
+//   Gold:   consistency ≥ STEADY_EDDIE_GOLD_MIN   (p90 of active cohort)
 //
 // Tiering applies via classifyBadgeTier; non-steady-eddie badges have
 // no tier today (badge_tier column is null for them).
-export const STEADY_EDDIE_CONSISTENCY_MIN = 0.33;
-export const STEADY_EDDIE_SILVER_MIN = 0.37;
+//
+// Earlier iterations had a minimum consistency cutoff for entry; that
+// produced absurd inversions (the org's #1 momentum getting no badge
+// while peers 0.0002 cents below threshold also missed). The catch-all
+// approach makes the cascade exhaustive for active devs and lets the
+// tier carry the gradation signal.
+export const STEADY_EDDIE_SILVER_MIN = 0.35;
 export const STEADY_EDDIE_GOLD_MIN = 0.41;
-export const STEADY_EDDIE_ACTIVE_DAYS_MIN = 25;
 
 export const BATCH_BETTY_REGULARITY_MIN = 0.55;
 export const BATCH_BETTY_ACTIVE_DAYS_MIN = 3;

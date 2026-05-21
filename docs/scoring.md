@@ -160,47 +160,50 @@ setting it to 1.0 would rank them above veterans on noise; setting it to
 
 First match wins. Computed nightly from the same per-dev signals.
 
-| Badge          | Trigger                                                                                 |
-| -------------- | --------------------------------------------------------------------------------------- |
-| _(dormant)_    | `active_days_90d == 0` → no badge (UI grays the row via `is_dormant`)                   |
-| `fresh_meat`   | `days_since_first_commit < 14` AND `active_days_90d ≥ 1`                                |
-| _(no badge)_   | `active_days_90d < 3` AND `days_since_first_commit ≥ 14` (insufficient data, not fresh) |
-| `deep_diver`   | `median_churn_90d ≥ 200` AND `active_days_90d < 15` AND `consistency < 0.35`            |
-| `ai_alex`      | `p95_churn_90d / median_churn_90d ≥ 20` AND `p95_churn_90d ≥ 2000`                      |
-| `steady_eddie` | `consistency ≥ 0.33` AND `active_days_90d ≥ 25`                                         |
-| `batch_betty`  | `regularity ≥ 0.55` AND `3 ≤ active_days_90d < 15`                                      |
-| `cleanup_crew` | `total_deletions_90d / total_additions_90d ≥ 1.2` AND `commits_90d ≥ 10`                |
-| _none_         | Default. UI shows no chip ("Regular").                                                  |
+The cascade is **exhaustive for active devs** — anyone with `active_days_90d > 0`
+gets some badge. `steady_eddie` is the catch-all (tiered by consistency); the
+other personas precede it in cascade order so deletion-heavy / bursty /
+outlier patterns get their specialty label instead of being absorbed.
 
-Dormant and "1–2 active days but long tenure" both yield no badge — they
-are not Fresh Meat. The original spec used `OR active_days_90d < 3` for
-`fresh_meat` and surfaced 81% of the corpus as Fresh Meat (134 of 171
-rows in the 2026-05-22 smoke test were dormant veterans being mistagged).
-The cascade now gates dormancy and tenure-vs-activity separately.
+| Badge          | Trigger                                                                      |
+| -------------- | ---------------------------------------------------------------------------- |
+| _(dormant)_    | `active_days_90d == 0` → no badge (UI grays the row via `is_dormant`)        |
+| `fresh_meat`   | `days_since_first_commit < 14` AND `active_days_90d ≥ 1`                     |
+| `deep_diver`   | `median_churn_90d ≥ 200` AND `active_days_90d < 15` AND `consistency < 0.35` |
+| `ai_alex`      | `p95_churn_90d / median_churn_90d ≥ 20` AND `p95_churn_90d ≥ 2000`           |
+| `cleanup_crew` | `total_deletions_90d / total_additions_90d ≥ 1.2` AND `commits_90d ≥ 10`     |
+| `batch_betty`  | `regularity ≥ 0.55` AND `3 ≤ active_days_90d < 15`                           |
+| `steady_eddie` | catch-all — every active dev not matching above. Tier by consistency.        |
+
+Dormancy is the **only** path to no badge for someone with at least one
+commit ingested. Two earlier iterations both produced absurd results
+against the live corpus and were retired:
+
+1. `fresh_meat | OR active_days_90d < 3` surfaced 81% of the corpus
+   as Fresh Meat (mostly dormant veterans being mistagged).
+2. `steady_eddie | consistency ≥ 0.33 AND active_days_90d ≥ 25` left
+   the org's #1-momentum dev with no badge (consistency `0.3296`, one
+   point below threshold) while peers `0.0002` above were Steady Eddie.
+
+The current cascade is exhaustive for active devs; the tier system
+(below) carries the gradation signal that the threshold cuts used to
+fail at.
 
 ### Within-persona tiers (Steady Eddie only, for now)
 
-`steady_eddie` is further binned by consistency into bronze / silver / gold,
-surfaced on the leaderboard as a colored ring around the badge icon. Tier
-cutoffs are calibrated against the live consistency distribution:
+`steady_eddie` is the catch-all bucket and is further binned by consistency
+into bronze / silver / gold, surfaced on the leaderboard as a tinted
+circular background behind the badge icon:
 
-| Tier   | Consistency     | Approximate population |
-| ------ | --------------- | ---------------------- |
-| Bronze | `0.33` – `0.37` | bottom of the cohort   |
-| Silver | `0.37` – `0.41` | mid                    |
-| Gold   | `≥ 0.41`        | top — rare             |
+| Tier   | Consistency     | Approximate share of active cohort        |
+| ------ | --------------- | ----------------------------------------- |
+| Bronze | `< 0.35`        | catch-all default (incl. cold-start null) |
+| Silver | `0.35` – `0.41` | ~p50 → p90                                |
+| Gold   | `≥ 0.41`        | top decile                                |
 
-The threshold for **qualifying** as Steady Eddie (the bronze cutoff) was
-relaxed from `0.38` to `0.33` on 2026-05-22 after the smoke test caught a
-calibration absurdity: the org's #1 momentum (Zobayer Hasan, consistency
-`0.37`) was getting no badge while the #2 (Foysal Ahamed, consistency `0.39`)
-was Steady Eddie — a `0.02` gap on a noisy metric was determining the
-badge, despite the two being functionally identical contributors. The
-relaxation puts them in the same persona (silver tier), with Gold reserved
-for the genuinely top-end cases.
-
-Tier classifier returns `null` for every other persona today; the column
-generalizes so other personas can be tiered later without a schema change.
+Tier classifier collapses null consistency (`active_days < 3`) to bronze
+and returns `null` for every other persona; the column generalizes so
+other personas can be tiered later without a schema change.
 
 ### Cascade order
 

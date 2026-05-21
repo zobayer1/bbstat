@@ -9,10 +9,7 @@ import {
   DEEP_DIVER_ACTIVE_DAYS_MAX,
   DEEP_DIVER_CONSISTENCY_MAX,
   DEEP_DIVER_MEDIAN_CHURN,
-  FRESH_MEAT_MIN_ACTIVE_DAYS,
   FRESH_MEAT_MIN_TENURE_DAYS,
-  STEADY_EDDIE_ACTIVE_DAYS_MIN,
-  STEADY_EDDIE_CONSISTENCY_MIN,
   STEADY_EDDIE_GOLD_MIN,
   STEADY_EDDIE_SILVER_MIN,
 } from './constants.js';
@@ -42,21 +39,22 @@ export interface BadgeInput {
   deletions90d: number;
 }
 
-// Cascade classifier — first match wins. Order matters; gates filter
-// "not really a persona candidate" cases up front before the activity-
-// shape personas, so a one-time architectural commit doesn't mis-tag
-// someone as Batch Betty and a dormant veteran doesn't get tagged as
-// Fresh Meat just because they're not currently active.
+// Cascade classifier — first match wins. **Exhaustive for active devs**:
+// anyone with `active_days_90d > 0` gets a badge. Steady Eddie is the
+// catch-all — every active dev who doesn't match a specialty falls
+// into it (tiered bronze / silver / gold by consistency via
+// classifyBadgeTier).
 //
-// Returns null for "Regular" (no persona matched). The caller
-// distinguishes Regular from Dormant via `is_dormant` (set when
-// activeDays90d == 0); the first early-exit below ensures dormant rows
-// always land here as null.
+// Order matters: status badge (fresh_meat) first; outlier patterns
+// (deep_diver, ai_alex) precede behaviour patterns (cleanup_crew,
+// batch_betty); steady_eddie is last and absorbs the remainder.
+//
+// Returns null **only for dormant rows** (activeDays90d == 0). UI
+// grays those via `is_dormant`. Non-workspace-member styling is a
+// separate concern handled in the frontend via `isWorkspaceMember`.
 export function classifyBadge(m: BadgeInput): Badge | null {
-  // Dormant: no activity in the consistency window. Even a brand-new
-  // joiner with zero commits in 90d isn't really Fresh Meat — they're
-  // just not yet a contributor by any meaningful signal. The UI grays
-  // the row via `is_dormant`.
+  // Dormant: no activity in the consistency window. UI grays the row
+  // via `is_dormant`.
   if (m.activeDays90d === 0) {
     return null;
   }
@@ -68,19 +66,9 @@ export function classifyBadge(m: BadgeInput): Badge | null {
     return 'fresh_meat';
   }
 
-  // Insufficient data for the activity-shape personas. A long-tenured
-  // dev with 1–2 active days in 90d has just enough signal to NOT be
-  // dormant, but not enough for Deep Diver / Steady Eddie / Batch Betty
-  // (consistency is null below 3 active days). No badge — Regular until
-  // they accrue more data.
-  if (m.activeDays90d < FRESH_MEAT_MIN_ACTIVE_DAYS) {
-    return null;
-  }
-
-  // Cold-start consistency (null) reads as 0 for the threshold checks —
-  // a dev who passed the fresh_meat gate but still has a null consistency
-  // is functionally inconsistent, and treating null as 0 lets them fall
-  // into deep_diver / batch_betty if their other signals fit.
+  // Cold-start consistency (null) reads as 0 — treating null as 0
+  // lets cold-start devs fall into a specialty if their other signals
+  // fit, and into steady_eddie bronze (catch-all) otherwise.
   const consistency = m.consistency90d ?? 0;
   const regularity = m.regularity90d ?? 0;
 
@@ -100,8 +88,15 @@ export function classifyBadge(m: BadgeInput): Badge | null {
     return 'ai_alex';
   }
 
-  if (consistency >= STEADY_EDDIE_CONSISTENCY_MIN && m.activeDays90d >= STEADY_EDDIE_ACTIVE_DAYS_MIN) {
-    return 'steady_eddie';
+  // Cleanup Crew runs BEFORE Batch Betty / Steady Eddie so deletion-
+  // heavy devs are tagged for the cleanup work rather than absorbed
+  // into the catch-all.
+  if (
+    m.additions90d > 0 &&
+    m.deletions90d / m.additions90d >= CLEANUP_CREW_DEL_ADD_RATIO &&
+    m.commits90d >= CLEANUP_CREW_COMMITS_MIN
+  ) {
+    return 'cleanup_crew';
   }
 
   if (
@@ -112,24 +107,20 @@ export function classifyBadge(m: BadgeInput): Badge | null {
     return 'batch_betty';
   }
 
-  if (
-    m.additions90d > 0 &&
-    m.deletions90d / m.additions90d >= CLEANUP_CREW_DEL_ADD_RATIO &&
-    m.commits90d >= CLEANUP_CREW_COMMITS_MIN
-  ) {
-    return 'cleanup_crew';
-  }
-
-  return null;
+  // Catch-all: every active dev who didn't match above lands here.
+  // Tier (bronze / silver / gold) is assigned by classifyBadgeTier
+  // based on consistency.
+  return 'steady_eddie';
 }
 
 // Within-persona tier classifier. Currently only steady_eddie tiers —
-// returns null for every other badge and for null/unsatisfied input.
-// Tier thresholds are calibrated against the live consistency
-// distribution (see constants.ts comments).
+// returns null for every other badge. Cold-start (null consistency)
+// collapses to bronze, since steady_eddie is the catch-all and we want
+// every active dev to land at *some* tier.
 export function classifyBadgeTier(badge: Badge | null, consistency: number | null): BadgeTier | null {
-  if (badge !== 'steady_eddie' || consistency === null) return null;
-  if (consistency >= STEADY_EDDIE_GOLD_MIN) return 'gold';
-  if (consistency >= STEADY_EDDIE_SILVER_MIN) return 'silver';
+  if (badge !== 'steady_eddie') return null;
+  const c = consistency ?? 0;
+  if (c >= STEADY_EDDIE_GOLD_MIN) return 'gold';
+  if (c >= STEADY_EDDIE_SILVER_MIN) return 'silver';
   return 'bronze';
 }

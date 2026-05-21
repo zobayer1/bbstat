@@ -460,31 +460,26 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100">
-          <!-- Other Contributors — rows whose BB UUID isn't in the
-               workspace's /members endpoint. Covers ex-employees,
-               externals, AND current members who commit from a
-               separate BB account (their git email maps to a UUID
-               that's not in the member list). Rendered at reduced
-               opacity so sort order still works but the eye knows
-               these aren't fully-linked workspace identities.
-               `bg-slate-50/60` adds a faint wash to distinguish them
-               from in-workspace rows even before hover; the existing
-               `hover:bg-slate-50` still applies for consistency. -->
+          <!-- Two independent visual signals on each row:
+                 (1) **Dormant** (`isDormant` = no eligible activity in
+                     the last 90 days): gray + reduced opacity so the
+                     entire row reads as "not currently contributing".
+                 (2) **Non-workspace-member** (`!isWorkspaceMember`):
+                     covers ex-employees, externals, AND current members
+                     committing from a separate BB account whose git
+                     email maps to a UUID that isn't in the workspace
+                     member list. Rendered with a RED email under the
+                     displayName as a distinct signal — independent of
+                     dormancy, so the two cases can coexist (an active
+                     non-member dev gets a normal-toned row with a red
+                     email; a dormant non-member gets gray row + red
+                     email; a dormant workspace member gets gray row,
+                     normal-color email). -->
           <tr
             v-for="m in paged"
             :key="m.bitbucketUuid"
-            :class="[
-              'hover:bg-slate-50',
-              !m.isWorkspaceMember ? 'bg-slate-50/60 text-slate-400 opacity-70' : '',
-              m.isDormant ? 'text-slate-400 opacity-60' : '',
-            ]"
-            :title="
-              m.isDormant
-                ? 'Dormant — no eligible activity in the last 90 days'
-                : m.isWorkspaceMember
-                  ? ''
-                  : 'BB account not in the workspace member list (ex-employee, external, or current member using a separate email)'
-            "
+            :class="['hover:bg-slate-50', m.isDormant ? 'bg-slate-50/40 text-slate-400 opacity-70' : '']"
+            :title="m.isDormant ? 'Dormant — no eligible activity in the last 90 days' : ''"
           >
             <td class="px-2 py-2 text-center align-middle">
               <BadgeIcon :badge="m.badge" :tier="m.badgeTier" />
@@ -492,20 +487,27 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
             <td class="px-4 py-2">
               <RouterLink
                 :to="{ name: 'user', params: { userId: m.userId } }"
-                :class="[
-                  'block font-medium hover:text-slate-600',
-                  m.isWorkspaceMember && !m.isDormant ? 'text-slate-900' : 'text-slate-500',
-                ]"
+                :class="['block font-medium hover:text-slate-600', m.isDormant ? 'text-slate-500' : 'text-slate-900']"
               >
                 {{ m.displayName }}
                 <span v-if="m.username" class="ml-1 text-xs font-normal text-slate-400">@{{ m.username }}</span>
               </RouterLink>
               <!-- Git-author email: best-effort, parsed from commits.author.raw at
-                   ingest. Rendered muted under the displayName so it never
-                   competes with the primary identifier. Hidden entirely when
-                   null (users predating the column or whose commits never
-                   carried a parseable address). -->
-              <div v-if="m.email" class="mt-0.5 truncate text-xs text-slate-400" :title="m.email">
+                   ingest. Rendered muted under the displayName when the BB
+                   account IS in the workspace member list; RED when it isn't
+                   (ex-employee, external, or separate BB account whose git
+                   email maps to an out-of-workspace UUID). Hidden entirely
+                   when null (users predating the column or whose commits
+                   never carried a parseable address). -->
+              <div
+                v-if="m.email"
+                :class="['mt-0.5 truncate text-xs', m.isWorkspaceMember ? 'text-slate-400' : 'text-red-600']"
+                :title="
+                  m.isWorkspaceMember
+                    ? m.email
+                    : `${m.email} — not in workspace member list (ex-employee, external, or separate BB account)`
+                "
+              >
                 {{ m.email }}
               </div>
             </td>
@@ -526,15 +528,11 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                  so the breadth metric reads as supplementary context,
                  not a competing number. `tabular-nums` keeps the
                  digits column-aligned cleanly across rows. -->
-            <td
-              :class="['px-4 py-2 text-center tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
-            >
+            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-500' : 'text-slate-900'">
               {{ m.commits7d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos7d }})</span>
             </td>
-            <td
-              :class="['px-4 py-2 text-center tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
-            >
+            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-500' : 'text-slate-900'">
               {{ m.commits30d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos30d }})</span>
             </td>
