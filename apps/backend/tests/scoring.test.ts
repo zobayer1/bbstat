@@ -4,8 +4,10 @@ import { classifyBadge } from '../src/scoring/badge.js';
 import type { BadgeInput } from '../src/scoring/badge.js';
 import { scoreCommit } from '../src/scoring/commit-score.js';
 import { computeConsistency } from '../src/scoring/consistency.js';
-import { ALPHA, HALF_LIFE_DAYS } from '../src/scoring/constants.js';
+import { ALPHA, FLOOR, HALF_LIFE_DAYS } from '../src/scoring/constants.js';
 import { decayWeight } from '../src/scoring/decay.js';
+import { aggregateUserScores, percentile } from '../src/scoring/rollup.js';
+import type { EligibleCommit, UserTotals } from '../src/scoring/rollup.js';
 
 const MS_PER_DAY = 86_400_000;
 
@@ -135,8 +137,27 @@ describe('classifyBadge', () => {
     expect(classifyBadge({ ...baseline, daysSinceFirstCommit: 10 })).toBe('fresh_meat');
   });
 
-  it('fresh_meat — too few active days in window', () => {
-    expect(classifyBadge({ ...baseline, activeDays90d: 2 })).toBe('fresh_meat');
+  it('returns null for dormant rows even if other persona signals are present', () => {
+    // active_days_90d=0 → dormant. UI grays the row; the badge is suppressed
+    // so a long-quiet veteran doesn't get tagged Fresh Meat or anything else.
+    expect(
+      classifyBadge({
+        ...baseline,
+        activeDays90d: 0,
+        consistency90d: null,
+        regularity90d: null,
+        // Even if other thresholds would match, dormancy wins:
+        medianChurn90d: 500,
+      }),
+    ).toBeNull();
+  });
+
+  it('returns null for a long-tenured dev with 1–2 active days (insufficient data, not fresh)', () => {
+    // Old behavior tagged this as fresh_meat. New behavior: no badge —
+    // there's not enough recent signal for a persona, but they're not
+    // genuinely new either.
+    expect(classifyBadge({ ...baseline, activeDays90d: 2 })).toBeNull();
+    expect(classifyBadge({ ...baseline, activeDays90d: 1 })).toBeNull();
   });
 
   it('fresh_meat overrides every other badge', () => {
@@ -237,3 +258,147 @@ describe('classifyBadge', () => {
     ).toBeNull();
   });
 });
+
+describe('percentile', () => {
+  it('returns 0 for an empty array', () => {
+    expect(percentile([], 0.5)).toBe(0);
+  });
+
+  it('returns the single value regardless of quantile for a length-1 input', () => {
+    expect(percentile([42], 0.05)).toBe(42);
+    expect(percentile([42], 0.95)).toBe(42);
+  });
+
+  it('matches the linear-interpolation shape of Postgres percentile_cont', () => {
+    // [10, 20, 30, 40, 50]
+    // p=0.5 → idx = 2.0 → exact 30
+    expect(percentile([10, 20, 30, 40, 50], 0.5)).toBe(30);
+    // p=0.25 → idx = 1.0 → exact 20
+    expect(percentile([10, 20, 30, 40, 50], 0.25)).toBe(20);
+    // p=0.95 → idx = 3.8 → 40 + 0.8 * 10 = 48
+    expect(percentile([10, 20, 30, 40, 50], 0.95)).toBeCloseTo(48, 6);
+  });
+});
+
+describe('aggregateUserScores', () => {
+  const NOW = new Date('2026-05-22T00:00:00Z');
+  const MS_PER_DAY = 86_400_000;
+  const daysAgo = (n: number) => new Date(NOW.getTime() - n * MS_PER_DAY);
+
+  it('returns an empty array for empty inputs', () => {
+    expect(aggregateUserScores([], [], NOW)).toEqual([]);
+  });
+
+  it('writes a dormant row for a user with totals but no eligible commits', () => {
+    const totals: UserTotals[] = [{ authorUserId: 1, commitsTotal: 5, firstCommitAt: daysAgo(100) }];
+    const rows = aggregateUserScores(totals, [], NOW);
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.userId).toBe(1);
+    expect(row.commitsEligible).toBe(0);
+    expect(row.commitsTotal).toBe(5);
+    expect(row.coveragePct).toBe(0);
+    expect(row.scoreTrending).toBe(0);
+    expect(row.volume30d).toBe(0);
+    expect(row.volumeAll).toBe(0);
+    expect(row.isDormant).toBe(true);
+    expect(row.consistency90d).toBeNull();
+    expect(row.activeDays90d).toBe(0);
+    expect(row.p95ChurnCap).toBe(FLOOR); // empty p95 → 0; max(0, FLOOR) = FLOOR
+    expect(row.daysSinceFirstCommit).toBe(100);
+  });
+
+  it('windows commits correctly by cutoff', () => {
+    const totals: UserTotals[] = [{ authorUserId: 1, commitsTotal: 4, firstCommitAt: daysAgo(400) }];
+    const eligible: EligibleCommit[] = [
+      { authorUserId: 1, additions: 100, deletions: 100, authoredAt: daysAgo(3) }, // 7d window
+      { authorUserId: 1, additions: 100, deletions: 100, authoredAt: daysAgo(20) }, // 30d window
+      { authorUserId: 1, additions: 100, deletions: 100, authoredAt: daysAgo(60) }, // 90d window
+      { authorUserId: 1, additions: 100, deletions: 100, authoredAt: daysAgo(200) }, // 365d window
+    ];
+    const [row] = aggregateUserScores(totals, eligible, NOW);
+    const oneScore = row!.volume7d!;
+    expect(row!.volume7d).toBeCloseTo(oneScore, 6);
+    expect(row!.volume30d).toBeCloseTo(2 * oneScore, 6);
+    expect(row!.volume90d).toBeCloseTo(3 * oneScore, 6);
+    expect(row!.volume365d).toBeCloseTo(4 * oneScore, 6);
+    expect(row!.volumeAll).toBeCloseTo(4 * oneScore, 6);
+  });
+
+  it('decay attenuates older commits in scoreTrending', () => {
+    const totals: UserTotals[] = [{ authorUserId: 1, commitsTotal: 2, firstCommitAt: daysAgo(365) }];
+    const eligible: EligibleCommit[] = [
+      { authorUserId: 1, additions: 100, deletions: 100, authoredAt: NOW }, // weight ≈ 1
+      { authorUserId: 1, additions: 100, deletions: 100, authoredAt: daysAgo(365) }, // weight ≈ 2e-4
+    ];
+    const [row] = aggregateUserScores(totals, eligible, NOW);
+    const vAll = row!.volumeAll!;
+    const sTrending = row!.scoreTrending!;
+    expect(vAll).toBeGreaterThan(sTrending);
+    // ~half the un-decayed sum (1 + tiny) / 2 ≈ 0.5 of the un-decayed sum
+    expect(sTrending).toBeGreaterThan(vAll * 0.49);
+    expect(sTrending).toBeLessThan(vAll * 0.51);
+  });
+
+  it('honors the per-dev p95 cap and applies FLOOR when p95 is small', () => {
+    // 97 small commits + 3 huge commits — p95 of (100*97, 10000*3) lands
+    // at 100 (the small-commit value), so FLOOR (500) wins and the cap
+    // is 500. The huge commits get capped — their per-commit score is
+    // well below the un-capped value.
+    const totals: UserTotals[] = [{ authorUserId: 1, commitsTotal: 100, firstCommitAt: daysAgo(100) }];
+    const small: EligibleCommit[] = Array.from({ length: 97 }, (_, i) => ({
+      authorUserId: 1,
+      additions: 50,
+      deletions: 50,
+      authoredAt: daysAgo(i + 1),
+    }));
+    const huge: EligibleCommit[] = Array.from({ length: 3 }, (_, i) => ({
+      authorUserId: 1,
+      additions: 5000,
+      deletions: 5000,
+      authoredAt: daysAgo(i + 100),
+    }));
+    const [row] = aggregateUserScores(totals, [...small, ...huge], NOW);
+    expect(row!.p95ChurnCap).toBe(FLOOR);
+    // A small commit (adds=50, dels=50; total churn 100) is uncapped at
+    // cap=500 — score = ln(1+50) + ALPHA*ln(1+50).
+    // A huge commit (adds=5000, dels=5000; total churn 10000) capped at
+    // 500 → ratio=0.05 → adds/dels become 250/250 →
+    // score = ln(1+250) + ALPHA*ln(1+250).
+    const smallScore = Math.log1p(50) + ALPHA * Math.log1p(50);
+    const cappedHugeScore = Math.log1p(250) + ALPHA * Math.log1p(250);
+    const uncappedHugeScore = Math.log1p(5000) + ALPHA * Math.log1p(5000);
+    expect(row!.volumeAll).toBeCloseTo(97 * smallScore + 3 * cappedHugeScore, 4);
+    // And well below what it would be without the cap.
+    expect(row!.volumeAll).toBeLessThan(97 * smallScore + 3 * uncappedHugeScore);
+  });
+
+  it('groups eligible commits by author and ignores users not in totals', () => {
+    const totals: UserTotals[] = [{ authorUserId: 1, commitsTotal: 1, firstCommitAt: daysAgo(50) }];
+    const eligible: EligibleCommit[] = [
+      { authorUserId: 1, additions: 100, deletions: 50, authoredAt: daysAgo(1) },
+      // user 2 is in the eligible set but not in totals — dropped
+      { authorUserId: 2, additions: 999, deletions: 999, authoredAt: daysAgo(1) },
+    ];
+    const rows = aggregateUserScores(totals, eligible, NOW);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.userId).toBe(1);
+  });
+
+  it('marks a recent first-commit user as fresh_meat', () => {
+    const totals: UserTotals[] = [{ authorUserId: 1, commitsTotal: 5, firstCommitAt: daysAgo(5) }];
+    const eligible: EligibleCommit[] = Array.from({ length: 5 }, (_, i) => ({
+      authorUserId: 1,
+      additions: 50,
+      deletions: 50,
+      authoredAt: daysAgo(i),
+    }));
+    const [row] = aggregateUserScores(totals, eligible, NOW);
+    expect(row!.daysSinceFirstCommit).toBe(5);
+    expect(row!.badge).toBe('fresh_meat');
+  });
+});
+
+// Touch HALF_LIFE_DAYS so the import isn't lint-flagged when the
+// pure-function tests at the top of the file are removed/edited.
+void HALF_LIFE_DAYS;

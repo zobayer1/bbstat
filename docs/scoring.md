@@ -142,28 +142,41 @@ volume sort. Labeled "Consistency (90d)" in the UI.
 
 ### Cold-start handling
 
-Developers with `days_since_first_commit < 14` **or** `active_days_90d < 3`
-get a `Fresh Meat` badge and a `—` in the consistency column (not 0, not 1).
-When sorting by consistency, they drop to the bottom of the table. They
-appear normally when sorting by volume.
+The consistency **column** shows `—` (not 0, not 1) for any user with
+`active_days_90d < 3`. When sorting by consistency, they drop to the
+bottom of the table. They appear normally when sorting by volume.
 
-Rationale: a brand-new dev with 3 commits has no consistency signal — setting
-it to 1.0 would rank them above veterans on noise; setting it to 0 punishes
-them. "Not enough data" is the honest answer.
+The `Fresh Meat` **badge** is a separate (narrower) trigger and applies
+only to genuine new joiners — see the cascade below. A long-tenured dev
+with a quiet 90 days gets the `—` consistency column but no `Fresh Meat`
+badge; they're either dormant (no badge, grayed row) or insufficient-data
+Regular (no badge, normal row).
+
+Rationale: a brand-new dev with 3 commits has no consistency signal —
+setting it to 1.0 would rank them above veterans on noise; setting it to
+0 punishes them. "Not enough data" is the honest answer.
 
 ## Badge cascade
 
 First match wins. Computed nightly from the same per-dev signals.
 
-| Badge          | Trigger                                                                                  |
-| -------------- | ---------------------------------------------------------------------------------------- |
-| `fresh_meat`   | `days_since_first_commit < 14` OR `active_days_90d < 3`                                  |
-| `deep_diver`   | `median_churn_90d ≥ 200` AND `active_days_90d < 15` AND `consistency < 0.35`             |
-| `ai_alex`      | `p95_churn_90d / median_churn_90d ≥ 20` AND `p95_churn_90d ≥ 2000`                       |
-| `steady_eddie` | `consistency ≥ 0.38` AND `active_days_90d ≥ 25`                                          |
-| `batch_betty`  | `regularity ≥ 0.55` AND `3 ≤ active_days_90d < 15`                                       |
-| `cleanup_crew` | `total_deletions_90d / total_additions_90d ≥ 1.2` AND `commits_90d ≥ 10`                 |
-| _none_         | Default. UI shows no chip ("Regular"). Dormant users (no recent activity) also fall here |
+| Badge          | Trigger                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------- |
+| _(dormant)_    | `active_days_90d == 0` → no badge (UI grays the row via `is_dormant`)                   |
+| `fresh_meat`   | `days_since_first_commit < 14` AND `active_days_90d ≥ 1`                                |
+| _(no badge)_   | `active_days_90d < 3` AND `days_since_first_commit ≥ 14` (insufficient data, not fresh) |
+| `deep_diver`   | `median_churn_90d ≥ 200` AND `active_days_90d < 15` AND `consistency < 0.35`            |
+| `ai_alex`      | `p95_churn_90d / median_churn_90d ≥ 20` AND `p95_churn_90d ≥ 2000`                      |
+| `steady_eddie` | `consistency ≥ 0.38` AND `active_days_90d ≥ 25`                                         |
+| `batch_betty`  | `regularity ≥ 0.55` AND `3 ≤ active_days_90d < 15`                                      |
+| `cleanup_crew` | `total_deletions_90d / total_additions_90d ≥ 1.2` AND `commits_90d ≥ 10`                |
+| _none_         | Default. UI shows no chip ("Regular").                                                  |
+
+Dormant and "1–2 active days but long tenure" both yield no badge — they
+are not Fresh Meat. The original spec used `OR active_days_90d < 3` for
+`fresh_meat` and surfaced 81% of the corpus as Fresh Meat (134 of 171
+rows in the 2026-05-22 smoke test were dormant veterans being mistagged).
+The cascade now gates dormancy and tenure-vs-activity separately.
 
 Cascade order matters: `deep_diver` and `ai_alex` (outlier patterns) precede
 the activity-shape badges so a one-time architectural commit doesn't mis-tag

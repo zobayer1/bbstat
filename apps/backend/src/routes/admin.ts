@@ -63,6 +63,18 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     return runPullRequestsSync(opts.syncDeps, 'manual');
   });
 
+  // Manual trigger for the ShipShow Score rollup (docs/scoring.md
+  // phase 3). The sync runner already fires this at the end of every
+  // commits-sync tick; this endpoint exists for backfills after threshold
+  // tuning, for the post-deploy verification step, and for the dev
+  // smoke loop.
+  app.post('/scores/recompute', async (_request, reply) => {
+    if (opts.syncDeps.recomputeUserScores === undefined) {
+      return reply.code(503).send({ error: 'score_rollup_not_wired' });
+    }
+    return opts.syncDeps.recomputeUserScores();
+  });
+
   // Force a fresh delta pull for a single tracked repo. Useful for backfills,
   // for re-running after fixing a sync bug, and as the manual smoke test for
   // commit ingest in dev. Idempotent — duplicate shas are deduped by the

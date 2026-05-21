@@ -34,3 +34,30 @@ export const userSummaryCache = {
     await cache.del(userSummaryCache.key(userId));
   },
 };
+
+// ShipShow Score leaderboard cache (docs/scoring.md phase 4). The scoring
+// rollup invalidates this namespace after every recompute via
+// `invalidateAll`; readers populate it lazily on first request. Phase 4
+// lands the readers — until then this only exposes the prefix + invalidator
+// so the write-side wiring is correct on day one.
+//
+// The single-DEL invalidator uses SCAN (not KEYS) so we don't block Redis
+// on a large keyspace. At the current cardinality (one entry per sort key)
+// the scan touches a handful of keys, but the SCAN-based shape stays
+// correct as the keyspace grows.
+const LEADERBOARD_PREFIX = `${KEY_PREFIX}leaderboard:`;
+
+export const leaderboardCache = {
+  prefix: LEADERBOARD_PREFIX,
+  key: (sort: string) => `${LEADERBOARD_PREFIX}${sort}`,
+  async invalidateAll(cache: CacheClient): Promise<number> {
+    let cursor = '0';
+    let deleted = 0;
+    do {
+      const [next, batch] = await cache.scan(cursor, 'MATCH', `${LEADERBOARD_PREFIX}*`, 'COUNT', 100);
+      if (batch.length > 0) deleted += await cache.del(...batch);
+      cursor = next;
+    } while (cursor !== '0');
+    return deleted;
+  },
+};

@@ -23,6 +23,7 @@ import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import { createRedisUserSummaryCache, type UserSummaryCache } from './dashboard/user-summary-cache.js';
 import { createEventBus } from './events/bus.js';
 import { wrapBusWithRedis } from './events/redis-bridge.js';
+import { recomputeUserScores } from './scoring/rollup.js';
 import type { UserSummary } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
       bus,
+      recomputeUserScores: () => recomputeUserScores({ db, cache: redis, logger }),
     };
   }
 

@@ -35,15 +35,39 @@ export interface BadgeInput {
   deletions90d: number;
 }
 
-// Cascade classifier — first match wins. Order matters: status badges
-// (fresh_meat) override personas; outlier patterns (deep_diver, ai_alex)
-// precede activity-shape badges so a one-time architectural commit
-// doesn't mis-tag someone as Batch Betty. Returns null for "Regular"
-// (no persona matched); the caller distinguishes Regular from Dormant
-// using is_dormant, not from this function.
+// Cascade classifier — first match wins. Order matters; gates filter
+// "not really a persona candidate" cases up front before the activity-
+// shape personas, so a one-time architectural commit doesn't mis-tag
+// someone as Batch Betty and a dormant veteran doesn't get tagged as
+// Fresh Meat just because they're not currently active.
+//
+// Returns null for "Regular" (no persona matched). The caller
+// distinguishes Regular from Dormant via `is_dormant` (set when
+// activeDays90d == 0); the first early-exit below ensures dormant rows
+// always land here as null.
 export function classifyBadge(m: BadgeInput): Badge | null {
-  if (m.daysSinceFirstCommit < FRESH_MEAT_MIN_TENURE_DAYS || m.activeDays90d < FRESH_MEAT_MIN_ACTIVE_DAYS) {
+  // Dormant: no activity in the consistency window. Even a brand-new
+  // joiner with zero commits in 90d isn't really Fresh Meat — they're
+  // just not yet a contributor by any meaningful signal. The UI grays
+  // the row via `is_dormant`.
+  if (m.activeDays90d === 0) {
+    return null;
+  }
+
+  // Fresh Meat: actually a new joiner — tenure under the threshold AND
+  // at least one active day in the window, so we know they're ramping
+  // up rather than a long-dormant ex-contributor.
+  if (m.daysSinceFirstCommit < FRESH_MEAT_MIN_TENURE_DAYS) {
     return 'fresh_meat';
+  }
+
+  // Insufficient data for the activity-shape personas. A long-tenured
+  // dev with 1–2 active days in 90d has just enough signal to NOT be
+  // dormant, but not enough for Deep Diver / Steady Eddie / Batch Betty
+  // (consistency is null below 3 active days). No badge — Regular until
+  // they accrue more data.
+  if (m.activeDays90d < FRESH_MEAT_MIN_ACTIVE_DAYS) {
+    return null;
   }
 
   // Cold-start consistency (null) reads as 0 for the threshold checks —

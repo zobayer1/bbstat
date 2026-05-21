@@ -25,6 +25,7 @@ import { createDrizzleRollupStore } from '../dashboard/rollup-store.js';
 import { createRedisUserSummaryCache } from '../dashboard/user-summary-cache.js';
 import { createEventBus } from '../events/bus.js';
 import { wrapBusWithRedis } from '../events/redis-bridge.js';
+import { recomputeUserScores } from '../scoring/rollup.js';
 import type { SyncRunnerDeps } from './runner.js';
 
 async function main(): Promise<void> {
@@ -104,6 +105,7 @@ async function main(): Promise<void> {
     diffStatsBackfillOptions,
     backoffOptions,
     bus,
+    recomputeUserScores: () => recomputeUserScores({ db, cache: redis, logger }),
   };
 
   // Four independent schedules. Members rarely change; repo metadata

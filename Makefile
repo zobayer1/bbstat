@@ -142,6 +142,10 @@ doctor: env-init ## Verify BitBucket credentials end-to-end against your workspa
 rebuild-rollups: ## Re-aggregate commit_daily from commits (drift repair)
 	$(PNPM) $(BACKEND) run rebuild:rollups
 
+.PHONY: recompute-user-scores
+recompute-user-scores: ## Force a ShipShow Score rollup (user_score table)
+	$(PNPM) $(BACKEND) run recompute:user-scores
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
