@@ -7,6 +7,7 @@ import {
   date,
   integer,
   boolean,
+  doublePrecision,
   index,
   unique,
   uniqueIndex,
@@ -50,6 +51,20 @@ export const pullRequestStateEnum = bbstatSchema.enum('pull_request_state', [
   'MERGED',
   'DECLINED',
   'SUPERSEDED',
+]);
+
+// Persona badge assigned to a user by the nightly scoring rollup. NULL on
+// `user_score.badge` means "Regular" (no persona matched) or "Dormant"
+// (`is_dormant = true`) — the UI distinguishes the two from `is_dormant`,
+// not from a separate enum value. Cascade order + thresholds live in
+// docs/scoring.md; the badge classifier is the single writer.
+export const userBadgeEnum = bbstatSchema.enum('user_badge', [
+  'fresh_meat',
+  'deep_diver',
+  'ai_alex',
+  'steady_eddie',
+  'batch_betty',
+  'cleanup_crew',
 ]);
 
 // ---------------------------------------------------------------------------
@@ -262,6 +277,18 @@ export const commits = bbstatSchema.table(
 // single row per (day, repository_id) thanks to NULLS NOT DISTINCT on the
 // unique index — without it, NULL would compare unequal and we'd accumulate
 // one duplicate per anonymous commit. Postgres ≥ 15 required.
+//
+// `commit_count` is **non-merge only** — user-level rollups (per-author
+// counts, the scoring rollup in `user_score`) sum it as-is. `merge_commit_count`
+// is the merge counterpart, and is summed alongside ONLY for repo-level
+// activity displays (where a merge into `main` is a real event for the
+// repo). Splitting the column was load-bearing for the scoring rollup:
+// merges inflate per-author churn (a single merge equals the entire branch
+// delta attributed to whoever clicked the button) and would dominate any
+// user-level metric if counted. `additions` / `deletions` here are already
+// non-merge for the same reason — see commits.is_merge for the underlying
+// flag and the ingest path in sync/commit-store.ts for how the split is
+// enforced at write time.
 export const commitDaily = bbstatSchema.table(
   'commit_daily',
   {
@@ -271,6 +298,7 @@ export const commitDaily = bbstatSchema.table(
       .references(() => repositories.id, { onDelete: 'cascade' }),
     authorUserId: integer('author_user_id').references(() => users.id, { onDelete: 'set null' }),
     commitCount: integer('commit_count').notNull().default(0),
+    mergeCommitCount: integer('merge_commit_count').notNull().default(0),
     additions: integer('additions').notNull().default(0),
     deletions: integer('deletions').notNull().default(0),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -285,6 +313,96 @@ export const commitDaily = bbstatSchema.table(
       .nullsNotDistinct(),
     repoDayIdx: index('commit_daily_repo_day_idx').on(t.repositoryId, t.day),
     userDayIdx: index('commit_daily_user_day_idx').on(t.authorUserId, t.day),
+  }),
+);
+
+// Per-user ShipShow Score rollup. One row per user. Fully recomputed by the
+// nightly scoring rollup (scoring/rollup.ts) — never written incrementally,
+// so streaming-staleness questions don't apply. The leaderboard API reads
+// from this table; nothing runs the scoring math on the request path.
+//
+// See docs/scoring.md for the formulas, constants (ALPHA=1.2, FLOOR=500,
+// HALF_LIFE=30d, BETA=0.25), eligibility filter, badge cascade, and the
+// 2026-05-21 corpus calibration that picked the thresholds.
+//
+// All `score_*` and `volume_*` columns sum `score_commit = ln(1+capped_adds)
+// + ALPHA * ln(1+capped_dels)` over eligible commits. `score_trending`
+// additionally applies an `exp(-ln(2)*age_days/30)` decay weight per commit
+// — un-bounded in time, recent activity dominates. The fixed-window
+// `volume_*` columns apply no decay and a hard cutoff at the window edge.
+// `volume_all` is the un-bounded un-decayed sum.
+//
+// Eligible commits: `is_merge=false AND diff_stats_synced_at IS NOT NULL
+// AND diff_stats_failure_count < 3 AND author_user_id IS NOT NULL`. The
+// `commits_eligible / commits_total` ratio is materialized as
+// `coverage_pct` so the UI can flag rows whose score is based on
+// incomplete diff-stat ingest without joining `commits` on the read path.
+//
+// `consistency_90d` is NULL on cold-start (`active_days_90d < 3`); the UI
+// shows "—" and drops these rows to the bottom of a consistency sort.
+// `is_dormant = (active_days_90d = 0)` is the gray-out flag.
+//
+// `badge` is the cascaded persona (NULL = Regular / Dormant). Single
+// writer (the rollup); never edited by the application.
+export const userScore = bbstatSchema.table(
+  'user_score',
+  {
+    userId: integer('user_id')
+      .primaryKey()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
+
+    // Coverage — used by the UI to warn when a user's score is based on
+    // partial diff-stat ingest. `commits_total` includes merges and
+    // pending-diff-stat rows so the ratio reflects ingest progress, not
+    // just the scoring filter.
+    commitsEligible: integer('commits_eligible').notNull().default(0),
+    commitsTotal: integer('commits_total').notNull().default(0),
+    coveragePct: doublePrecision('coverage_pct').notNull().default(0),
+
+    // Per-dev p95 of raw_churn clipped against the global FLOOR. The cap
+    // that every per-commit score in this row was computed against.
+    p95ChurnCap: integer('p95_churn_cap').notNull().default(0),
+
+    // Decayed global score — default sort key on the leaderboard.
+    scoreTrending: doublePrecision('score_trending').notNull().default(0),
+
+    // Un-decayed per-window volume sums.
+    volume7d: doublePrecision('volume_7d').notNull().default(0),
+    volume30d: doublePrecision('volume_30d').notNull().default(0),
+    volume90d: doublePrecision('volume_90d').notNull().default(0),
+    volume365d: doublePrecision('volume_365d').notNull().default(0),
+    volumeAll: doublePrecision('volume_all').notNull().default(0),
+
+    // Consistency over a fixed 90d window — NULL when cold-start (<3
+    // active days in window). Decoupled from the volume-window slider on
+    // purpose (working style doesn't slide with the recency dial).
+    consistency90d: doublePrecision('consistency_90d'),
+    activeDays90d: integer('active_days_90d').notNull().default(0),
+
+    // Badge classifier inputs derived from the 90d eligible commit set.
+    medianChurn90d: integer('median_churn_90d').notNull().default(0),
+    p95Churn90d: integer('p95_churn_90d').notNull().default(0),
+
+    // Cascade output. NULL = Regular (no persona matched) or Dormant
+    // (see `is_dormant`). UI distinguishes those two from `is_dormant`.
+    badge: userBadgeEnum('badge'),
+    isDormant: boolean('is_dormant').notNull().default(false),
+
+    // Tenure — drives the `fresh_meat` badge cascade entry and a
+    // "joined N days ago" hint in the UI. Computed from the oldest
+    // commit's `authored_at` regardless of eligibility (we want the
+    // wall-clock tenure, not the scored tenure).
+    daysSinceFirstCommit: integer('days_since_first_commit').notNull().default(0),
+  },
+  (t) => ({
+    // Default sort key on the leaderboard. NULLS LAST so any future
+    // never-scored row sinks to the bottom rather than the top.
+    trendingIdx: index('user_score_trending_idx').on(t.scoreTrending.desc().nullsLast()),
+    // The 30d window is what the UI surfaces by default in the table.
+    // Skip indexes for the other windows — 110 rows fits in cache and a
+    // full sort is free at this scale.
+    volume30dIdx: index('user_score_volume_30d_idx').on(t.volume30d.desc().nullsLast()),
   }),
 );
 
