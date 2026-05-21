@@ -16,11 +16,17 @@ import {
 // All tables / enums / sequences live under the `bbstat` schema, NOT the
 // Postgres default `public`. Production environments are configured with
 // a restricted role that has no CREATE on `public` (organizational policy),
-// so the entire application schema is namespaced explicitly. The migration
-// SQL Drizzle emits starts with `CREATE SCHEMA IF NOT EXISTS "bbstat"`,
-// so a fresh database picks this up automatically. Existing local DBs
-// from before this change need the data dump + restore flow documented in
-// the README.
+// so the entire application schema is namespaced explicitly.
+//
+// MAINTAINER NOTE: drizzle-kit emits `CREATE SCHEMA "bbstat";` in the
+// initial migration without `IF NOT EXISTS`. That breaks production
+// installs where the DBA has pre-created the schema before the role has
+// CREATE on the database. After running `make db-generate`, if the
+// generated migration's first statement is plain `CREATE SCHEMA "…"`,
+// patch it to `CREATE SCHEMA IF NOT EXISTS "…"` (and mirror in
+// apps/backend/schema/). Only matters when the initial 0000 is
+// regenerated — incremental migrations on top of an existing schema
+// don't trigger this path.
 export const bbstatSchema = pgSchema('bbstat');
 
 // Postgres `tsvector` — used for the commit message FTS column. We never

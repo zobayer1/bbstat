@@ -10,7 +10,7 @@
 -- change needs an incremental migration on top of this base, add it as
 -- V1_2__<desc>.sql alongside the Drizzle output for that change.
 
-CREATE SCHEMA "bbstat";
+CREATE SCHEMA IF NOT EXISTS "bbstat";
 
 CREATE TYPE "bbstat"."pull_request_state" AS ENUM('OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED');
 CREATE TYPE "bbstat"."sync_status" AS ENUM('idle', 'running', 'success', 'failed');

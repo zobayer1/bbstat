@@ -1,4 +1,4 @@
-CREATE SCHEMA "bbstat";
+CREATE SCHEMA IF NOT EXISTS "bbstat";
 --> statement-breakpoint
 CREATE TYPE "bbstat"."pull_request_state" AS ENUM('OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED');--> statement-breakpoint
 CREATE TYPE "bbstat"."sync_status" AS ENUM('idle', 'running', 'success', 'failed');--> statement-breakpoint
