@@ -18,6 +18,17 @@
 #                              compose.yaml pinned (/app/tracked-repos.yaml).
 #                              File must exist on the host (`make dev` workflow
 #                              already requires it).
+#   * build: blocks         — added to each app service so `make build-images`
+#                              (and `compose up --build`) work from source.
+#                              Production never loads this file, so the
+#                              build context is never required there.
+
+# Top-level anchor — backend image is shared by migrate / backend / sync, so
+# all three pick up the same build config via YAML merge keys.
+x-backend-build: &backend-build
+  build:
+    context: .
+    dockerfile: apps/backend/Dockerfile
 
 services:
   postgres:
@@ -62,6 +73,13 @@ services:
     command:
       - '--providers.docker=true'
       - '--providers.docker.exposedbydefault=false'
+      # Scope Traefik's docker provider to *only* this compose project's
+      # containers. Without this, Traefik watches the whole socket and tries
+      # to honor labels on every container on the host — including unrelated
+      # ones from other projects (e.g., a commadm container left running).
+      # Compose auto-labels every container it manages with
+      # `com.docker.compose.project=<project-name>`, so we scope on that.
+      - '--providers.docker.constraints=Label(`com.docker.compose.project`,`bbstat`)'
       # Dashboard at https://traefik.localhost — `api.insecure=true` is fine
       # for local dev (no public exposure).
       - '--api.insecure=true'
@@ -72,8 +90,14 @@ services:
       - '--entrypoints.websecure.address=:443'
       - '--log.level=INFO'
     ports:
-      - '80:80'
-      - '443:443'
+      # Non-standard host ports by default — same rationale as pg/redis: any
+      # other local stack with a reverse proxy (commadm, …) wants :80/:443
+      # too. Override to 80/443 in `.env` if bbstat is the only stack on this
+      # machine and you want bare `https://bbstat.localhost` URLs. Traefik
+      # still listens on :80/:443 *inside* the container; only the host
+      # binding changes.
+      - '${TRAEFIK_HTTP_HOST_PORT:-18080}:80'
+      - '${TRAEFIK_HTTPS_HOST_PORT:-18443}:443'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./etc/traefik:/etc/traefik/dynamic:ro
@@ -89,8 +113,10 @@ services:
   # ─── Overrides on the production services ─────────────────────────────────
   # compose merges these into the base entries from compose.yaml: environment
   # is merged per-key, depends_on lists are unioned, volumes are appended.
+  # build: comes from the top-level x-backend-build anchor (above).
 
   migrate:
+    <<: *backend-build
     environment:
       DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
     depends_on:
@@ -98,6 +124,7 @@ services:
         condition: service_healthy
 
   backend:
+    <<: *backend-build
     environment:
       DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
       REDIS_URL: redis://redis:6379
@@ -110,6 +137,7 @@ services:
       - ./tracked-repos.yaml:/app/tracked-repos.yaml:ro
 
   sync:
+    <<: *backend-build
     environment:
       DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
       REDIS_URL: redis://redis:6379
@@ -122,6 +150,9 @@ services:
       - ./tracked-repos.yaml:/app/tracked-repos.yaml:ro
 
   frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
     labels:
       - 'traefik.enable=true'
       # Tell Traefik which docker network to use to reach this service. The
@@ -139,6 +170,10 @@ services:
       - 'traefik.http.routers.bbstat-frontend-http.entrypoints=web'
       - 'traefik.http.routers.bbstat-frontend-http.middlewares=bbstat-redirect'
       - 'traefik.http.middlewares.bbstat-redirect.redirectscheme.scheme=https'
+      # The redirect must carry the HTTPS host port; otherwise Traefik echoes
+      # the original request's port (e.g., http://…:18080 → https://…:18080)
+      # and the browser ends up at the wrong entrypoint.
+      - 'traefik.http.middlewares.bbstat-redirect.redirectscheme.port=${TRAEFIK_HTTPS_HOST_PORT:-18443}'
 
 volumes:
   bbstat-pg-data:

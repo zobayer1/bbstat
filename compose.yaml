@@ -23,16 +23,20 @@
 # deploy environment (`:?` syntax fails fast if they're missing). Everything
 # else with sensible defaults lives in `.env.docker` (see .env.docker.example).
 #
-# Image policy: `${BACKEND_IMAGE}` / `${FRONTEND_IMAGE}` let prod deployers
-# pull a registry-tagged build; the `build:` blocks make `docker compose
-# build` work locally and in CI.
+# Image policy: this file declares **only** `image:` (no `build:`), so a
+# production server with no repo checkout and pre-loaded images (via
+# `docker load`) can boot the stack with just `docker compose -f compose.yaml
+# up -d`. Local builds live in `compose.override.yaml` — that file adds a
+# `build:` block to each service for the dev workflow.
+#
+# Pin a specific version per deploy by exporting BACKEND_IMAGE / FRONTEND_IMAGE
+# (e.g. `BACKEND_IMAGE=bbstat-backend:v1.2.0`) before invoking compose. The
+# `:latest` defaults are for local-dev convenience only — production deploys
+# should always pin an explicit tag.
 
 # Anchors: backend image config is reused by all three backend-role services.
 x-backend-image: &backend-image
   image: ${BACKEND_IMAGE:-bbstat-backend:latest}
-  build:
-    context: .
-    dockerfile: apps/backend/Dockerfile
 
 # Shared env for the API + sync containers. Migrate gets only what it needs.
 x-backend-env: &backend-env
@@ -92,9 +96,6 @@ services:
 
   frontend:
     image: ${FRONTEND_IMAGE:-bbstat-frontend:latest}
-    build:
-      context: .
-      dockerfile: apps/frontend/Dockerfile
     depends_on:
       backend:
         condition: service_healthy

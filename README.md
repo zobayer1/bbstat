@@ -61,13 +61,13 @@ Then pick a run mode from the table below.
 
 Five ways to run the stack — local without containers (HTTP or HTTPS), full local Docker (with Traefik), or production-base Docker (with or without an external Traefik). Use this table to pick the one that matches what you're working on.
 
-| #   | Mode                                 | When to reach for it                                                          | Prerequisites                                                                                                                                                                        | Commands                                                                                         | URL                                            |
-| --- | ------------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
-| 1   | **Local HTTP** (host pnpm)           | Quick API iteration without cert hassle; debugging mixed-content edge cases   | In `.env`: `BACKEND_TLS=off`, `FRONTEND_TLS=off`, `VITE_API_BASE_URL=http://bbstat.localhost:8443`. Browsers refuse to mix HTTP+HTTPS — both servers must flip together.             | `make up-deps` (pg + redis) <br/> `make dev`                                                     | `http://bbstat.localhost:5173`                 |
-| 2   | **Local HTTPS** (host pnpm, default) | Day-to-day iterative work — HMR, instant restarts                             | `etc/tls/server.{crt,key}` generated; `etc/tls/ca.crt` trusted in your OS/browser store                                                                                              | `make up-deps` <br/> `make dev`                                                                  | `https://bbstat.localhost:5173`                |
-| 3   | **Local Docker + Traefik HTTPS**     | Validating the containerized wire format — nginx config, same-origin `/api/*` | `etc/tls/` populated; `.env.docker` (auto-created from `.env.docker.example` on first `make up`) with BitBucket creds                                                                | `make up` <br/>(brings up pg + redis + traefik + migrate + backend + sync + frontend)            | `https://bbstat.localhost`                     |
-| 4   | **Prod base + external Traefik**     | Dry-running the production wire format with managed pg + redis                | `DATABASE_URL` + `REDIS_URL` exported in shell pointing at your external pg/redis; a Traefik you operate elsewhere configured to upstream to the frontend container's published port | `docker compose -f compose.yaml up -d` <br/>(NO override file — opt-out of dev pg/redis/traefik) | Whatever your reverse proxy exposes            |
-| 5   | **Prod base, no Traefik (HTTP)**     | Quick HTTP smoke against the production-base stack with no TLS layer          | Same as #4 minus the proxy                                                                                                                                                           | `docker compose -f compose.yaml up -d` <br/>Hit the frontend container's published port directly | `http://localhost:${FRONTEND_HOST_PORT:-8080}` |
+| #   | Mode                                 | When to reach for it                                                          | Prerequisites                                                                                                                                                                        | Commands                                                                                                                                  | URL                                                                                                                                                                             |
+| --- | ------------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Local HTTP** (host pnpm)           | Quick API iteration without cert hassle; debugging mixed-content edge cases   | In `.env`: `BACKEND_TLS=off`, `FRONTEND_TLS=off`, `VITE_API_BASE_URL=http://bbstat.localhost:8443`. Browsers refuse to mix HTTP+HTTPS — both servers must flip together.             | `make up-deps` (pg + redis) <br/> `make dev` <br/> `make dev-sync` (separate terminal — needs BB creds in `.env`)                         | `http://bbstat.localhost:5173`                                                                                                                                                  |
+| 2   | **Local HTTPS** (host pnpm, default) | Day-to-day iterative work — HMR, instant restarts                             | `etc/tls/server.{crt,key}` generated; `etc/tls/ca.crt` trusted in your OS/browser store                                                                                              | `make up-deps` <br/> `make dev` <br/> `make dev-sync` (separate terminal — needs BB creds in `.env`)                                      | `https://bbstat.localhost:5173`                                                                                                                                                 |
+| 3   | **Local Docker + Traefik HTTPS**     | Validating the containerized wire format — nginx config, same-origin `/api/*` | `etc/tls/` populated; `.env.docker` (auto-created from `.env.docker.example` on first `make up`) with BitBucket creds                                                                | `make up` <br/>(brings up pg + redis + traefik + migrate + backend + sync + frontend — sync runs inside the stack)                        | `https://bbstat.localhost:18443` <br/>(`TRAEFIK_HTTPS_HOST_PORT` — defaults to 18443 to avoid colliding with other local Traefik stacks; flip to `443` in `.env` for bare URLs) |
+| 4   | **Prod base + external Traefik**     | Dry-running the production wire format with managed pg + redis                | `DATABASE_URL` + `REDIS_URL` exported in shell pointing at your external pg/redis; a Traefik you operate elsewhere configured to upstream to the frontend container's published port | `docker compose -f compose.yaml up -d` <br/>(NO override file — opt-out of dev pg/redis/traefik; sync container is still in compose.yaml) | Whatever your reverse proxy exposes                                                                                                                                             |
+| 5   | **Prod base, no Traefik (HTTP)**     | Quick HTTP smoke against the production-base stack with no TLS layer          | Same as #4 minus the proxy                                                                                                                                                           | `docker compose -f compose.yaml up -d` <br/>Hit the frontend container's published port directly                                          | `http://localhost:${FRONTEND_HOST_PORT:-8080}`                                                                                                                                  |
 
 **Notes**
 
@@ -75,6 +75,33 @@ Five ways to run the stack — local without containers (HTTP or HTTPS), full lo
 - Modes 4 + 5 need `DATABASE_URL` and `REDIS_URL` set in the shell, since `compose.yaml` declares them with `${VAR:?msg}` (fails fast if missing).
 - The backend always listens on plain HTTP inside containers (`BACKEND_TLS=off` baked into the image); modes 4 and 5 rely on the external proxy (or none) for the public TLS layer, never the backend.
 - The frontend image bakes `VITE_API_BASE_URL=""` at build time, so the SPA always requests same-origin `/api/*`. Modes 4 + 5 inherit that; whatever proxy fronts the frontend container must forward `/api/*` paths to the same upstream (nginx-in-container already does this internally — see `apps/frontend/nginx.conf`).
+- **Sync runner**: `make dev` only spawns backend + frontend, so modes 1 + 2 need `make dev-sync` in a second terminal to ingest from BitBucket. Modes 3-5 include the sync runner as a compose service (`sync:` in `compose.yaml`) — it boots automatically alongside the rest. The sync runner skips with a warning if `BITBUCKET_AUTH_*` aren't set, so it's safe to leave out in modes you're just smoke-testing.
+
+## Production deploys (image-only)
+
+`compose.yaml` declares **no `build:` blocks** (those live in `compose.override.yaml`), so a production server with no repo checkout can boot the stack as long as the tagged images are loaded locally. The flow:
+
+```bash
+# 1. Build + tag with a real version (on the build machine, with the repo)
+BACKEND_IMAGE=bbstat-backend:v1.2.0 FRONTEND_IMAGE=bbstat-frontend:v1.2.0 make build-images
+
+# 2. Save to portable tarballs
+docker save -o bbstat-v1.2.0.tar bbstat-backend:v1.2.0 bbstat-frontend:v1.2.0
+
+# 3. Transfer the tarball + compose.yaml + .env.docker to the production host
+#    (compose.override.yaml is deliberately NOT shipped)
+scp bbstat-v1.2.0.tar compose.yaml .env.docker prod:/opt/bbstat/
+
+# 4. On the production host: load images, set deploy env, start
+docker load -i bbstat-v1.2.0.tar
+export BACKEND_IMAGE=bbstat-backend:v1.2.0 \
+       FRONTEND_IMAGE=bbstat-frontend:v1.2.0 \
+       DATABASE_URL=postgres://… \
+       REDIS_URL=redis://…
+docker compose -f compose.yaml up -d
+```
+
+Rollback is the same flow with the previous tag — both versions can sit on the host simultaneously, swap by re-exporting `*_IMAGE` and `compose up -d` again. `BACKEND_IMAGE` and `FRONTEND_IMAGE` are documented in `.env.docker.example`.
 
 ## Common commands
 
