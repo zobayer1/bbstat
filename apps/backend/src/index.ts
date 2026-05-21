@@ -119,7 +119,7 @@ async function main(): Promise<void> {
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
       bus,
-      recomputeUserScores: () => recomputeUserScores({ db, cache: redis, logger }),
+      recomputeUserScores: () => recomputeUserScores({ db, logger }),
     };
   }
 

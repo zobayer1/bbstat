@@ -20,7 +20,6 @@
 
 import { sql } from 'drizzle-orm';
 
-import { leaderboardCache, type CacheClient } from '../cache/redis.js';
 import type { Database } from '../db/client.js';
 import { userScore } from '../db/schema.js';
 import { CONSISTENCY_WINDOW_DAYS, FLOOR, WINDOW_30D, WINDOW_365D, WINDOW_7D, WINDOW_90D } from './constants.js';
@@ -51,15 +50,10 @@ export interface UserScoreRollupResult {
   finishedAt: string;
   durationMs: number;
   devsProcessed: number;
-  cacheKeysDeleted: number;
 }
 
 export interface UserScoreRollupDeps {
   db: Database;
-  // Optional. When wired, leaderboard cache keys (bbstat:leaderboard:*)
-  // are deleted after a successful rollup. Phase 4 lands the readers; the
-  // invalidation hook stays in place so the read path is correct on day one.
-  cache?: CacheClient;
   // Pino-shaped logger. Omitted in tests that don't care about output.
   logger?: { info?: (obj: object, msg?: string) => void; warn?: (obj: object, msg?: string) => void };
   // Override for tests so decay and window cutoffs are deterministic.
@@ -292,21 +286,9 @@ export async function recomputeUserScores(deps: UserScoreRollupDeps): Promise<Us
       });
   }
 
-  let cacheKeysDeleted = 0;
-  if (deps.cache) {
-    try {
-      cacheKeysDeleted = await leaderboardCache.invalidateAll(deps.cache);
-    } catch (err) {
-      deps.logger?.warn?.(
-        { err: err instanceof Error ? err.message : String(err) },
-        'user score rollup: cache invalidation failed — readers will see stale data until TTL',
-      );
-    }
-  }
-
   const finishedAt = new Date().toISOString();
   const durationMs = Date.now() - startedAtMs;
-  deps.logger?.info?.({ devsProcessed: rows.length, durationMs, cacheKeysDeleted }, 'user score rollup complete');
+  deps.logger?.info?.({ devsProcessed: rows.length, durationMs }, 'user score rollup complete');
 
-  return { startedAt, finishedAt, durationMs, devsProcessed: rows.length, cacheKeysDeleted };
+  return { startedAt, finishedAt, durationMs, devsProcessed: rows.length };
 }

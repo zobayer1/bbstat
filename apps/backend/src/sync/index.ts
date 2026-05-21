@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     diffStatsBackfillOptions,
     backoffOptions,
     bus,
-    recomputeUserScores: () => recomputeUserScores({ db, cache: redis, logger }),
+    recomputeUserScores: () => recomputeUserScores({ db, logger }),
   };
 
   // Four independent schedules. Members rarely change; repo metadata

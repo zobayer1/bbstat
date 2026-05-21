@@ -14,7 +14,6 @@
 
 /* eslint-disable no-console -- CLI utility, console output is the deliverable */
 
-import { createCache } from '../cache/redis.js';
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { recomputeUserScores } from '../scoring/rollup.js';
@@ -22,15 +21,11 @@ import { recomputeUserScores } from '../scoring/rollup.js';
 async function main(): Promise<void> {
   const config = loadConfig();
   const db = createDb(config.DATABASE_URL);
-  const cache = createCache(config.REDIS_URL);
 
   console.log(`→ Recomputing user_score from commits…`);
   try {
-    const result = await recomputeUserScores({ db, cache });
-    console.log(
-      `✓ Recomputed ${result.devsProcessed} user_score rows in ${result.durationMs}ms ` +
-        `(${result.cacheKeysDeleted} leaderboard cache key(s) invalidated).`,
-    );
+    const result = await recomputeUserScores({ db });
+    console.log(`✓ Recomputed ${result.devsProcessed} user_score rows in ${result.durationMs}ms.`);
     process.exit(0);
   } catch (err) {
     console.error(`✗ Recompute failed: ${err instanceof Error ? err.message : String(err)}`);
