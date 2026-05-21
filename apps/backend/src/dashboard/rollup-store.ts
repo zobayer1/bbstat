@@ -62,6 +62,15 @@ export function createDrizzleRollupStore(db: Database): RollupStore {
       // rebuilt" state. The NULLS NOT DISTINCT constraint on
       // `commit_daily_day_repo_user_unique` collapses anonymous-author
       // commits to a single (day, repo, NULL) row, same as before.
+      //
+      // Merge-commit split: `commit_count` and `additions` / `deletions`
+      // exclude merges (FILTER WHERE NOT is_merge) — user-level
+      // aggregates that read straight from commit_daily (Members
+      // table, top-contributors panel, etc.) should never see merge
+      // churn double-attributed to the click-the-merge-button author.
+      // `merge_commit_count` is the merge counterpart for repo-level
+      // activity displays that DO want to surface "this repo got a
+      // merge today". See schema.ts comment on commit_daily.
       return await db.transaction(async (tx) => {
         await tx.execute(sql`
           DELETE FROM commit_daily
@@ -69,14 +78,18 @@ export function createDrizzleRollupStore(db: Database): RollupStore {
             AND day BETWEEN ${sinceDay}::date AND ${untilDay}::date
         `);
         const result = await tx.execute(sql`
-          INSERT INTO commit_daily (day, repository_id, author_user_id, commit_count, additions, deletions, updated_at)
+          INSERT INTO commit_daily (
+            day, repository_id, author_user_id,
+            commit_count, merge_commit_count, additions, deletions, updated_at
+          )
           SELECT
             (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date AS day,
             repository_id,
             author_user_id,
-            count(*)::int,
-            sum(additions)::int,
-            sum(deletions)::int,
+            count(*) FILTER (WHERE NOT is_merge)::int AS commit_count,
+            count(*) FILTER (WHERE is_merge)::int AS merge_commit_count,
+            COALESCE(sum(additions) FILTER (WHERE NOT is_merge), 0)::int AS additions,
+            COALESCE(sum(deletions) FILTER (WHERE NOT is_merge), 0)::int AS deletions,
             now()
           FROM commits
           WHERE repository_id = ${repositoryId}
@@ -99,23 +112,28 @@ export function createDrizzleRollupStore(db: Database): RollupStore {
     },
 
     async rebuildAll() {
-      // Same aggregate shape as the V1_3 migration backfill, but ON CONFLICT
-      // DO UPDATE so it actually fixes drifted rows (the migration was DO
-      // NOTHING for idempotent re-apply, which can't reconcile staleness).
+      // Same aggregate shape as `recomputeCommitDailyForRepo` (see the
+      // merge-split rationale there) but unscoped, with ON CONFLICT DO
+      // UPDATE so drifted rows get fixed in place.
       const result = await db.execute(sql`
-        INSERT INTO commit_daily (day, repository_id, author_user_id, commit_count, additions, deletions, updated_at)
+        INSERT INTO commit_daily (
+          day, repository_id, author_user_id,
+          commit_count, merge_commit_count, additions, deletions, updated_at
+        )
         SELECT
           (date_trunc('day', authored_at AT TIME ZONE 'UTC'))::date AS day,
           repository_id,
           author_user_id,
-          count(*)::int,
-          sum(additions)::int,
-          sum(deletions)::int,
+          count(*) FILTER (WHERE NOT is_merge)::int AS commit_count,
+          count(*) FILTER (WHERE is_merge)::int AS merge_commit_count,
+          COALESCE(sum(additions) FILTER (WHERE NOT is_merge), 0)::int AS additions,
+          COALESCE(sum(deletions) FILTER (WHERE NOT is_merge), 0)::int AS deletions,
           now()
         FROM commits
         GROUP BY 1, 2, 3
         ON CONFLICT ON CONSTRAINT commit_daily_day_repo_user_unique DO UPDATE SET
           commit_count = EXCLUDED.commit_count,
+          merge_commit_count = EXCLUDED.merge_commit_count,
           additions = EXCLUDED.additions,
           deletions = EXCLUDED.deletions,
           updated_at = now()
