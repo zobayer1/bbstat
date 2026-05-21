@@ -65,3 +65,7 @@ tracked-repos.yaml
 *.tmp
 *.bak
 reports/
+
+# --- Database dumps (per-developer; never committed) ---
+bbstat-data-*.sql
+*.dump

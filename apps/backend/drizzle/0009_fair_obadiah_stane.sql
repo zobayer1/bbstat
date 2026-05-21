@@ -1,1 +1,0 @@
-ALTER TABLE "repositories" ADD COLUMN "sync_exclude_reason" text;

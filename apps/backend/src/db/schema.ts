@@ -1,7 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  pgTable,
-  pgEnum,
+  pgSchema,
   serial,
   text,
   timestamp,
@@ -13,6 +12,16 @@ import {
   uniqueIndex,
   customType,
 } from 'drizzle-orm/pg-core';
+
+// All tables / enums / sequences live under the `bbstat` schema, NOT the
+// Postgres default `public`. Production environments are configured with
+// a restricted role that has no CREATE on `public` (organizational policy),
+// so the entire application schema is namespaced explicitly. The migration
+// SQL Drizzle emits starts with `CREATE SCHEMA IF NOT EXISTS "bbstat"`,
+// so a fresh database picks this up automatically. Existing local DBs
+// from before this change need the data dump + restore flow documented in
+// the README.
+export const bbstatSchema = pgSchema('bbstat');
 
 // Postgres `tsvector` — used for the commit message FTS column. We never
 // read this column from TypeScript (it's a derived index target only), so
@@ -28,9 +37,14 @@ const tsvector = customType<{ data: unknown; driverData: string; notNull: false;
 // Enums
 // ---------------------------------------------------------------------------
 
-export const syncStatusEnum = pgEnum('sync_status', ['idle', 'running', 'success', 'failed']);
+export const syncStatusEnum = bbstatSchema.enum('sync_status', ['idle', 'running', 'success', 'failed']);
 
-export const pullRequestStateEnum = pgEnum('pull_request_state', ['OPEN', 'MERGED', 'DECLINED', 'SUPERSEDED']);
+export const pullRequestStateEnum = bbstatSchema.enum('pull_request_state', [
+  'OPEN',
+  'MERGED',
+  'DECLINED',
+  'SUPERSEDED',
+]);
 
 // ---------------------------------------------------------------------------
 // Core entities
@@ -59,7 +73,7 @@ export const pullRequestStateEnum = pgEnum('pull_request_state', ['OPEN', 'MERGE
 // rejoins the workspace flips back to TRUE on the next tick. The UI
 // uses the flag to mute out-of-workspace contributors in member lists
 // and filter "active team" vs "all-time contributors" leaderboards.
-export const users = pgTable('users', {
+export const users = bbstatSchema.table('users', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
   displayName: text('display_name').notNull(),
@@ -110,7 +124,7 @@ export const users = pgTable('users', {
 // freshness-first pickup across the entire pool. Operator opt-out
 // goes through `archived` (full retirement) or per-file
 // `diff_stats_exclude_patterns` (skip specific paths).
-export const repositories = pgTable('repositories', {
+export const repositories = bbstatSchema.table('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
   workspace: text('workspace').notNull(),
@@ -157,7 +171,7 @@ export const repositories = pgTable('repositories', {
 // stay at their defaults (additions=0, deletions=0, files_changed=0,
 // diff_stats_synced_at=NULL) — the partial index keys the backfill
 // pickup on that NULL stamp.
-export const commits = pgTable(
+export const commits = bbstatSchema.table(
   'commits',
   {
     id: serial('id').primaryKey(),
@@ -242,7 +256,7 @@ export const commits = pgTable(
 // single row per (day, repository_id) thanks to NULLS NOT DISTINCT on the
 // unique index — without it, NULL would compare unequal and we'd accumulate
 // one duplicate per anonymous commit. Postgres ≥ 15 required.
-export const commitDaily = pgTable(
+export const commitDaily = bbstatSchema.table(
   'commit_daily',
   {
     day: date('day').notNull(),
@@ -268,7 +282,7 @@ export const commitDaily = pgTable(
   }),
 );
 
-export const branches = pgTable(
+export const branches = bbstatSchema.table(
   'branches',
   {
     id: serial('id').primaryKey(),
@@ -285,7 +299,7 @@ export const branches = pgTable(
   }),
 );
 
-export const pullRequests = pgTable(
+export const pullRequests = bbstatSchema.table(
   'pull_requests',
   {
     id: serial('id').primaryKey(),
@@ -325,7 +339,7 @@ export const pullRequests = pgTable(
 // run on independent schedules and write disjoint columns, so they don't
 // stomp on each other. Manual, cron, and webhook triggers all converge on
 // the same row — see runSync() in src/sync/runner.ts.
-export const syncState = pgTable('sync_state', {
+export const syncState = bbstatSchema.table('sync_state', {
   repositoryId: integer('repository_id')
     .primaryKey()
     .references(() => repositories.id, { onDelete: 'cascade' }),

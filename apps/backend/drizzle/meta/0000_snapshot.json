@@ -1,12 +1,12 @@
 {
-  "id": "1dde73bf-d2fe-4b99-b673-7b2078cc5d3a",
+  "id": "ace7f8cc-36a2-4d8b-91e6-676c8dd59112",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "public.branches": {
+    "bbstat.branches": {
       "name": "branches",
-      "schema": "",
+      "schema": "bbstat",
       "columns": {
         "id": {
           "name": "id",
@@ -75,6 +75,7 @@
           "name": "branches_repository_id_repositories_id_fk",
           "tableFrom": "branches",
           "tableTo": "repositories",
+          "schemaTo": "bbstat",
           "columnsFrom": [
             "repository_id"
           ],
@@ -91,9 +92,150 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.commits": {
+    "bbstat.commit_daily": {
+      "name": "commit_daily",
+      "schema": "bbstat",
+      "columns": {
+        "day": {
+          "name": "day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "repository_id": {
+          "name": "repository_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "author_user_id": {
+          "name": "author_user_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "commit_count": {
+          "name": "commit_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "additions": {
+          "name": "additions",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "deletions": {
+          "name": "deletions",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "commit_daily_repo_day_idx": {
+          "name": "commit_daily_repo_day_idx",
+          "columns": [
+            {
+              "expression": "repository_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "commit_daily_user_day_idx": {
+          "name": "commit_daily_user_day_idx",
+          "columns": [
+            {
+              "expression": "author_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "commit_daily_repository_id_repositories_id_fk": {
+          "name": "commit_daily_repository_id_repositories_id_fk",
+          "tableFrom": "commit_daily",
+          "tableTo": "repositories",
+          "schemaTo": "bbstat",
+          "columnsFrom": [
+            "repository_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "commit_daily_author_user_id_users_id_fk": {
+          "name": "commit_daily_author_user_id_users_id_fk",
+          "tableFrom": "commit_daily",
+          "tableTo": "users",
+          "schemaTo": "bbstat",
+          "columnsFrom": [
+            "author_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "commit_daily_day_repo_user_unique": {
+          "name": "commit_daily_day_repo_user_unique",
+          "nullsNotDistinct": true,
+          "columns": [
+            "day",
+            "repository_id",
+            "author_user_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "bbstat.commits": {
       "name": "commits",
-      "schema": "",
+      "schema": "bbstat",
       "columns": {
         "id": {
           "name": "id",
@@ -125,6 +267,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "is_merge": {
+          "name": "is_merge",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "additions": {
           "name": "additions",
           "type": "integer",
@@ -139,6 +288,38 @@
           "notNull": true,
           "default": 0
         },
+        "files_changed": {
+          "name": "files_changed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "diff_stats_failure_count": {
+          "name": "diff_stats_failure_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "diff_stats_synced_at": {
+          "name": "diff_stats_synced_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "author_email": {
+          "name": "author_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "author_display_name": {
+          "name": "author_display_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "authored_at": {
           "name": "authored_at",
           "type": "timestamp with time zone",
@@ -151,11 +332,21 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "message_tsv": {
+          "name": "message_tsv",
+          "type": "tsvector",
+          "primaryKey": false,
+          "notNull": false,
+          "generated": {
+            "as": "to_tsvector('simple', message)",
+            "type": "stored"
+          }
         }
       },
       "indexes": {
-        "commits_sha_repo_idx": {
-          "name": "commits_sha_repo_idx",
+        "commits_sha_repo_unique": {
+          "name": "commits_sha_repo_unique",
           "columns": [
             {
               "expression": "repository_id",
@@ -170,7 +361,7 @@
               "nulls": "last"
             }
           ],
-          "isUnique": false,
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -195,6 +386,52 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "commits_pending_diff_stats_idx": {
+          "name": "commits_pending_diff_stats_idx",
+          "columns": [
+            {
+              "expression": "repository_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"bbstat\".\"commits\".\"diff_stats_synced_at\" IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "commits_message_tsv_idx": {
+          "name": "commits_message_tsv_idx",
+          "columns": [
+            {
+              "expression": "message_tsv",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "commits_sha_prefix_idx": {
+          "name": "commits_sha_prefix_idx",
+          "columns": [
+            {
+              "expression": "\"sha\" text_pattern_ops",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -202,6 +439,7 @@
           "name": "commits_repository_id_repositories_id_fk",
           "tableFrom": "commits",
           "tableTo": "repositories",
+          "schemaTo": "bbstat",
           "columnsFrom": [
             "repository_id"
           ],
@@ -215,6 +453,7 @@
           "name": "commits_author_user_id_users_id_fk",
           "tableFrom": "commits",
           "tableTo": "users",
+          "schemaTo": "bbstat",
           "columnsFrom": [
             "author_user_id"
           ],
@@ -231,9 +470,9 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.pull_requests": {
+    "bbstat.pull_requests": {
       "name": "pull_requests",
-      "schema": "",
+      "schema": "bbstat",
       "columns": {
         "id": {
           "name": "id",
@@ -262,7 +501,7 @@
         "state": {
           "name": "state",
           "type": "pull_request_state",
-          "typeSchema": "public",
+          "typeSchema": "bbstat",
           "primaryKey": false,
           "notNull": true
         },
@@ -406,6 +645,7 @@
           "name": "pull_requests_repository_id_repositories_id_fk",
           "tableFrom": "pull_requests",
           "tableTo": "repositories",
+          "schemaTo": "bbstat",
           "columnsFrom": [
             "repository_id"
           ],
@@ -419,6 +659,7 @@
           "name": "pull_requests_author_user_id_users_id_fk",
           "tableFrom": "pull_requests",
           "tableTo": "users",
+          "schemaTo": "bbstat",
           "columnsFrom": [
             "author_user_id"
           ],
@@ -435,9 +676,9 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.repositories": {
+    "bbstat.repositories": {
       "name": "repositories",
-      "schema": "",
+      "schema": "bbstat",
       "columns": {
         "id": {
           "name": "id",
@@ -475,6 +716,33 @@
           "primaryKey": false,
           "notNull": true
         },
+        "archived": {
+          "name": "archived",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "sync_excluded": {
+          "name": "sync_excluded",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "sync_exclude_reason": {
+          "name": "sync_exclude_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "diff_stats_exclude_patterns": {
+          "name": "diff_stats_exclude_patterns",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -499,9 +767,9 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.sync_state": {
+    "bbstat.sync_state": {
       "name": "sync_state",
-      "schema": "",
+      "schema": "bbstat",
       "columns": {
         "repository_id": {
           "name": "repository_id",
@@ -530,7 +798,7 @@
         "last_sync_status": {
           "name": "last_sync_status",
           "type": "sync_status",
-          "typeSchema": "public",
+          "typeSchema": "bbstat",
           "primaryKey": false,
           "notNull": true,
           "default": "'idle'"
@@ -547,6 +815,76 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "last_pr_updated_at": {
+          "name": "last_pr_updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_pr_id": {
+          "name": "last_pr_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pr_last_synced_at": {
+          "name": "pr_last_synced_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pr_total_synced": {
+          "name": "pr_total_synced",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "deepen_complete": {
+          "name": "deepen_complete",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "deepen_last_run_at": {
+          "name": "deepen_last_run_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_merge_backfill_complete": {
+          "name": "is_merge_backfill_complete",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "is_merge_backfill_cursor_sha": {
+          "name": "is_merge_backfill_cursor_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_merge_last_run_at": {
+          "name": "is_merge_last_run_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "anonymous_sweep_complete": {
+          "name": "anonymous_sweep_complete",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "anonymous_sweep_last_run_at": {
+          "name": "anonymous_sweep_last_run_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -569,6 +907,7 @@
           "name": "sync_state_repository_id_repositories_id_fk",
           "tableFrom": "sync_state",
           "tableTo": "repositories",
+          "schemaTo": "bbstat",
           "columnsFrom": [
             "repository_id"
           ],
@@ -585,9 +924,9 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.users": {
+    "bbstat.users": {
       "name": "users",
-      "schema": "",
+      "schema": "bbstat",
       "columns": {
         "id": {
           "name": "id",
@@ -612,6 +951,19 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_workspace_member": {
+          "name": "is_workspace_member",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "created_at": {
           "name": "created_at",
@@ -639,9 +991,9 @@
     }
   },
   "enums": {
-    "public.pull_request_state": {
+    "bbstat.pull_request_state": {
       "name": "pull_request_state",
-      "schema": "public",
+      "schema": "bbstat",
       "values": [
         "OPEN",
         "MERGED",
@@ -649,9 +1001,9 @@
         "SUPERSEDED"
       ]
     },
-    "public.sync_status": {
+    "bbstat.sync_status": {
       "name": "sync_status",
-      "schema": "public",
+      "schema": "bbstat",
       "values": [
         "idle",
         "running",
@@ -660,7 +1012,9 @@
       ]
     }
   },
-  "schemas": {},
+  "schemas": {
+    "bbstat": "bbstat"
+  },
   "sequences": {},
   "roles": {},
   "policies": {},

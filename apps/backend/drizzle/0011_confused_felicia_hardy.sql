@@ -1,1 +1,0 @@
-ALTER TABLE "repositories" DROP COLUMN "diff_stats_enabled";

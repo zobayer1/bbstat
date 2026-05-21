@@ -1,1 +1,0 @@
-ALTER TABLE "repositories" ADD COLUMN "diff_stats_exclude_patterns" text[] DEFAULT '{}' NOT NULL;

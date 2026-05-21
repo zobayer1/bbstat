@@ -1,1 +1,0 @@
-ALTER TABLE "repositories" ADD COLUMN "archived" boolean DEFAULT false NOT NULL;
