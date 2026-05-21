@@ -205,23 +205,23 @@ ALTER TABLE bbstat.commit_daily
 
 One row per user; nightly-rebuilt rollup.
 
-| Column                    | Type          | Notes                                             |
-| ------------------------- | ------------- | ------------------------------------------------- |
-| `user_id`                 | int PK FK     | → `users.id` ON DELETE CASCADE                    |
-| `computed_at`             | timestamptz   | when this row was last recomputed                 |
-| `commits_eligible`        | int           | filtered count (drives the score)                 |
-| `commits_total`           | int           | including pending/merges; drives coverage warning |
-| `coverage_pct`            | double        | `commits_eligible / commits_total`                |
-| `p95_churn_cap`           | int           | `max(per_dev_p95, FLOOR)`                         |
-| `score_trending`          | double        | decayed global; default sort                      |
-| `volume_7d` … `volume_all`| double (×5)   | per-window un-decayed sums                        |
-| `consistency_90d`         | double NULL   | NULL for cold-start                               |
-| `active_days_90d`         | int           |                                                   |
-| `median_churn_90d`        | int           | drives `deep_diver`                               |
-| `p95_churn_90d`           | int           | drives `ai_alex`                                  |
-| `badge`                   | enum NULL     | `user_badge` enum (see below)                     |
-| `is_dormant`              | bool          | `active_days_90d = 0` — UI grays the row          |
-| `days_since_first_commit` | int           | drives `fresh_meat` plus UI tenure display        |
+| Column                     | Type        | Notes                                             |
+| -------------------------- | ----------- | ------------------------------------------------- |
+| `user_id`                  | int PK FK   | → `users.id` ON DELETE CASCADE                    |
+| `computed_at`              | timestamptz | when this row was last recomputed                 |
+| `commits_eligible`         | int         | filtered count (drives the score)                 |
+| `commits_total`            | int         | including pending/merges; drives coverage warning |
+| `coverage_pct`             | double      | `commits_eligible / commits_total`                |
+| `p95_churn_cap`            | int         | `max(per_dev_p95, FLOOR)`                         |
+| `score_trending`           | double      | decayed global; default sort                      |
+| `volume_7d` … `volume_all` | double (×5) | per-window un-decayed sums                        |
+| `consistency_90d`          | double NULL | NULL for cold-start                               |
+| `active_days_90d`          | int         |                                                   |
+| `median_churn_90d`         | int         | drives `deep_diver`                               |
+| `p95_churn_90d`            | int         | drives `ai_alex`                                  |
+| `badge`                    | enum NULL   | `user_badge` enum (see below)                     |
+| `is_dormant`               | bool        | `active_days_90d = 0` — UI grays the row          |
+| `days_since_first_commit`  | int         | drives `fresh_meat` plus UI tenure display        |
 
 New enum: `user_badge` with values `fresh_meat`, `deep_diver`, `ai_alex`,
 `steady_eddie`, `batch_betty`, `cleanup_crew`. Nullable column → "Regular" /
@@ -239,14 +239,14 @@ Skip the rest; 110 rows fits in cache, full-scan is free.
 Each phase is its own commit (migrations especially — separate commit per
 the standing convention).
 
-| Phase | Scope                                                                                                            |
-| ----- | ---------------------------------------------------------------------------------------------------------------- |
-| **1** | Schema: `commit_daily.merge_commit_count` + `user_score` table. Drizzle migration + Flyway mirror.               |
+| Phase | Scope                                                                                                                     |
+| ----- | ------------------------------------------------------------------------------------------------------------------------- |
+| **1** | Schema: `commit_daily.merge_commit_count` + `user_score` table. Drizzle migration + Flyway mirror.                        |
 | **2** | Pure-function scoring engine in `apps/backend/src/scoring/`: `commit-score`, `decay`, `consistency`, `badge`. Unit tests. |
-| **3** | Rollup runner `recomputeUserScores()`. Wire into `runSync`. Admin endpoint for manual triggers. Redis invalidation. |
-| **4** | Read API: `GET /api/stats/leaderboard?sort=…`, `GET /api/stats/leaderboard/:userId/breakdown`. Redis cached.     |
-| **5** | Frontend: Pinia store (bump `CACHE_VERSION`), Leaderboard page, UserBadge component, MethodologyModal.           |
-| **6** | Rollout: migrate → backfill `merge_commit_count` → first manual recompute → smoke through `make up`.             |
+| **3** | Rollup runner `recomputeUserScores()`. Wire into `runSync`. Admin endpoint for manual triggers. Redis invalidation.       |
+| **4** | Read API: `GET /api/stats/leaderboard?sort=…`, `GET /api/stats/leaderboard/:userId/breakdown`. Redis cached.              |
+| **5** | Frontend: Pinia store (bump `CACHE_VERSION`), Leaderboard page, UserBadge component, MethodologyModal.                    |
+| **6** | Rollout: migrate → backfill `merge_commit_count` → first manual recompute → smoke through `make up`.                      |
 
 ### Phase 6 post-deploy
 
