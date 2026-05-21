@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyBadge, classifyBadgeTier } from '../src/scoring/badge.js';
+import { classifyBadge, classifyBadgeTier, tierFromRank } from '../src/scoring/badge.js';
 import type { BadgeInput } from '../src/scoring/badge.js';
 import { scoreCommit } from '../src/scoring/commit-score.js';
 import { computeConsistency } from '../src/scoring/consistency.js';
@@ -264,27 +264,47 @@ describe('classifyBadge', () => {
   });
 });
 
+describe('tierFromRank', () => {
+  it('returns bronze for an empty cohort (edge case)', () => {
+    expect(tierFromRank(0, 0)).toBe('bronze');
+  });
+
+  it('top 10% → gold, next 40% → silver, bottom half → bronze', () => {
+    // Cohort of 10: ceil(10*0.10) = 1 gold, ceil(10*0.50) = 5 silver-end
+    expect(tierFromRank(0, 10)).toBe('gold');
+    expect(tierFromRank(1, 10)).toBe('silver');
+    expect(tierFromRank(4, 10)).toBe('silver');
+    expect(tierFromRank(5, 10)).toBe('bronze');
+    expect(tierFromRank(9, 10)).toBe('bronze');
+  });
+
+  it('handles cohort of 1 — sole dev is gold by default', () => {
+    expect(tierFromRank(0, 1)).toBe('gold');
+  });
+
+  it('handles cohort of 25 — gives ~3 gold, ~10 silver, ~12 bronze', () => {
+    // ceil(25*0.10) = 3, ceil(25*0.50) = 13 → ranks 0–2 gold, 3–12 silver, 13–24 bronze
+    expect(tierFromRank(2, 25)).toBe('gold');
+    expect(tierFromRank(3, 25)).toBe('silver');
+    expect(tierFromRank(12, 25)).toBe('silver');
+    expect(tierFromRank(13, 25)).toBe('bronze');
+  });
+});
+
 describe('classifyBadgeTier', () => {
-  it('returns null when the badge is not steady_eddie', () => {
-    expect(classifyBadgeTier('batch_betty', 0.5)).toBeNull();
-    expect(classifyBadgeTier('deep_diver', 0.5)).toBeNull();
-    expect(classifyBadgeTier('ai_alex', 0.5)).toBeNull();
-    expect(classifyBadgeTier('cleanup_crew', 0.5)).toBeNull();
-    expect(classifyBadgeTier('fresh_meat', 0.5)).toBeNull();
-    expect(classifyBadgeTier(null, 0.5)).toBeNull();
+  it('returns null for any non-steady-eddie badge regardless of rank', () => {
+    expect(classifyBadgeTier('batch_betty', 0, 10)).toBeNull();
+    expect(classifyBadgeTier('deep_diver', 0, 10)).toBeNull();
+    expect(classifyBadgeTier('ai_alex', 0, 10)).toBeNull();
+    expect(classifyBadgeTier('cleanup_crew', 0, 10)).toBeNull();
+    expect(classifyBadgeTier('fresh_meat', 0, 10)).toBeNull();
+    expect(classifyBadgeTier(null, 0, 10)).toBeNull();
   });
 
-  it('collapses null consistency (cold-start) to bronze for steady_eddie', () => {
-    expect(classifyBadgeTier('steady_eddie', null)).toBe('bronze');
-  });
-
-  it('tiers steady_eddie by consistency', () => {
-    expect(classifyBadgeTier('steady_eddie', 0.0)).toBe('bronze');
-    expect(classifyBadgeTier('steady_eddie', 0.34)).toBe('bronze');
-    expect(classifyBadgeTier('steady_eddie', 0.35)).toBe('silver');
-    expect(classifyBadgeTier('steady_eddie', 0.4)).toBe('silver');
-    expect(classifyBadgeTier('steady_eddie', 0.41)).toBe('gold');
-    expect(classifyBadgeTier('steady_eddie', 0.5)).toBe('gold');
+  it('delegates to tierFromRank for steady_eddie', () => {
+    expect(classifyBadgeTier('steady_eddie', 0, 10)).toBe('gold');
+    expect(classifyBadgeTier('steady_eddie', 4, 10)).toBe('silver');
+    expect(classifyBadgeTier('steady_eddie', 5, 10)).toBe('bronze');
   });
 });
 

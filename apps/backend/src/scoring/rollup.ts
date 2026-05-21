@@ -24,7 +24,7 @@ import { leaderboardCache, type CacheClient } from '../cache/redis.js';
 import type { Database } from '../db/client.js';
 import { userScore } from '../db/schema.js';
 import { CONSISTENCY_WINDOW_DAYS, FLOOR, WINDOW_30D, WINDOW_365D, WINDOW_7D, WINDOW_90D } from './constants.js';
-import { classifyBadge, classifyBadgeTier, type Badge } from './badge.js';
+import { classifyBadge, tierFromRank, type Badge } from './badge.js';
 import { scoreCommit } from './commit-score.js';
 import { computeConsistency } from './consistency.js';
 import { decayWeight } from './decay.js';
@@ -155,7 +155,9 @@ export function aggregateUserScores(
       additions90d: adds90d,
       deletions90d: dels90d,
     });
-    const badgeTier = classifyBadgeTier(badge, cons?.consistency ?? null);
+    // Tier is assigned in a second pass below (after all rows are built)
+    // because tier-by-momentum-rank needs the full steady_eddie cohort to
+    // compute each row's rank.
 
     rows.push({
       userId: t.authorUserId,
@@ -175,11 +177,23 @@ export function aggregateUserScores(
       medianChurn90d: Math.round(medianChurn90d),
       p95Churn90d: Math.round(p95Churn90d),
       badge,
-      badgeTier,
+      badgeTier: null,
       isDormant: activeDays90dCount === 0,
       daysSinceFirstCommit,
     });
   }
+
+  // Second pass: assign steady_eddie tiers by momentum rank.
+  // Momentum (scoreTrending) already has 30d-half-life decay built in,
+  // so devs who've gone quiet naturally fall in rank and demote out of
+  // gold/silver — without this two-pass approach the tier signal would
+  // lag recency.
+  const steadyEddieRows = rows
+    .filter((r) => r.badge === 'steady_eddie')
+    .sort((a, b) => (b.scoreTrending ?? 0) - (a.scoreTrending ?? 0));
+  steadyEddieRows.forEach((row, rank) => {
+    row.badgeTier = tierFromRank(rank, steadyEddieRows.length);
+  });
 
   return rows;
 }

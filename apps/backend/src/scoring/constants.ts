@@ -60,23 +60,23 @@ export const AI_ALEX_P95_MIN = 2000;
 // in the last 90 days) who doesn't match a specialty (fresh_meat,
 // deep_diver, ai_alex, cleanup_crew, batch_betty). There are no entry
 // minimums — every active contributor lands here at least at bronze.
-// Tier cutoffs spread the population by consistency:
 //
-//   Bronze: any active dev not at silver/gold (including cold-start
-//           with active_days < 3 where consistency is null)
-//   Silver: consistency ≥ STEADY_EDDIE_SILVER_MIN (p50 of active cohort)
-//   Gold:   consistency ≥ STEADY_EDDIE_GOLD_MIN   (p90 of active cohort)
+// Tier is assigned by **momentum rank within the steady_eddie cohort**:
 //
-// Tiering applies via classifyBadgeTier; non-steady-eddie badges have
-// no tier today (badge_tier column is null for them).
+//   Gold:   top STEADY_EDDIE_GOLD_PERCENTILE by momentum (decayed score)
+//   Silver: top STEADY_EDDIE_SILVER_PERCENTILE by momentum
+//   Bronze: rest
 //
-// Earlier iterations had a minimum consistency cutoff for entry; that
-// produced absurd inversions (the org's #1 momentum getting no badge
-// while peers 0.0002 cents below threshold also missed). The catch-all
-// approach makes the cascade exhaustive for active devs and lets the
-// tier carry the gradation signal.
-export const STEADY_EDDIE_SILVER_MIN = 0.35;
-export const STEADY_EDDIE_GOLD_MIN = 0.41;
+// Why momentum and not consistency: momentum already has 30d-half-life
+// decay built in, so a dev who goes quiet for 2 weeks naturally falls
+// in rank. The earlier consistency-based tiers preserved gold for
+// devs who had been prolific 60 days ago but were now silent — the
+// 90d consistency window has no recency weighting, while momentum does.
+//
+// The tier semantics: persona (steady_eddie) says "you're a regular
+// contributor"; tier says "where do you sit in the cohort RIGHT NOW".
+export const STEADY_EDDIE_GOLD_PERCENTILE = 0.1; // top 10%
+export const STEADY_EDDIE_SILVER_PERCENTILE = 0.5; // top 50%
 
 export const BATCH_BETTY_REGULARITY_MIN = 0.55;
 export const BATCH_BETTY_ACTIVE_DAYS_MIN = 3;

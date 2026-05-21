@@ -10,8 +10,8 @@ import {
   DEEP_DIVER_CONSISTENCY_MAX,
   DEEP_DIVER_MEDIAN_CHURN,
   FRESH_MEAT_MIN_TENURE_DAYS,
-  STEADY_EDDIE_GOLD_MIN,
-  STEADY_EDDIE_SILVER_MIN,
+  STEADY_EDDIE_GOLD_PERCENTILE,
+  STEADY_EDDIE_SILVER_PERCENTILE,
 } from './constants.js';
 
 // Matches the `bbstat.user_badge` enum in apps/backend/src/db/schema.ts.
@@ -113,14 +113,29 @@ export function classifyBadge(m: BadgeInput): Badge | null {
   return 'steady_eddie';
 }
 
-// Within-persona tier classifier. Currently only steady_eddie tiers —
-// returns null for every other badge. Cold-start (null consistency)
-// collapses to bronze, since steady_eddie is the catch-all and we want
-// every active dev to land at *some* tier.
-export function classifyBadgeTier(badge: Badge | null, consistency: number | null): BadgeTier | null {
-  if (badge !== 'steady_eddie') return null;
-  const c = consistency ?? 0;
-  if (c >= STEADY_EDDIE_GOLD_MIN) return 'gold';
-  if (c >= STEADY_EDDIE_SILVER_MIN) return 'silver';
+// Rank-based tier helper. Given a 0-indexed rank (0 = top by momentum)
+// and the total cohort size, returns gold for the top decile, silver
+// for the top half (excluding gold), bronze for the rest. Pure / easily
+// testable — the rollup is responsible for computing rank by sorting
+// steady_eddie rows by momentum DESC, then calling this per row.
+export function tierFromRank(rank: number, total: number): BadgeTier {
+  if (total === 0) return 'bronze';
+  const goldEnd = Math.ceil(total * STEADY_EDDIE_GOLD_PERCENTILE);
+  const silverEnd = Math.ceil(total * STEADY_EDDIE_SILVER_PERCENTILE);
+  if (rank < goldEnd) return 'gold';
+  if (rank < silverEnd) return 'silver';
   return 'bronze';
+}
+
+// Within-persona tier classifier. Currently only steady_eddie tiers —
+// returns null for every other badge. Tier is by momentum rank within
+// the steady_eddie cohort so the decayed score naturally weights
+// recency (a dev who's been quiet for 2 weeks falls in rank).
+export function classifyBadgeTier(
+  badge: Badge | null,
+  rankWithinSteadyEddie: number,
+  totalSteadyEddies: number,
+): BadgeTier | null {
+  if (badge !== 'steady_eddie') return null;
+  return tierFromRank(rankWithinSteadyEddie, totalSteadyEddies);
 }

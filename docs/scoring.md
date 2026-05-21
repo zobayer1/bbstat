@@ -173,7 +173,7 @@ outlier patterns get their specialty label instead of being absorbed.
 | `ai_alex`      | `p95_churn_90d / median_churn_90d ≥ 20` AND `p95_churn_90d ≥ 2000`           |
 | `cleanup_crew` | `total_deletions_90d / total_additions_90d ≥ 1.2` AND `commits_90d ≥ 10`     |
 | `batch_betty`  | `regularity ≥ 0.55` AND `3 ≤ active_days_90d < 15`                           |
-| `steady_eddie` | catch-all — every active dev not matching above. Tier by consistency.        |
+| `steady_eddie` | catch-all — every active dev not matching above. Tier by momentum rank.      |
 
 Dormancy is the **only** path to no badge for someone with at least one
 commit ingested. Two earlier iterations both produced absurd results
@@ -191,19 +191,29 @@ fail at.
 
 ### Within-persona tiers (Steady Eddie only, for now)
 
-`steady_eddie` is the catch-all bucket and is further binned by consistency
-into bronze / silver / gold, surfaced on the leaderboard as a tinted
+`steady_eddie` is the catch-all bucket; tier is assigned by **momentum
+rank** within the cohort, surfaced on the leaderboard as a tinted
 circular background behind the badge icon:
 
-| Tier   | Consistency     | Approximate share of active cohort        |
-| ------ | --------------- | ----------------------------------------- |
-| Bronze | `< 0.35`        | catch-all default (incl. cold-start null) |
-| Silver | `0.35` – `0.41` | ~p50 → p90                                |
-| Gold   | `≥ 0.41`        | top decile                                |
+| Tier   | Position in cohort by momentum | Constant                         |
+| ------ | ------------------------------ | -------------------------------- |
+| Gold   | top 10%                        | `STEADY_EDDIE_GOLD_PERCENTILE`   |
+| Silver | top 50% (excluding gold)       | `STEADY_EDDIE_SILVER_PERCENTILE` |
+| Bronze | rest                           | default                          |
 
-Tier classifier collapses null consistency (`active_days < 3`) to bronze
-and returns `null` for every other persona; the column generalizes so
-other personas can be tiered later without a schema change.
+**Why momentum, not consistency**: a dev who was prolific in months
+1–2 of the 90-day consistency window but went quiet in week 12 keeps a
+high consistency score — the window has no recency weighting. Momentum
+(the trending score) already applies a 30-day half-life decay per commit,
+so "top of the cohort right now" naturally falls when a dev goes quiet.
+The 2026-05-22 smoke test caught the consistency-based tier surfacing
+gold for a contributor whose most recent commit was 15 days old;
+momentum-rank tiering demotes them appropriately.
+
+Tier classifier returns `null` for non-steady-eddie personas; the
+schema column generalizes so other personas can be tiered later
+without a schema change. Cohort-of-one edge case: the sole steady_eddie
+gets gold (top of an empty/tiny cohort is still the top).
 
 ### Cascade order
 
