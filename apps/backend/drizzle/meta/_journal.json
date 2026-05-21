@@ -15,6 +15,13 @@
       "when": 1779386502107,
       "tag": "0001_overrated_james_howlett",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779391075793,
+      "tag": "0002_sleepy_betty_ross",
+      "breakpoints": true
     }
   ]
 }

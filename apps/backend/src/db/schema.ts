@@ -67,6 +67,13 @@ export const userBadgeEnum = bbstatSchema.enum('user_badge', [
   'cleanup_crew',
 ]);
 
+// Optional within-badge tier. NULL for non-tiered badges; today only
+// `steady_eddie` is tiered, but the column generalizes so other personas
+// can be tiered later without another schema change. Thresholds live in
+// `apps/backend/src/scoring/constants.ts` and are calibrated against the
+// live consistency distribution.
+export const userBadgeTierEnum = bbstatSchema.enum('user_badge_tier', ['bronze', 'silver', 'gold']);
+
 // ---------------------------------------------------------------------------
 // Core entities
 // ---------------------------------------------------------------------------
@@ -387,6 +394,10 @@ export const userScore = bbstatSchema.table(
     // Cascade output. NULL = Regular (no persona matched) or Dormant
     // (see `is_dormant`). UI distinguishes those two from `is_dormant`.
     badge: userBadgeEnum('badge'),
+    // Within-badge tier (bronze/silver/gold). NULL for badges that don't
+    // tier and for null `badge` itself. Currently only steady_eddie tiers;
+    // surfaced as a colored ring around the badge icon on the leaderboard.
+    badgeTier: userBadgeTierEnum('badge_tier'),
     isDormant: boolean('is_dormant').notNull().default(false),
 
     // Tenure — drives the `fresh_meat` badge cascade entry and a
