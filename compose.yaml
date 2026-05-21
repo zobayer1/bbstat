@@ -39,12 +39,27 @@ x-backend-image: &backend-image
   image: ${BACKEND_IMAGE:-bbstat-backend:latest}
 
 # Shared env for the API + sync containers. Migrate gets only what it needs.
+#
+# Secrets policy: anything with credential weight (BB auth, DB / Redis URLs)
+# is interpolated from the host shell ENV, NOT loaded from `.env.docker`.
+# Production deploys can keep secrets in a one-shot file:
+#
+#     set -a; source deploy.env; set +a; rm -f deploy.env
+#     docker compose -f compose.yaml up -d
+#
+# …so the secrets live only in the running process's env, never on disk.
+# `.env.docker` holds non-sensitive runtime config only (NODE_ENV, port,
+# BB workspace + tuning knobs, cron schedules). Empty defaults (`:-`)
+# mean dev can leave creds unset and the backend gracefully disables
+# sync / admin routes (see apps/backend/src/index.ts).
 x-backend-env: &backend-env
   env_file:
     - .env.docker
   environment:
     DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in the deploy environment}
     REDIS_URL: ${REDIS_URL:?REDIS_URL must be set in the deploy environment}
+    BITBUCKET_AUTH_EMAIL: ${BITBUCKET_AUTH_EMAIL:-}
+    BITBUCKET_AUTH_TOKEN: ${BITBUCKET_AUTH_TOKEN:-}
     # The image's flat /app/{dist,drizzle,...} layout makes the source-relative
     # `repoRoot` calculation in index.ts resolve to "/" inside the container.
     # Pin SEED_REPO_FILE_PATH explicitly to /app/tracked-repos.yaml so the seed

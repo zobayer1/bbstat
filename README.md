@@ -79,7 +79,7 @@ Five ways to run the stack — local without containers (HTTP or HTTPS), full lo
 
 ## Production deploys (image-only)
 
-`compose.yaml` declares **no `build:` blocks** (those live in `compose.override.yaml`), so a production server with no repo checkout can boot the stack as long as the tagged images are loaded locally. The flow:
+`compose.yaml` declares **no `build:` blocks** (those live in `compose.override.yaml`), so a production server with no repo checkout can boot the stack as long as the tagged images are loaded locally. **Secrets — BitBucket auth, DB / Redis URLs, image tags — are interpolated from the shell env, never persisted to disk.** Only the non-sensitive `.env.docker` (workspace, sync schedules, tuning knobs) lives on the host.
 
 ```bash
 # 1. Build + tag with a real version (on the build machine, with the repo)
@@ -88,20 +88,31 @@ BACKEND_IMAGE=bbstat-backend:v1.2.0 FRONTEND_IMAGE=bbstat-frontend:v1.2.0 make b
 # 2. Save to portable tarballs
 docker save -o bbstat-v1.2.0.tar bbstat-backend:v1.2.0 bbstat-frontend:v1.2.0
 
-# 3. Transfer the tarball + compose.yaml + .env.docker to the production host
-#    (compose.override.yaml is deliberately NOT shipped)
+# 3. Transfer images + compose.yaml + .env.docker (no secrets in it) to prod.
+#    compose.override.yaml is deliberately NOT shipped.
 scp bbstat-v1.2.0.tar compose.yaml .env.docker prod:/opt/bbstat/
 
-# 4. On the production host: load images, set deploy env, start
+# 4. On the production host: load images
 docker load -i bbstat-v1.2.0.tar
-export BACKEND_IMAGE=bbstat-backend:v1.2.0 \
-       FRONTEND_IMAGE=bbstat-frontend:v1.2.0 \
-       DATABASE_URL=postgres://… \
-       REDIS_URL=redis://…
+
+# 5. Write a one-shot deploy.env with the secrets, source it, delete it.
+cat > deploy.env <<'EOF'
+export BACKEND_IMAGE=bbstat-backend:v1.2.0
+export FRONTEND_IMAGE=bbstat-frontend:v1.2.0
+export DATABASE_URL=postgres://user:PASS@db-host:5432/bbstat
+export REDIS_URL=redis://redis-host:6379
+export BITBUCKET_AUTH_EMAIL=you@example.com
+export BITBUCKET_AUTH_TOKEN=ATATT3xFf…
+EOF
+source deploy.env && rm -f deploy.env
+
+# 6. Boot — compose.yaml interpolates the env vars at parse time.
 docker compose -f compose.yaml up -d
 ```
 
-Rollback is the same flow with the previous tag — both versions can sit on the host simultaneously, swap by re-exporting `*_IMAGE` and `compose up -d` again. `BACKEND_IMAGE` and `FRONTEND_IMAGE` are documented in `.env.docker.example`.
+Rollback is the same flow with the previous tag — both versions can sit on the host simultaneously, swap by re-exporting `BACKEND_IMAGE` / `FRONTEND_IMAGE` and `compose up -d` again.
+
+**Variables that come from the shell env** (not `.env.docker`): `BACKEND_IMAGE`, `FRONTEND_IMAGE`, `DATABASE_URL`, `REDIS_URL`, `BITBUCKET_AUTH_EMAIL`, `BITBUCKET_AUTH_TOKEN`. The first two have `:-latest` defaults; the rest are either hard-required (`:?`) or empty-by-default (sync disables silently if BB creds are absent).
 
 ## Common commands
 
