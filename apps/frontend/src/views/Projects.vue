@@ -501,7 +501,15 @@ function clearFilters(): void {
                 </RouterLink>
                 <span v-if="r.project" class="ml-1 text-xs text-slate-400">{{ r.project }}</span>
               </td>
-              <td class="px-3 py-2 text-right text-slate-900">{{ r.commits30d }}</td>
+              <!-- {commits} ({contributors}) — mirrors the Members
+                   table's `{commits} ({repos})` pattern: primary count
+                   in slate-900, secondary count in parens at half scale
+                   and slate-400 so the breadth metric reads as
+                   supplementary context, not a competing number. -->
+              <td class="px-3 py-2 text-right tabular-nums text-slate-900">
+                {{ r.commits30d }}
+                <span class="ml-1 text-xs font-normal text-slate-400">({{ r.contributors30d }})</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -512,12 +520,12 @@ function clearFilters(): void {
         <h2
           class="border-b border-slate-100 bg-slate-50 px-4 py-2 text-xs font-medium uppercase tracking-wider text-slate-500"
         >
-          Top 10 contributors by commits · last {{ stats.contributorsWindow === '7d' ? '7' : '30' }} days
+          Top 10 contributors by Momentum + Consistency
         </h2>
         <table v-if="topContributors.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
           <tbody class="divide-y divide-slate-100">
             <tr v-for="(c, i) in topContributors" :key="c.bitbucketUuid" class="hover:bg-slate-50">
-              <td class="w-6 px-2 py-2 text-right text-xs font-mono text-slate-400">{{ i + 1 }}</td>
+              <td class="w-6 px-2 py-2 text-right font-mono text-xs text-slate-400">{{ i + 1 }}</td>
               <td class="px-3 py-2">
                 <RouterLink
                   :to="{ name: 'user', params: { userId: c.userId } }"
@@ -526,7 +534,19 @@ function clearFilters(): void {
                   {{ c.displayName }}
                 </RouterLink>
               </td>
-              <td class="px-3 py-2 text-right text-slate-900">{{ c.commits }}</td>
+              <!-- Momentum + Consistency, both right-aligned and visually
+                   adjacent — tight inter-column padding (`pr-1` / `pl-1`)
+                   so they read as one combined ranking signal. Momentum
+                   is the primary metric in slate-900; Consistency is
+                   diffused at slate-400, matching the "supplementary
+                   context" treatment used in the {commits}({contributors})
+                   cells in the Top 10 Repositories panel above. -->
+              <td class="py-2 pl-3 pr-1 text-right tabular-nums text-slate-900">
+                {{ c.momentum === null ? '—' : c.momentum.toFixed(1) }}
+              </td>
+              <td class="py-2 pl-1 pr-3 text-right text-xs tabular-nums text-slate-400">
+                {{ c.consistency90d === null ? '—' : `${Math.round(c.consistency90d * 100)}%` }}
+              </td>
             </tr>
           </tbody>
         </table>

@@ -16,7 +16,11 @@ import type { Database } from '../db/client.js';
 import { commits, repositories, syncState, users } from '../db/schema.js';
 
 export interface OverviewStats {
-  users: number;
+  // Count of distinct users with at least one attributed commit. Matches
+  // the Members page roster — earlier this was a raw `count(*) FROM users`
+  // which also included synced-but-never-committed workspace members and
+  // didn't line up with the Members table total.
+  contributors: number;
   repositories: number;
   projects: number;
   totalCommits: number;
@@ -57,10 +61,32 @@ export interface TopContributorWithSparkline extends TopContributor {
   // Distinct repositories the contributor landed code in over the
   // same window. Same metric the Members table surfaces as "Repos".
   reposWindow: number;
+  // ShipShow Score fields (docs/scoring.md). Both pulled from the
+  // user_score rollup — null when the row doesn't exist yet (e.g.
+  // a contributor whose first user_score write hasn't landed
+  // between member sync and the next commits-sync tick) or when
+  // consistency is in cold-start. The Dashboard sorts by
+  // `momentum` desc and renders normalized consistency in the
+  // per-row bar.
+  momentum: number | null;
+  consistency90d: number | null;
 }
 
 export interface UserSummary {
-  user: { id: number; bitbucketUuid: string; displayName: string; email: string | null };
+  user: {
+    id: number;
+    bitbucketUuid: string;
+    displayName: string;
+    email: string | null;
+    // ShipShow Score badge + tier — null when the user has no
+    // user_score row yet (between member sync and the next
+    // commits-sync tick), or when the badge classifier returned null
+    // (dormant or no match). Surfaced on the user detail page next
+    // to the name; uses the same BadgeIcon component as the
+    // Members table.
+    badge: UserBadge | null;
+    badgeTier: UserBadgeTier | null;
+  };
   totals: {
     commits7d: number;
     commits30d: number;
@@ -467,12 +493,19 @@ export interface DailyCommitPoint {
 export function createDrizzleStatsStore(db: Database): StatsStore {
   return {
     async getOverview() {
-      // users / repositories / projects are base-table counts and aren't
-      // related to the rollup. totalCommits and commitsLast7Days now read
-      // from commit_daily so this endpoint stays cheap regardless of how
-      // large `commits` grows.
-      const [usersRows, reposRows, projectsRows, totalCommitsRows, recentCommitsRows] = await Promise.all([
-        db.select({ count: sql<number>`count(*)::int` }).from(users),
+      // contributors / repositories / projects are base-table counts and
+      // aren't related to the rollup. totalCommits and commitsLast7Days
+      // read from commit_daily so this endpoint stays cheap regardless
+      // of how large `commits` grows. `contributors` is computed from
+      // commit_daily too — count of distinct attributed authors —
+      // because that's the population the Members page lists, and
+      // matching the two counts is the whole reason this field exists.
+      const [contributorsRows, reposRows, projectsRows, totalCommitsRows, recentCommitsRows] = await Promise.all([
+        db.execute<{ contributors: number }>(sql`
+          SELECT count(DISTINCT author_user_id)::int AS contributors
+          FROM commit_daily
+          WHERE author_user_id IS NOT NULL
+        `),
         db.select({ count: sql<number>`count(*)::int` }).from(repositories),
         db
           .select({ count: sql<number>`count(distinct project)::int` })
@@ -489,7 +522,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         `),
       ]);
       return {
-        users: usersRows[0]?.count ?? 0,
+        contributors: contributorsRows.rows[0]?.contributors ?? 0,
         repositories: reposRows[0]?.count ?? 0,
         projects: projectsRows[0]?.count ?? 0,
         totalCommits: totalCommitsRows.rows[0]?.total_commits ?? 0,
@@ -550,6 +583,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         deletions_window: number;
         repos_window: number;
         last_30_days: number[];
+        momentum: number | null;
+        consistency_90d: number | null;
       }>(sql`
         WITH top AS (
           SELECT
@@ -562,9 +597,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             count(DISTINCT cd.repository_id)::int AS repos_window
           FROM commit_daily cd
           JOIN users u ON u.id = cd.author_user_id
+          LEFT JOIN user_score us ON us.user_id = u.id
           WHERE cd.day >= current_date - ${windowDays - 1}::int
-          GROUP BY u.id, u.bitbucket_uuid, u.display_name
-          ORDER BY sum(cd.commit_count) DESC
+          GROUP BY u.id, u.bitbucket_uuid, u.display_name, us.score_trending
+          ORDER BY us.score_trending DESC NULLS LAST, sum(cd.commit_count) DESC
           LIMIT ${limit}
         ),
         daily AS (
@@ -592,10 +628,13 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           t.additions_window,
           t.deletions_window,
           t.repos_window,
-          spark.last_30_days
+          spark.last_30_days,
+          us.score_trending AS momentum,
+          us.consistency_90d
         FROM top t
         JOIN spark ON spark.user_id = t.user_id
-        ORDER BY t.commits DESC
+        LEFT JOIN user_score us ON us.user_id = t.user_id
+        ORDER BY us.score_trending DESC NULLS LAST, t.commits DESC
       `);
       return rows.rows.map((r) => ({
         userId: r.user_id,
@@ -606,21 +645,37 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         additionsWindow: r.additions_window,
         deletionsWindow: r.deletions_window,
         reposWindow: r.repos_window,
+        momentum: r.momentum,
+        consistency90d: r.consistency_90d,
       }));
     },
 
     async getUserSummary(userId) {
-      const [user] = await db
-        .select({
-          id: users.id,
-          bitbucketUuid: users.bitbucketUuid,
-          displayName: users.displayName,
-          email: users.email,
-        })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-      if (user === undefined) return null;
+      const userRows = await db.execute<{
+        id: number;
+        bitbucket_uuid: string;
+        display_name: string;
+        email: string | null;
+        badge: UserBadge | null;
+        badge_tier: UserBadgeTier | null;
+      }>(sql`
+        SELECT u.id, u.bitbucket_uuid, u.display_name, u.email,
+               us.badge, us.badge_tier
+        FROM users u
+        LEFT JOIN user_score us ON us.user_id = u.id
+        WHERE u.id = ${userId}
+        LIMIT 1
+      `);
+      const userRow = userRows.rows[0];
+      if (userRow === undefined) return null;
+      const user = {
+        id: userRow.id,
+        bitbucketUuid: userRow.bitbucket_uuid,
+        displayName: userRow.display_name,
+        email: userRow.email,
+        badge: userRow.badge,
+        badgeTier: userRow.badge_tier,
+      };
 
       // Run aggregates in parallel — independent queries against commit_daily.
       const [totalsRows, dailyRows, topRepoRows] = await Promise.all([
@@ -901,6 +956,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           additionsWindow: r.additions_30d,
           deletionsWindow: r.deletions_30d,
           reposWindow: r.repos_30d,
+          // Project / repo contributor lists don't surface scoring —
+          // momentum + consistency render on the org-wide Dashboard
+          // panel only. Null here keeps the shape uniform without
+          // doing an extra user_score join we'd never read.
+          momentum: null,
+          consistency90d: null,
         })),
         repositories: repoRows.rows.map((r) => ({
           workspace: r.workspace,
@@ -1134,6 +1195,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           // Per-repo contributors are by definition working on this
           // one repo, so the distinct-repo count is always 1.
           reposWindow: 1,
+          // Per-repo contributor lists don't surface scoring. See
+          // the matching null assignment in getProjectStats.
+          momentum: null,
+          consistency90d: null,
         })),
       };
     },

@@ -3,6 +3,7 @@ import { computed, onMounted, watch } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import BadgeIcon from '@/components/BadgeIcon.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useUserSummaryStore } from '@/stores/userSummary';
@@ -61,9 +62,14 @@ const projectOptions = computed<string[]>(() => {
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
       <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
-      <h1 class="mt-1 text-3xl font-bold tracking-tight text-slate-900">
-        {{ summary?.user.displayName ?? `User #${userId}` }}
-      </h1>
+      <div class="mt-1 flex items-center gap-3">
+        <h1 class="text-3xl font-bold tracking-tight text-slate-900">
+          {{ summary?.user.displayName ?? `User #${userId}` }}
+        </h1>
+        <!-- Persona badge from user_score. Hidden until the summary
+             loads so we don't briefly render an empty span. -->
+        <BadgeIcon v-if="summary && summary.user.badge" :badge="summary.user.badge" :tier="summary.user.badgeTier" />
+      </div>
       <!-- Prefer the git-author email when we have one — more useful for
            humans recognizing / contacting the contributor than the opaque
            BB UUID. Fall back to the UUID when email is null (user predates

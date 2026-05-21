@@ -90,7 +90,7 @@ describe('GET /api/stats/overview', () => {
 
   it('returns the overview from the injected store', async () => {
     const overview: OverviewStats = {
-      users: 49,
+      contributors: 49,
       repositories: 3,
       projects: 1,
       totalCommits: 1234,
@@ -181,6 +181,8 @@ describe('GET /api/stats/top-contributors', () => {
         additionsWindow: 1200,
         deletionsWindow: 400,
         reposWindow: 4,
+        momentum: 142.7,
+        consistency90d: 0.42,
       },
       {
         userId: 2,
@@ -191,6 +193,8 @@ describe('GET /api/stats/top-contributors', () => {
         additionsWindow: 500,
         deletionsWindow: 150,
         reposWindow: 2,
+        momentum: 38.4,
+        consistency90d: 0.31,
       },
     ];
     const getTopContributors = vi.fn().mockResolvedValue(contributors);
@@ -310,7 +314,14 @@ describe('GET /api/stats/members', () => {
 });
 
 const sampleUserSummary: UserSummary = {
-  user: { id: 7, bitbucketUuid: '{u7}', displayName: 'Alice', email: 'alice@example.com' },
+  user: {
+    id: 7,
+    bitbucketUuid: '{u7}',
+    displayName: 'Alice',
+    email: 'alice@example.com',
+    badge: 'steady_eddie',
+    badgeTier: 'gold',
+  },
   totals: {
     commits7d: 12,
     commits30d: 40,
@@ -438,6 +449,8 @@ describe('GET /api/stats/projects/:projectKey', () => {
           additionsWindow: 120,
           deletionsWindow: 45,
           reposWindow: 2,
+          momentum: null,
+          consistency90d: null,
         },
       ],
       repositories: [
@@ -505,6 +518,8 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
           additionsWindow: 0,
           deletionsWindow: 0,
           reposWindow: 1,
+          momentum: null,
+          consistency90d: null,
         },
       ],
     };

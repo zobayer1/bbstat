@@ -83,7 +83,7 @@ function clearFilters() {
 
 const repos = computed(() => stats.overview?.repositories ?? '—');
 const projects = computed(() => stats.overview?.projects ?? '—');
-const developers = computed(() => stats.overview?.users ?? '—');
+const contributors = computed(() => stats.overview?.contributors ?? '—');
 const totalCommits = computed(() => stats.overview?.totalCommits ?? '—');
 const commitsLast7Days = computed(() => stats.overview?.commitsLast7Days ?? '—');
 const commitsLast30Days = computed(() => stats.overview?.commitsLast30Days ?? '—');
@@ -127,16 +127,38 @@ const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Las
 // whole workspace in the active window. Falls back to 0 when overview hasn't
 // landed yet; the bar guards with `share === 0 ? 0 : ...` so the unfilled
 // track still renders cleanly.
-const windowTotalCommits = computed(() =>
-  stats.contributorsWindow === '7d'
-    ? (stats.overview?.commitsLast7Days ?? 0)
-    : (stats.overview?.commitsLast30Days ?? 0),
-);
-const contributorShare = (commits: number): number => {
-  const total = windowTotalCommits.value;
-  if (total <= 0) return 0;
-  return Math.min(100, (commits / total) * 100);
+//
+// Bar metric: **log-volume** = ln(1 + additions + deletions) over the
+// active 7d/30d window, normalised against the displayed group's max.
+// Log compresses large differences so a 50k-churn dev doesn't dwarf a
+// 500-churn dev visually while the order still reflects volume.
+// Window-responsive: `additionsWindow` and `deletionsWindow` change
+// when the tab toggles between 7d and 30d, so the bar moves too.
+const contributorVolumeLn = (c: { additionsWindow: number; deletionsWindow: number }): number =>
+  Math.log1p(c.additionsWindow + c.deletionsWindow);
+
+const maxDisplayedVolumeLn = computed(() => {
+  let max = 0;
+  for (const c of stats.topContributors) {
+    const v = contributorVolumeLn(c);
+    if (v > max) max = v;
+  }
+  return max;
+});
+
+const volumeShare = (c: { additionsWindow: number; deletionsWindow: number }): number => {
+  const max = maxDisplayedVolumeLn.value;
+  if (max <= 0) return 0;
+  return Math.min(100, (contributorVolumeLn(c) / max) * 100);
 };
+
+const tooltipMomentum = (m: number | null): string => (m === null ? '—' : m.toFixed(1));
+const tooltipConsistency = (c: number | null): string => (c === null ? '—' : `${Math.round(c * 100)}%`);
+// Same value that drives the bar — ln(1 + adds + dels) for the active
+// window. Shown raw (not the normalised percentage) so the tooltip
+// states the underlying coefficient, not its visual projection.
+const tooltipVolume = (c: { additionsWindow: number; deletionsWindow: number }): string =>
+  contributorVolumeLn(c).toFixed(2);
 
 // Top Contributors + Activity share the same vertical real estate via a
 // tab control. Default to Contributors per user spec; switching tabs is
@@ -264,7 +286,7 @@ const topRepos = computed(() =>
            and break the grid baseline). Swap to a real `to` prop when the
            pages land. -->
       <StatCard3D
-        label="Tracked repositories"
+        label="Repositories"
         :value="repos"
         hint="Browse all →"
         :glyph-path="GLYPHS.folder"
@@ -282,8 +304,8 @@ const topRepos = computed(() =>
         :to="{ name: 'projects' }"
       />
       <StatCard3D
-        label="Workspace Members"
-        :value="developers"
+        label="Contributors"
+        :value="contributors"
         hint="Browse all →"
         :glyph-path="GLYPHS.users"
         tone="blue"
@@ -457,21 +479,24 @@ const topRepos = computed(() =>
                   class="h-6 w-px shrink-0 bg-slate-200 transition-colors group-hover:bg-blue-600"
                   aria-hidden="true"
                 />
-                <!-- Share bar: this contributor's commits over the workspace
-                   total in the active window. Gradient `blue-200 → blue-700`
-                   covers the FULL track (so position-in-track determines the
-                   shade — left = light, right = deep, regardless of fill
-                   width), and a `bg-slate-100` overlay masks the unfilled
-                   right portion. The `share-bar-sheen` overlay animates a
-                   left→right highlight once per row-hover activation. -->
+                <!-- Bar: log-normalised volume (adds + dels) over the
+                   active 7d/30d window. The list is sorted by momentum;
+                   this bar layers in window-scoped churn on a log scale
+                   so the spread is readable across orders of magnitude.
+                   Gradient `blue-200 → blue-700` covers the full track
+                   (position-in-track determines the shade — left = light,
+                   right = deep), and a `bg-slate-100` overlay masks the
+                   unfilled right portion. Tooltip surfaces the raw
+                   Momentum / Consistency values so the visual stays
+                   honest about what the rank is built from. -->
                 <div
                   class="relative h-6 min-w-0 flex-1 overflow-hidden rounded-sm bg-gradient-to-r from-blue-200 to-blue-700"
-                  :title="`${c.commits} of ${windowTotalCommits} (${contributorShare(c.commits).toFixed(1)}%)`"
-                  :aria-label="`${contributorShare(c.commits).toFixed(1)}% of workspace commits`"
+                  :title="`Momentum: ${tooltipMomentum(c.momentum)} · Consistency: ${tooltipConsistency(c.consistency90d)} · Volume: ${tooltipVolume(c)}`"
+                  :aria-label="`Momentum ${tooltipMomentum(c.momentum)}, Consistency ${tooltipConsistency(c.consistency90d)}, Volume ${tooltipVolume(c)}`"
                 >
                   <div
                     class="absolute right-0 top-0 h-full bg-slate-100"
-                    :style="{ width: 100 - contributorShare(c.commits) + '%' }"
+                    :style="{ width: 100 - volumeShare(c) + '%' }"
                   />
                   <span class="share-bar-sheen pointer-events-none absolute inset-0" aria-hidden="true" />
                 </div>

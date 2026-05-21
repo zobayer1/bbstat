@@ -20,7 +20,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface OverviewStats {
-  users: number;
+  // Count of distinct users with at least one attributed commit
+  // (matches the Members page roster). Earlier called `users` — that
+  // counted every row in the users table including never-committed
+  // workspace members, so the dashboard card and Members page total
+  // didn't line up.
+  contributors: number;
   repositories: number;
   projects: number;
   totalCommits: number;
@@ -55,6 +60,14 @@ export interface TopContributorWithSparkline extends TopContributor {
   // Distinct repos this contributor landed code in over the same
   // window. Mirrors the Members table's "Repos" column.
   reposWindow: number;
+  // ShipShow Score signals (docs/scoring.md). Server orders the list
+  // by `momentum DESC NULLS LAST` so the Dashboard panel surfaces the
+  // top-of-the-cohort regardless of window-scoped commit count; the
+  // per-row bar normalises consistency relative to the displayed
+  // group. Both fields may be null for users whose user_score row
+  // hasn't landed yet, or for cold-start consistency.
+  momentum: number | null;
+  consistency90d: number | null;
 }
 
 // Time window for the Dashboard "Top Contributors" panel — narrow
@@ -68,7 +81,17 @@ export type ContributorWindow = '7d' | '30d';
 // types in apps/backend/src/dashboard/stats-store.ts — keep in lockstep.
 
 export interface UserSummary {
-  user: { id: number; bitbucketUuid: string; displayName: string; email: string | null };
+  user: {
+    id: number;
+    bitbucketUuid: string;
+    displayName: string;
+    email: string | null;
+    // ShipShow Score badge + tier surfaced next to the displayName on
+    // the user detail page. Null when no user_score row yet, or when
+    // the dev is dormant / no persona matched.
+    badge: UserBadge | null;
+    badgeTier: UserBadgeTier | null;
+  };
   totals: {
     commits7d: number;
     commits30d: number;

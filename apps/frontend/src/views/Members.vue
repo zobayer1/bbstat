@@ -5,6 +5,7 @@ import Fuse from 'fuse.js';
 import ActiveMembersBar, { type ActivityBucket } from '@/components/ActiveMembersBar.vue';
 import BadgeIcon from '@/components/BadgeIcon.vue';
 import LorenzCurve from '@/components/LorenzCurve.vue';
+import MethodologyModal from '@/components/MethodologyModal.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import { useMembersStore } from '@/stores/members';
 import { useStatsStore } from '@/stores/stats';
@@ -28,7 +29,7 @@ onMounted(() => {
   void stats.fetchOverview();
 });
 
-const totalMembers = computed<number | null>(() => stats.overview?.users ?? null);
+const totalMembers = computed<number | null>(() => stats.overview?.contributors ?? null);
 const activeMembers = computed<number>(() => store.members.length);
 const inactiveMembers = computed<number | null>(() =>
   totalMembers.value === null ? null : Math.max(0, totalMembers.value - activeMembers.value),
@@ -94,6 +95,11 @@ function toggleSort(key: SortKey): void {
 
 const search = ref('');
 
+// Methodology modal — opened from the small `i` icon next to the member
+// count in the filter row. Reads the live member list to fill in the
+// "Current calibration" panel (badge counts, tier counts, etc.).
+const showMethodologyModal = ref(false);
+
 // Fuzzy search runs straight over the full roster — no recency-window
 // filter anymore. `threshold: 0.4` is forgiving enough for typos but
 // not so loose that unrelated names collide; `ignoreLocation` lets a
@@ -149,7 +155,7 @@ const sorted = computed<WorkspaceMember[]>(() => {
   return list;
 });
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 40;
 const page = ref(1);
 const pageCount = computed(() => Math.max(1, Math.ceil(sorted.value.length / PAGE_SIZE)));
 const pageClamped = computed(() => Math.min(page.value, pageCount.value));
@@ -207,47 +213,44 @@ function formatConsistency(v: number | null): string {
 }
 
 // Active-members chart buckets: members counted across CUMULATIVE
-// recency ranges, restricted to the trailing year. Each bucket
-// counts every member active within its range — so by construction
-// count(7d) ≤ count(30d) ≤ count(1y); a 5-day-old commit lands in
-// all three, a 100-day-old commit lands in only 1y. The
-// ActiveMembersBar component renders each bucket as its own row
-// (no stacking, no partition) — the honest geometry for nested
-// ranges, since a stacked bar would double-count overlapping
-// members.
+// recency ranges over the trailing 90 days. Each bucket counts every
+// member active within its range — so by construction
+// count(7d) ≤ count(30d) ≤ count(90d); a 5-day-old commit lands in all
+// three, a 60-day-old commit lands only in 90d. The ActiveMembersBar
+// component renders each bucket as its own row (no stacking, no
+// partition) — the honest geometry for nested ranges, since a stacked
+// bar would double-count overlapping members.
+//
+// 90 days aligns with `isDormant` (no eligible commits in 90d → no
+// badge, grayed row) so the chart's outermost ring is exactly the
+// "active vs dormant" boundary used everywhere else in scoring.
 //
 // Three shades of emerald — saturated → faded — read as a single
-// "activity, fading with time" axis: emerald-700 (7d, darkest
-// and shortest bar) for tightest recency; emerald-300 (1y, palest
-// and longest bar) for the widest range.
-//
-// Dormant (no commit in 365d, or never-active) is intentionally
-// excluded — after the anonymous-sweep added ex-employees, Dormant
-// dwarfs every other bucket and drowns out the comparison that
-// matters. The title "Active Members (1 year)" makes the inclusion
-// criterion explicit.
+// "activity, fading with time" axis: emerald-700 (7d, darkest and
+// shortest bar) for tightest recency; emerald-300 (90d, palest and
+// longest bar) for the widest range.
 const ACTIVITY_COLORS = {
   active7d: '#047857', // emerald-700
   active30d: '#10b981', // emerald-500
-  active1y: '#6ee7b7', // emerald-300
+  active90d: '#6ee7b7', // emerald-300
 };
 
 const activityBuckets = computed<ActivityBucket[]>(() => {
   const now = Date.now();
-  const counts = { a7: 0, a30: 0, a1y: 0 };
+  const counts = { a7: 0, a30: 0, a90: 0 };
   for (const m of store.members) {
     if (m.lastActiveAt === null) continue;
     const ageDays = (now - new Date(m.lastActiveAt).getTime()) / DAY_MS;
     // Cumulative — a member active in the last 7 days also counts
-    // toward the 30d and 1y buckets. No `else if` chain.
-    if (ageDays < 365) counts.a1y++;
+    // toward the 30d and 90d buckets. No `else if` chain.
+    if (ageDays < 90) counts.a90++;
     if (ageDays < 30) counts.a30++;
     if (ageDays < 7) counts.a7++;
   }
   return [
     { label: 'Active · 7d', count: counts.a7, color: ACTIVITY_COLORS.active7d },
     { label: 'Active · 30d', count: counts.a30, color: ACTIVITY_COLORS.active30d },
-    { label: 'Active · 1y', count: counts.a1y, color: ACTIVITY_COLORS.active1y },
+    { label: 'Active · 90d', count: counts.a90, color: ACTIVITY_COLORS.active90d },
   ];
 });
 
@@ -332,7 +335,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           <ActiveMembersBar :buckets="activityBuckets" :bar-height="32" :bar-gap="14" class="w-full max-w-[480px]" />
         </div>
         <p class="mt-4 text-center text-[10px] text-slate-400">
-          Members active in the last 7 / 30 / 365 days. Ranges are cumulative — 30d includes 7d, 1y includes 30d.
+          Members active in the last 7 / 30 / 90 days. Ranges are cumulative.
         </p>
       </div>
       <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
@@ -383,11 +386,26 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           />
         </div>
       </div>
-      <span class="text-xs text-slate-500">
-        {{ sorted.length }} <span v-if="search.trim() !== ''">match{{ sorted.length === 1 ? '' : 'es' }}</span>
-        <span v-else>member{{ sorted.length === 1 ? '' : 's' }}</span>
-      </span>
+      <div class="flex items-center gap-3 text-xs text-slate-500">
+        <span>
+          {{ sorted.length }} <span v-if="search.trim() !== ''">match{{ sorted.length === 1 ? '' : 'es' }}</span>
+          <span v-else>member{{ sorted.length === 1 ? '' : 's' }}</span>
+        </span>
+        <!-- Methodology trigger: plain text link rather than an icon so
+             it reads as a deliberate "click here for the math" affordance
+             instead of an ornamental info pip. -->
+        <button
+          type="button"
+          class="cursor-pointer font-medium text-blue-600 underline-offset-2 transition hover:text-blue-800 hover:underline focus:underline focus:outline-none"
+          title="Learn how we calculate Momentum and Consistency"
+          @click="showMethodologyModal = true"
+        >
+          Ranking Logic
+        </button>
+      </div>
     </section>
+
+    <MethodologyModal v-if="showMethodologyModal" @close="showMethodologyModal = false" />
 
     <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
@@ -490,7 +508,6 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                 :class="['block font-medium hover:text-slate-600', m.isDormant ? 'text-slate-500' : 'text-slate-900']"
               >
                 {{ m.displayName }}
-                <span v-if="m.username" class="ml-1 text-xs font-normal text-slate-400">@{{ m.username }}</span>
               </RouterLink>
               <!-- Git-author email: best-effort, parsed from commits.author.raw at
                    ingest. Rendered muted under the displayName when the BB
