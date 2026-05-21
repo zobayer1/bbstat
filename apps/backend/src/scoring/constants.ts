@@ -56,7 +56,20 @@ export const DEEP_DIVER_CONSISTENCY_MAX = 0.35;
 export const AI_ALEX_P95_MEDIAN_RATIO = 20;
 export const AI_ALEX_P95_MIN = 2000;
 
-export const STEADY_EDDIE_CONSISTENCY_MIN = 0.38;
+// Steady Eddie tier thresholds. The base entry (`_MIN`) is what
+// qualifies a dev for the persona at all — currently set at the p50 of
+// consistency among active devs on the live corpus (relaxed from the
+// original p75=0.38 after the smoke test showed the threshold was
+// splitting a tight cohort and producing absurd inversions, e.g. the
+// org's top-momentum dev not getting the badge while the #2 did). The
+// tier cutoffs spread the population into bronze / silver / gold so
+// the leaderboard reflects within-persona gradation.
+//
+// Tiering applies via classifyBadgeTier; non-steady-eddie badges have
+// no tier today (badge_tier column is null for them).
+export const STEADY_EDDIE_CONSISTENCY_MIN = 0.33;
+export const STEADY_EDDIE_SILVER_MIN = 0.37;
+export const STEADY_EDDIE_GOLD_MIN = 0.41;
 export const STEADY_EDDIE_ACTIVE_DAYS_MIN = 25;
 
 export const BATCH_BETTY_REGULARITY_MIN = 0.55;

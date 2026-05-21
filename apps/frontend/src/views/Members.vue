@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink } from 'vue-router';
 import Fuse from 'fuse.js';
 import ActiveMembersBar, { type ActivityBucket } from '@/components/ActiveMembersBar.vue';
+import BadgeIcon from '@/components/BadgeIcon.vue';
 import LorenzCurve from '@/components/LorenzCurve.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import { useMembersStore } from '@/stores/members';
@@ -57,15 +58,26 @@ const otherContributorCount = computed<number>(() => store.members.filter((m) =>
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Sortable columns. `key` is the WorkspaceMember field used for the
-// comparator. `lastActiveAt` sorts on the raw ISO string (lexical
-// order is chronological for ISO-8601), with nulls pushed to the end
-// so a never-active row doesn't outrank an active one in either
-// direction. Default lands on `lastActiveAt` desc — most-recently-
-// active first — which also matches the backend's ORDER BY so the
-// wire order doesn't visibly reshuffle on first render.
-type SortKey = 'commits7d' | 'commits30d' | 'commitsAllTime' | 'lastActiveAt' | 'displayName';
+// comparator. `lastActiveAt` sorts on the raw ISO string (lexical order
+// is chronological for ISO-8601), with nulls pushed to the end so a
+// never-active row doesn't outrank an active one in either direction.
+// `scoreTrending` and `consistency90d` similarly push nulls last —
+// rows whose user_score hasn't landed yet (between member sync and the
+// next commits-sync tick) shouldn't ride at the top.
+//
+// Default sort: `scoreTrending` desc — the leaderboard view of this
+// page (docs/scoring.md). Dormant rows (scoreTrending = 0) sink to
+// the bottom naturally.
+type SortKey =
+  | 'commits7d'
+  | 'commits30d'
+  | 'commitsAllTime'
+  | 'lastActiveAt'
+  | 'displayName'
+  | 'scoreTrending'
+  | 'consistency90d';
 type SortDir = 'asc' | 'desc';
-const sortKey = ref<SortKey>('lastActiveAt');
+const sortKey = ref<SortKey>('scoreTrending');
 const sortDir = ref<SortDir>('desc');
 
 function toggleSort(key: SortKey): void {
@@ -121,6 +133,17 @@ const sorted = computed<WorkspaceMember[]>(() => {
       if (bv === null) return -1;
       return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
     }
+    if (key === 'scoreTrending' || key === 'consistency90d') {
+      // Nulls last regardless of direction — same rationale as
+      // lastActiveAt; a row with no user_score yet shouldn't outrank
+      // someone with a real number in either direction.
+      const av = a[key];
+      const bv = b[key];
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return (av - bv) * dir;
+    }
     return (a[key] - b[key]) * dir;
   });
   return list;
@@ -168,6 +191,20 @@ const sortIndicator = (key: SortKey): string => {
   if (sortKey.value !== key) return '';
   return sortDir.value === 'asc' ? ' ▲' : ' ▼';
 };
+
+// Score column formatters. Momentum is a raw sum of log-capped per-
+// commit scores so the absolute value is opaque — round to one decimal.
+// Consistency is a 0–1 ratio displayed as a percentage. Both render "—"
+// for null (user_score row not yet written, or cold-start consistency).
+function formatMomentum(v: number | null): string {
+  if (v === null) return '—';
+  return v.toFixed(1);
+}
+
+function formatConsistency(v: number | null): string {
+  if (v === null) return '—';
+  return `${(v * 100).toFixed(0)}%`;
+}
 
 // Active-members chart buckets: members counted across CUMULATIVE
 // recency ranges, restricted to the trailing year. Each bucket
@@ -354,38 +391,67 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 
     <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
-        <!-- Column layout:
-               [ Member | Commits · 7d | Commits · 30d ‖ Trend 30d | Last active | All-time ]
-             Both per-window columns render `{commits} ({repos})` so the
-             primary commit count + the distinct-repo breadth are
-             side-by-side without a separate Repos column. The double-bar
-             marks where the trailing window-independent columns begin —
-             `Trend (30d)`, `Last active` and `All-time` are grouped at
-             the far right with a 2px left border drawing a vertical
-             rule from the header down through every body cell. -->
+        <!-- Column layout (leaderboard mode — docs/scoring.md):
+               [ Badge icon | Member | Trend 30d | Momentum ↓ | Consistency · 90d | Last active | Commits · 7d | Commits · 30d | All-time ]
+             Momentum is the default sort — the decayed per-commit score
+             sum referred to as `scoreTrending` in code / docs (the
+             user-facing label was renamed from "Trending" because the
+             column sits next to "Trend (30d)" and people read "trending"
+             as a boolean flag, not a number). Consistency is a sibling
+             rank — sortable independently per the design discussion
+             ("don't blend the two"). The 30d sparkline sits at column 3
+             (right after Member) so the eye gets a "shape of activity"
+             preview before the numeric scores. The legacy commit-count
+             columns trail so the page still answers "how much did they
+             ship" alongside the score view. Badge column is leftmost
+             as a colored icon (no text label, tooltip-only) — matches
+             the SyncStateIcon column convention in ProjectStats. -->
         <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
           <tr>
+            <th class="w-8 px-2 py-2 text-center font-medium">
+              <span class="sr-only">Persona badge</span>
+            </th>
             <th class="px-4 py-2 text-left font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('displayName')">
                 Member{{ sortIndicator('displayName') }}
               </button>
             </th>
-            <th class="py-2 pr-4 text-right font-medium">
+            <th class="px-4 py-2 text-center font-medium">Trend <span class="text-slate-400">(30d)</span></th>
+            <th class="px-4 py-2 text-center font-medium">
+              <button
+                type="button"
+                class="hover:text-slate-700"
+                title="Decayed per-commit score sum (30-day half-life). Default sort."
+                @click="toggleSort('scoreTrending')"
+              >
+                Momentum{{ sortIndicator('scoreTrending') }}
+              </button>
+            </th>
+            <th class="px-4 py-2 text-center font-medium">
+              <button
+                type="button"
+                class="hover:text-slate-700"
+                title="Regularity of commit spacing over the last 90 days."
+                @click="toggleSort('consistency90d')"
+              >
+                Consistency <span class="text-slate-400">(90d)</span>{{ sortIndicator('consistency90d') }}
+              </button>
+            </th>
+            <th class="px-4 py-2 text-center font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('lastActiveAt')">
                 Last active{{ sortIndicator('lastActiveAt') }}
               </button>
             </th>
-            <th class="px-4 py-2 text-right font-medium">
+            <th class="px-4 py-2 text-center font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('commits7d')">
                 Commits · 7d{{ sortIndicator('commits7d') }}
               </button>
             </th>
-            <th class="px-4 py-2 text-right font-medium">
+            <th class="px-4 py-2 text-center font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('commits30d')">
                 Commits · 30d{{ sortIndicator('commits30d') }}
               </button>
             </th>
-            <th class="px-4 py-2 text-right font-medium">Trend <span class="text-slate-400">(30d)</span></th>
             <th class="px-4 py-2 text-right font-medium">
               <button type="button" class="hover:text-slate-700" @click="toggleSort('commitsAllTime')">
                 All-time{{ sortIndicator('commitsAllTime') }}
@@ -407,19 +473,28 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           <tr
             v-for="m in paged"
             :key="m.bitbucketUuid"
-            :class="['hover:bg-slate-50', m.isWorkspaceMember ? '' : 'bg-slate-50/60 text-slate-400 opacity-70']"
+            :class="[
+              'hover:bg-slate-50',
+              !m.isWorkspaceMember ? 'bg-slate-50/60 text-slate-400 opacity-70' : '',
+              m.isDormant ? 'text-slate-400 opacity-60' : '',
+            ]"
             :title="
-              m.isWorkspaceMember
-                ? ''
-                : 'BB account not in the workspace member list (ex-employee, external, or current member using a separate email)'
+              m.isDormant
+                ? 'Dormant — no eligible activity in the last 90 days'
+                : m.isWorkspaceMember
+                  ? ''
+                  : 'BB account not in the workspace member list (ex-employee, external, or current member using a separate email)'
             "
           >
+            <td class="px-2 py-2 text-center align-middle">
+              <BadgeIcon :badge="m.badge" :tier="m.badgeTier" />
+            </td>
             <td class="px-4 py-2">
               <RouterLink
                 :to="{ name: 'user', params: { userId: m.userId } }"
                 :class="[
                   'block font-medium hover:text-slate-600',
-                  m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500',
+                  m.isWorkspaceMember && !m.isDormant ? 'text-slate-900' : 'text-slate-500',
                 ]"
               >
                 {{ m.displayName }}
@@ -434,28 +509,34 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                 {{ m.email }}
               </div>
             </td>
-            <td class="py-2 pr-4 text-right text-slate-500" :title="m.lastActiveAt ?? ''">
+            <td class="px-4 py-2">
+              <Sparkline :points="m.last30Days" :width="96" :height="18" class="mx-auto block text-slate-400" />
+            </td>
+            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-400' : 'text-slate-900'">
+              {{ formatMomentum(m.scoreTrending) }}
+            </td>
+            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-400' : 'text-slate-700'">
+              {{ formatConsistency(m.consistency90d) }}
+            </td>
+            <td class="px-4 py-2 text-center text-slate-500" :title="m.lastActiveAt ?? ''">
               {{ relativeTime(m.lastActiveAt) }}
             </td>
             <!-- Per-window cells: primary commit count followed by the
                  distinct-repo count in parens at half scale + slate-400
                  so the breadth metric reads as supplementary context,
                  not a competing number. `tabular-nums` keeps the
-                 commits column right-aligned cleanly across rows. -->
+                 digits column-aligned cleanly across rows. -->
             <td
-              :class="['px-4 py-2 text-right tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
+              :class="['px-4 py-2 text-center tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
             >
               {{ m.commits7d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos7d }})</span>
             </td>
             <td
-              :class="['px-4 py-2 text-right tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
+              :class="['px-4 py-2 text-center tabular-nums', m.isWorkspaceMember ? 'text-slate-900' : 'text-slate-500']"
             >
               {{ m.commits30d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos30d }})</span>
-            </td>
-            <td class="px-4 py-2">
-              <Sparkline :points="m.last30Days" :width="96" :height="18" class="ml-auto block text-slate-400" />
             </td>
             <td class="px-4 py-2 text-right text-slate-500">{{ m.commitsAllTime }}</td>
           </tr>

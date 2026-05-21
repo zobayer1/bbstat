@@ -16,7 +16,7 @@
 // — auto-flushing on every boot would defeat the cache. Treat that as
 // a separate decision documented under "Pair every WorkspaceMember /
 // UserSummary shape change with a Redis bust" in the memory.
-export const CACHE_VERSION = 9;
+export const CACHE_VERSION = 10;
 
 // localStorage key holding the integer above as a string. Lives outside
 // the `bbstat-` prefix so the bust function doesn't wipe its own sentinel

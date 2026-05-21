@@ -24,7 +24,7 @@ import { leaderboardCache, type CacheClient } from '../cache/redis.js';
 import type { Database } from '../db/client.js';
 import { userScore } from '../db/schema.js';
 import { CONSISTENCY_WINDOW_DAYS, FLOOR, WINDOW_30D, WINDOW_365D, WINDOW_7D, WINDOW_90D } from './constants.js';
-import { classifyBadge, type Badge } from './badge.js';
+import { classifyBadge, classifyBadgeTier, type Badge } from './badge.js';
 import { scoreCommit } from './commit-score.js';
 import { computeConsistency } from './consistency.js';
 import { decayWeight } from './decay.js';
@@ -155,6 +155,7 @@ export function aggregateUserScores(
       additions90d: adds90d,
       deletions90d: dels90d,
     });
+    const badgeTier = classifyBadgeTier(badge, cons?.consistency ?? null);
 
     rows.push({
       userId: t.authorUserId,
@@ -174,6 +175,7 @@ export function aggregateUserScores(
       medianChurn90d: Math.round(medianChurn90d),
       p95Churn90d: Math.round(p95Churn90d),
       badge,
+      badgeTier,
       isDormant: activeDays90dCount === 0,
       daysSinceFirstCommit,
     });
@@ -269,6 +271,7 @@ export async function recomputeUserScores(deps: UserScoreRollupDeps): Promise<Us
           medianChurn90d: sql`EXCLUDED.median_churn_90d`,
           p95Churn90d: sql`EXCLUDED.p95_churn_90d`,
           badge: sql`EXCLUDED.badge`,
+          badgeTier: sql`EXCLUDED.badge_tier`,
           isDormant: sql`EXCLUDED.is_dormant`,
           daysSinceFirstCommit: sql`EXCLUDED.days_since_first_commit`,
         },

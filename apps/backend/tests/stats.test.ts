@@ -251,6 +251,11 @@ describe('GET /api/stats/members', () => {
       reposAllTime: 7,
       lastActiveAt: '2026-05-15T10:00:00.000Z',
       last30Days: Array.from({ length: 30 }, (_, i) => (i === 29 ? 4 : 0)),
+      scoreTrending: 142.7,
+      consistency90d: 0.42,
+      badge: 'steady_eddie',
+      badgeTier: 'gold',
+      isDormant: false,
     },
     {
       userId: 2,
@@ -267,6 +272,11 @@ describe('GET /api/stats/members', () => {
       reposAllTime: 2,
       lastActiveAt: '2026-04-02T08:00:00.000Z',
       last30Days: new Array(30).fill(0),
+      scoreTrending: 0,
+      consistency90d: null,
+      badge: null,
+      badgeTier: null,
+      isDormant: true,
     },
   ];
 

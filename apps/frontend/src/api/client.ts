@@ -156,6 +156,16 @@ export interface RepoContributor extends TopContributorWithSparkline {
   deletions30d: number;
 }
 
+// Mirrors the bbstat.user_badge Postgres enum + the `Badge` type in
+// apps/backend/src/scoring/badge.ts. Keep all three in lockstep when
+// adding / removing badges. Display labels for these slugs live in
+// the BadgeIcon component.
+export type UserBadge = 'fresh_meat' | 'deep_diver' | 'ai_alex' | 'steady_eddie' | 'batch_betty' | 'cleanup_crew';
+
+// Within-persona tier. Today only `steady_eddie` carries one; the
+// frontend renders it as a colored ring around the badge icon.
+export type UserBadgeTier = 'bronze' | 'silver' | 'gold';
+
 // One row on the /members page. Mirror of WorkspaceMember in
 // apps/backend/src/dashboard/stats-store.ts — keep in lockstep.
 // `email` is the git-author email parsed from commits.author.raw on
@@ -184,6 +194,17 @@ export interface WorkspaceMember {
   reposAllTime: number;
   lastActiveAt: string | null;
   last30Days: number[];
+  // ShipShow Score columns (docs/scoring.md). LEFT-JOINed from
+  // user_score on the backend — null when the row isn't written yet
+  // (between member sync and the next commits-sync tick). The table
+  // sorts by scoreTrending DESC by default.
+  scoreTrending: number | null;
+  consistency90d: number | null;
+  badge: UserBadge | null;
+  // Within-persona tier (only steady_eddie carries one today). Drives
+  // the colored ring around the badge icon.
+  badgeTier: UserBadgeTier | null;
+  isDormant: boolean;
 }
 
 export interface TrackedRepositorySummary {

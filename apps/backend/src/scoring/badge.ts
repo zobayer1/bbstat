@@ -13,12 +13,19 @@ import {
   FRESH_MEAT_MIN_TENURE_DAYS,
   STEADY_EDDIE_ACTIVE_DAYS_MIN,
   STEADY_EDDIE_CONSISTENCY_MIN,
+  STEADY_EDDIE_GOLD_MIN,
+  STEADY_EDDIE_SILVER_MIN,
 } from './constants.js';
 
 // Matches the `bbstat.user_badge` enum in apps/backend/src/db/schema.ts.
 // Cascade order in classifyBadge below mirrors the enum order — keep them
 // in sync.
 export type Badge = 'fresh_meat' | 'deep_diver' | 'ai_alex' | 'steady_eddie' | 'batch_betty' | 'cleanup_crew';
+
+// Within-persona tier. Matches the `bbstat.user_badge_tier` enum.
+// Today only `steady_eddie` tiers; classifyBadgeTier returns null for
+// every other persona.
+export type BadgeTier = 'bronze' | 'silver' | 'gold';
 
 export interface BadgeInput {
   daysSinceFirstCommit: number;
@@ -114,4 +121,15 @@ export function classifyBadge(m: BadgeInput): Badge | null {
   }
 
   return null;
+}
+
+// Within-persona tier classifier. Currently only steady_eddie tiers —
+// returns null for every other badge and for null/unsatisfied input.
+// Tier thresholds are calibrated against the live consistency
+// distribution (see constants.ts comments).
+export function classifyBadgeTier(badge: Badge | null, consistency: number | null): BadgeTier | null {
+  if (badge !== 'steady_eddie' || consistency === null) return null;
+  if (consistency >= STEADY_EDDIE_GOLD_MIN) return 'gold';
+  if (consistency >= STEADY_EDDIE_SILVER_MIN) return 'silver';
+  return 'bronze';
 }

@@ -315,7 +315,28 @@ export interface WorkspaceMember {
   // TopContributorWithSparkline.last30Days so the Sparkline component
   // renders unchanged.
   last30Days: number[];
+  // ShipShow Score columns (docs/scoring.md). LEFT-JOINed from user_score
+  // so members whose first user_score row hasn't been written yet (between
+  // member sync and the next commits-sync tick) render with null/false
+  // — UI shows "—". `scoreTrending` is the default sort key on the
+  // leaderboard view of this table.
+  scoreTrending: number | null;
+  consistency90d: number | null;
+  badge: UserBadge | null;
+  // Within-persona tier — currently only `steady_eddie` tiers; null for
+  // every other badge. Drives the colored ring around the badge icon.
+  badgeTier: UserBadgeTier | null;
+  isDormant: boolean;
 }
+
+// Mirrors `bbstat.user_badge` enum in schema.ts. Keep in lockstep with
+// apps/backend/src/scoring/badge.ts `Badge` and the frontend mirror in
+// apps/frontend/src/api/client.ts.
+export type UserBadge = 'fresh_meat' | 'deep_diver' | 'ai_alex' | 'steady_eddie' | 'batch_betty' | 'cleanup_crew';
+
+// Mirrors `bbstat.user_badge_tier` enum + `BadgeTier` in
+// apps/backend/src/scoring/badge.ts.
+export type UserBadgeTier = 'bronze' | 'silver' | 'gold';
 
 export interface TrackedRepositorySummary {
   workspace: string;
@@ -1158,6 +1179,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         repos_all_time: number;
         last_active_at: string | Date | null;
         last_30_days: number[];
+        score_trending: number | null;
+        consistency_90d: number | null;
+        badge: UserBadge | null;
+        badge_tier: UserBadgeTier | null;
+        is_dormant: boolean | null;
       }>(sql`
         WITH base AS (
           SELECT
@@ -1213,11 +1239,17 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           b.commits_all_time,
           b.repos_all_time,
           la.last_active_at,
-          s.last_30_days
+          s.last_30_days,
+          us.score_trending,
+          us.consistency_90d,
+          us.badge,
+          us.badge_tier,
+          us.is_dormant
         FROM base b
         JOIN users u ON u.id = b.user_id
         LEFT JOIN last_active la ON la.user_id = b.user_id
         JOIN spark s ON s.user_id = b.user_id
+        LEFT JOIN user_score us ON us.user_id = b.user_id
         ORDER BY la.last_active_at DESC NULLS LAST, u.display_name ASC
       `);
       return rows.rows.map((r) => ({
@@ -1240,6 +1272,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
               ? new Date(r.last_active_at).toISOString()
               : r.last_active_at.toISOString(),
         last30Days: r.last_30_days,
+        scoreTrending: r.score_trending,
+        consistency90d: r.consistency_90d,
+        badge: r.badge,
+        badgeTier: r.badge_tier,
+        isDormant: r.is_dormant ?? false,
       }));
     },
 
