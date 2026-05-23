@@ -105,6 +105,7 @@ const EVENT_NAMES: readonly LiveEventName[] = [
   'repository.sync-excluded',
   'repository.included',
   'repository.deleted',
+  'bitbucket.auth-state',
 ] as const;
 
 export interface LiveStreamHandle {

@@ -17,6 +17,31 @@ export function createCache(redisUrl: string): CacheClient {
 export const KEY_PREFIX = 'bbstat:';
 
 const USER_SUMMARY_PREFIX = `${KEY_PREFIX}user-summary:`;
+const BITBUCKET_AUTH_STATE_KEY = `${KEY_PREFIX}bitbucket-auth-state`;
+
+// Subtle dashboard signal: when BitBucket returns 401/403 (token expired,
+// scopes revoked, or repo access pulled), the `BitbucketClient` fires its
+// `onAuthStateChange` hook and we flip this flag. The next successful 2xx
+// clears it. The dashboard reads this (via SSE event + a one-shot REST
+// fetch on mount) and colors the `!!` glyph red while set. No TTL —
+// presence is the signal; absence (key missing) means healthy.
+//
+// Stored as a plain string `"unauthorized"` rather than a sub-keyed hash
+// so a curious operator can `redis-cli GET bbstat:bitbucket-auth-state`
+// and see the state at a glance.
+export const bitbucketAuthStateCache = {
+  key: BITBUCKET_AUTH_STATE_KEY,
+  async get(cache: CacheClient): Promise<'ok' | 'unauthorized'> {
+    const raw = await cache.get(BITBUCKET_AUTH_STATE_KEY);
+    return raw === 'unauthorized' ? 'unauthorized' : 'ok';
+  },
+  async setUnauthorized(cache: CacheClient): Promise<void> {
+    await cache.set(BITBUCKET_AUTH_STATE_KEY, 'unauthorized');
+  },
+  async clear(cache: CacheClient): Promise<void> {
+    await cache.del(BITBUCKET_AUTH_STATE_KEY);
+  },
+};
 
 export const userSummaryCache = {
   key: (userId: number) => `${USER_SUMMARY_PREFIX}${userId}`,

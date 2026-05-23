@@ -20,7 +20,7 @@ import {
   runPullRequestsSync,
   runReposSync,
 } from './runner.js';
-import { createCache } from '../cache/redis.js';
+import { bitbucketAuthStateCache, createCache } from '../cache/redis.js';
 import { createDrizzleRollupStore } from '../dashboard/rollup-store.js';
 import { createRedisUserSummaryCache } from '../dashboard/user-summary-cache.js';
 import { createEventBus } from '../events/bus.js';
@@ -44,6 +44,43 @@ async function main(): Promise<void> {
   const rollupStore = createDrizzleRollupStore(db);
   const redis = createCache(config.REDIS_URL);
   const userSummaryCache = createRedisUserSummaryCache(redis);
+
+  // Bridge the local bus through Redis so cron-published events
+  // (tick.commits.complete, repository.sync-excluded, etc.) reach the
+  // SSE subscribers in the separate HTTPS backend process. If Redis is
+  // unreachable at boot the cron still runs — we just fall back to the
+  // local in-memory bus, which means SSE clients won't see cron events
+  // until Redis is healthy. Loud warning so operators notice.
+  // Built before the BB client so the auth-state callback can publish
+  // through it inline (no two-phase init).
+  const localBus = createEventBus();
+  let bus = localBus;
+  try {
+    bus = await wrapBusWithRedis(localBus, redis, { logger });
+    logger.info({ sourceId: (bus as { sourceId?: string }).sourceId }, 'live updates: redis bridge attached');
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'live updates: redis unreachable at boot — cron events will not reach SSE clients until reconnect',
+    );
+  }
+
+  // Hydrate the client's auth-state from Redis so a fresh process that
+  // boots into a stale 'unauthorized' flag (token rotated while we were
+  // down) recovers correctly when the first 2xx lands — without this,
+  // the client's internal dedupe would suppress the recovery edge and
+  // the dashboard would stay red forever. Falls back to 'ok' if Redis
+  // is unreachable; the next 401 re-trips it normally.
+  let initialAuthState: 'ok' | 'unauthorized' = 'ok';
+  try {
+    initialAuthState = await bitbucketAuthStateCache.get(redis);
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'bitbucket auth-state: redis read at startup failed — assuming ok',
+    );
+  }
+
   const client = new BitbucketClient({
     baseUrl: config.BITBUCKET_BASE_URL,
     email: config.BITBUCKET_AUTH_EMAIL,
@@ -52,6 +89,24 @@ async function main(): Promise<void> {
     minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,
     maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,
     logger,
+    initialAuthState,
+    // On 401/403 we set the Redis flag and publish the SSE transition;
+    // on the next 2xx we clear both. Redis writes are fire-and-forget
+    // so an upstream blip never blocks the request path. Edge-triggered
+    // by the client itself — see BitbucketClient.notifyAuthState.
+    onAuthStateChange: (state) => {
+      const op =
+        state === 'unauthorized'
+          ? bitbucketAuthStateCache.setUnauthorized(redis)
+          : bitbucketAuthStateCache.clear(redis);
+      void op.catch((err) =>
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), state },
+          'bitbucket auth-state: redis write failed',
+        ),
+      );
+      bus.publish({ event: 'bitbucket.auth-state', payload: { state } });
+    },
   });
   // Mirror the main backend entrypoint: seed path resolves against repo root
   // (apps/backend/src/sync → ../../../../), explicit path required, default
@@ -69,24 +124,6 @@ async function main(): Promise<void> {
   const isMergeBackfillOptions = isMergeBackfillOptionsFromConfig(config);
   const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
   const backoffOptions = backoffOptionsFromConfig(config);
-
-  // Bridge the local bus through Redis so cron-published events
-  // (tick.commits.complete, repository.sync-excluded, etc.) reach the
-  // SSE subscribers in the separate HTTPS backend process. If Redis is
-  // unreachable at boot the cron still runs — we just fall back to the
-  // local in-memory bus, which means SSE clients won't see cron events
-  // until Redis is healthy. Loud warning so operators notice.
-  const localBus = createEventBus();
-  let bus = localBus;
-  try {
-    bus = await wrapBusWithRedis(localBus, redis, { logger });
-    logger.info({ sourceId: (bus as { sourceId?: string }).sourceId }, 'live updates: redis bridge attached');
-  } catch (err) {
-    logger.warn(
-      { err: err instanceof Error ? err.message : String(err) },
-      'live updates: redis unreachable at boot — cron events will not reach SSE clients until reconnect',
-    );
-  }
 
   const deps: SyncRunnerDeps = {
     client,

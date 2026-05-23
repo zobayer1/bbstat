@@ -341,6 +341,7 @@ function encodeActivityQuery(query: ActivityQuery): string {
 export const api = {
   health: () => request<{ status: string; uptime: number }>('/healthz'),
   statsOverview: () => request<OverviewStats>('/api/stats/overview'),
+  bitbucketAuthState: () => request<{ state: 'ok' | 'unauthorized' }>('/api/bitbucket/auth-state'),
   latestCommit: (workspace: string, slug: string) =>
     request<LatestCommit>(
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/latest-commit`,
@@ -439,6 +440,10 @@ export interface RepositoryDeletedPayload {
   fullName: string;
 }
 
+export interface BitbucketAuthStatePayload {
+  state: 'ok' | 'unauthorized';
+}
+
 // Map from event-name → payload shape. `lib/live.ts` uses this for
 // type-safe handler registration (`bus.on('tick.commits.complete', p => ...)`).
 export interface LiveEventMap {
@@ -447,6 +452,7 @@ export interface LiveEventMap {
   'repository.sync-excluded': RepositoryExcludedPayload;
   'repository.included': RepositoryIncludedPayload;
   'repository.deleted': RepositoryDeletedPayload;
+  'bitbucket.auth-state': BitbucketAuthStatePayload;
 }
 
 export type LiveEventName = keyof LiveEventMap;

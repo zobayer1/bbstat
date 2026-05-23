@@ -266,8 +266,19 @@ const topRepos = computed(() =>
            edge — the block reads as a caption floating on the wave.
            Padded left to clear the boat. -->
       <div class="absolute inset-x-0 bottom-3 pl-24">
-        <h1 class="text-4xl font-bold tracking-tight text-slate-900">ShipShow!</h1>
-        <p class="mt-1 text-base font-bold text-slate-600">Part show, part shitshow.</p>
+        <h1 class="text-4xl font-bold tracking-tight text-slate-900">
+          ShipShow
+          <span
+            :class="stats.bitbucketAuthState === 'unauthorized' ? 'text-red-600' : ''"
+            :title="
+              stats.bitbucketAuthState === 'unauthorized'
+                ? 'BitBucket auth failed — the API token may have expired or been revoked. The next successful sync clears this.'
+                : undefined
+            "
+            >!!</span
+          >
+        </h1>
+        <p class="mt-1 text-base font-bold text-slate-600">Part show,&nbsp;&nbsp;part shitshow</p>
       </div>
     </header>
 
@@ -649,6 +660,7 @@ const topRepos = computed(() =>
   from {
     transform: translateX(-100%);
   }
+
   to {
     transform: translateX(100%);
   }
@@ -672,9 +684,11 @@ const topRepos = computed(() =>
   0% {
     transform: translateX(-100%);
   }
+
   55% {
     transform: translateX(110%);
   }
+
   100% {
     transform: translateX(110%);
   }

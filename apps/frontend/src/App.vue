@@ -4,7 +4,7 @@
 // stream is healthy. The actual route content sits inside <RouterView>.
 // A page-end footer (contact + last-sync) sits below every route so
 // per-page <main>s don't have to render it themselves.
-import { computed } from 'vue';
+import { computed, onMounted } from 'vue';
 import { RouterView } from 'vue-router';
 import LiveStatusPill from '@/components/LiveStatusPill.vue';
 import { useLiveStream } from '@/lib/live';
@@ -20,6 +20,13 @@ const lastSyncLabel = computed(() => {
   if (stats.loading) return 'Refreshing…';
   if (!stats.lastSyncedAt) return 'Last synced: never';
   return `Last synced: ${new Date(stats.lastSyncedAt).toLocaleString()}`;
+});
+
+// Fetch the BB auth flag once per page-load so the footer indicator is
+// correct on every route, not just Dashboard. SSE pushes subsequent
+// transitions; no need to refetch on navigation.
+onMounted(() => {
+  void stats.fetchBitbucketAuthState();
 });
 </script>
 
@@ -37,7 +44,15 @@ const lastSyncLabel = computed(() => {
         Contact: {{ contactEmail }}
       </a>
       <span v-else aria-hidden="true" />
-      <span>{{ lastSyncLabel }}</span>
+      <span
+        :class="stats.bitbucketAuthState === 'unauthorized' ? 'text-red-600' : ''"
+        :title="
+          stats.bitbucketAuthState === 'unauthorized'
+            ? 'BitBucket auth failed — sync is not progressing. The next successful call clears this.'
+            : undefined
+        "
+        >{{ lastSyncLabel }}</span
+      >
     </div>
   </footer>
   <!-- Fixed in the bottom-right so it doesn't reflow page content

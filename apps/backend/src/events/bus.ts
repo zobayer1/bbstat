@@ -26,7 +26,8 @@ export type LiveEvent =
   | { event: 'tick.prs.complete'; payload: TickPrsCompletePayload }
   | { event: 'repository.sync-excluded'; payload: RepositoryExcludedPayload }
   | { event: 'repository.included'; payload: RepositoryIncludedPayload }
-  | { event: 'repository.deleted'; payload: RepositoryDeletedPayload };
+  | { event: 'repository.deleted'; payload: RepositoryDeletedPayload }
+  | { event: 'bitbucket.auth-state'; payload: BitbucketAuthStatePayload };
 
 // Slim summary published at the end of `runCommitsSync`. Frontend
 // consumers use this to invalidate cached aggregates ("re-fetch
@@ -84,6 +85,14 @@ export interface RepositoryIncludedPayload {
 export interface RepositoryDeletedPayload {
   repositoryId: number;
   fullName: string;
+}
+
+// Surfaces an edge transition observed by the BitbucketClient — 401/403
+// from BB flips to 'unauthorized', the next 2xx flips back to 'ok'. The
+// SSE consumer turns the dashboard `!!` glyph red while in 'unauthorized'.
+// Only edges land here; steady-state stable streams emit nothing.
+export interface BitbucketAuthStatePayload {
+  state: 'ok' | 'unauthorized';
 }
 
 export type Subscriber = (event: LiveEvent) => void;

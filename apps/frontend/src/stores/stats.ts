@@ -23,6 +23,13 @@ export const useStatsStore = defineStore(
     const lastSyncedAt = ref<string | null>(null);
     const loading = ref(false);
     const error = ref<string | null>(null);
+    // BB credential health — flips when the sync runner observes a 401/403
+    // from BitBucket. Non-persisted: we always want a fresh value on boot
+    // (a token that expired mid-session shouldn't stay red after the user
+    // rotates and reloads). Initial state is 'ok'; the dashboard fetches
+    // the real value on mount and the SSE `bitbucket.auth-state` event
+    // pushes subsequent transitions.
+    const bitbucketAuthState = ref<'ok' | 'unauthorized'>('ok');
 
     async function fetchOverview() {
       loading.value = true;
@@ -41,6 +48,16 @@ export const useStatsStore = defineStore(
         error.value = e instanceof Error ? e.message : String(e);
       } finally {
         loading.value = false;
+      }
+    }
+
+    async function fetchBitbucketAuthState() {
+      try {
+        const { state } = await api.bitbucketAuthState();
+        bitbucketAuthState.value = state;
+      } catch {
+        // Network error reading the health flag is itself a non-event —
+        // leave the previous value alone (defaults to 'ok' on first boot).
       }
     }
 
@@ -71,6 +88,9 @@ export const useStatsStore = defineStore(
       await fetchOverview();
     }
 
+    liveBus.on('bitbucket.auth-state', (payload) => {
+      bitbucketAuthState.value = payload.state;
+    });
     liveBus.on('tick.commits.complete', () => {
       void applyTickComplete();
     });
@@ -95,7 +115,9 @@ export const useStatsStore = defineStore(
       lastSyncedAt,
       loading,
       error,
+      bitbucketAuthState,
       fetchOverview,
+      fetchBitbucketAuthState,
       setContributorsWindow,
       clear,
       applyTickComplete,

@@ -47,7 +47,28 @@ export interface BitbucketClientOptions {
   fetch?: typeof globalThis.fetch;
   // Injectable for tests of the call-ledger sliding window.
   now?: () => number;
+  // Fires only on edge transitions (ok → unauthorized, unauthorized → ok).
+  // Triggered by 401/403 (→ 'unauthorized') and any 2xx response (→ 'ok').
+  // 429 / 5xx / network errors do NOT change auth state — those signal
+  // upstream availability problems, not credential problems. We don't
+  // fire on first 2xx after boot UNLESS `initialAuthState` was
+  // 'unauthorized', in which case the first 2xx is a genuine
+  // unauthorized → ok transition that must reach the UI.
+  // Hook owners write this to Redis + publish the SSE event so the
+  // dashboard `!!` can flip red when the token expires.
+  onAuthStateChange?: (state: BitbucketAuthState) => void;
+  // Hydrated from the Redis flag at startup. Defaults to 'ok' — first
+  // 2xx with the default is then a no-op. When the previous process
+  // crashed/restarted while the flag was 'unauthorized' (token rotated
+  // out-of-band, then the new process boots fresh), the operator's
+  // recovery path runs through here: pass 'unauthorized' so the first
+  // 2xx clears Redis and publishes 'ok'. Without this, the dashboard
+  // stays red forever — the client's in-memory dedupe never sees an
+  // edge against the stale Redis flag.
+  initialAuthState?: BitbucketAuthState;
 }
+
+export type BitbucketAuthState = 'ok' | 'unauthorized';
 
 export interface RequestOptions {
   fields?: string[];
@@ -106,6 +127,12 @@ export class BitbucketClient {
   private consecutiveNon429 = 0;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly now: () => number;
+  private readonly onAuthStateChange: ((state: BitbucketAuthState) => void) | undefined;
+  // Last auth state we surfaced to the hook. Defaults to 'ok'; callers
+  // can override via `initialAuthState` to hydrate from a persisted flag
+  // (Redis) so a fresh process recovers a stale 'unauthorized' state
+  // when its first 2xx lands — see the comment on `initialAuthState`.
+  private lastAuthState: BitbucketAuthState;
   private rateLimit: RateLimitState = { limit: null, remaining: null, resetAt: null };
   // Sliding-window ledger of outbound-fetch timestamps. Includes retries —
   // each network attempt costs one against the BB-side counter, even if it
@@ -130,6 +157,22 @@ export class BitbucketClient {
     this.currentPacingMs = this.minCallIntervalMs;
     this.fetchFn = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this.now = opts.now ?? Date.now;
+    this.onAuthStateChange = opts.onAuthStateChange;
+    this.lastAuthState = opts.initialAuthState ?? 'ok';
+  }
+
+  private notifyAuthState(state: BitbucketAuthState): void {
+    if (this.lastAuthState === state) return;
+    this.lastAuthState = state;
+    try {
+      this.onAuthStateChange?.(state);
+    } catch (err) {
+      // Hook misbehavior must never break the request path.
+      this.logger?.warn?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        'bitbucket: onAuthStateChange threw',
+      );
+    }
   }
 
   /** Snapshot of the most recent rate-limit headers we observed. */
@@ -331,10 +374,16 @@ export class BitbucketClient {
 
       if (!res.ok) {
         // 4xx (other than 429) — don't retry, surface to caller.
+        if (res.status === 401 || res.status === 403) {
+          this.notifyAuthState('unauthorized');
+        }
         const body = await safeJson(res);
         throw new BitbucketApiError(`BitBucket ${res.status} on ${path}`, res.status, path, body);
       }
 
+      // Any 2xx response clears a prior auth-failure state. Hook fires
+      // only on transitions, so a stable healthy stream is a no-op.
+      this.notifyAuthState('ok');
       if (res.status === 204) return undefined as T;
       return (await res.json()) as T;
     }

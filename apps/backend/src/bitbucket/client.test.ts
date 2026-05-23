@@ -188,6 +188,91 @@ describe('BitbucketClient', () => {
     });
   });
 
+  describe('onAuthStateChange', () => {
+    it('fires "unauthorized" on 401, then "ok" on next 2xx — edge transitions only', async () => {
+      fetchMock
+        .mockResolvedValueOnce(mockResponse({ body: { ok: true } })) // 200 — initial state is 'ok' so no fire
+        .mockResolvedValueOnce(mockResponse({ status: 401, body: { error: { message: 'Unauthorized' } } }))
+        .mockResolvedValueOnce(mockResponse({ status: 401, body: { error: { message: 'Unauthorized' } } })) // still 'unauthorized' — no fire
+        .mockResolvedValueOnce(mockResponse({ body: { ok: true } })); // transition back to 'ok'
+      const onAuthStateChange = vi.fn();
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { onAuthStateChange });
+
+      await client.get('/x');
+      expect(onAuthStateChange).not.toHaveBeenCalled();
+
+      await expect(client.get('/x')).rejects.toMatchObject({ status: 401 });
+      expect(onAuthStateChange).toHaveBeenNthCalledWith(1, 'unauthorized');
+
+      await expect(client.get('/x')).rejects.toMatchObject({ status: 401 });
+      expect(onAuthStateChange).toHaveBeenCalledTimes(1); // no duplicate fire
+
+      await client.get('/x');
+      expect(onAuthStateChange).toHaveBeenNthCalledWith(2, 'ok');
+      expect(onAuthStateChange).toHaveBeenCalledTimes(2);
+    });
+
+    it('also fires "unauthorized" on 403', async () => {
+      fetchMock.mockResolvedValueOnce(mockResponse({ status: 403, body: {} }));
+      const onAuthStateChange = vi.fn();
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { onAuthStateChange });
+
+      await expect(client.get('/x')).rejects.toMatchObject({ status: 403 });
+      expect(onAuthStateChange).toHaveBeenCalledTimes(1);
+      expect(onAuthStateChange).toHaveBeenCalledWith('unauthorized');
+    });
+
+    it('does not fire on 404 / 5xx / 429', async () => {
+      fetchMock
+        .mockResolvedValueOnce(mockResponse({ status: 404, body: {} }))
+        .mockResolvedValueOnce(mockResponse({ status: 500, body: {} }))
+        .mockResolvedValueOnce(mockResponse({ status: 429, body: {}, headers: { 'retry-after': '1' } }));
+      const onAuthStateChange = vi.fn();
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, { onAuthStateChange, retries: 0 });
+
+      await expect(client.get('/x')).rejects.toMatchObject({ status: 404 });
+      await expect(client.get('/x')).rejects.toMatchObject({ status: 500 });
+      await expect(client.get('/x')).rejects.toBeInstanceOf(BitbucketRateLimitError);
+      expect(onAuthStateChange).not.toHaveBeenCalled();
+    });
+
+    it('with initialAuthState="unauthorized", first 2xx fires the recovery transition to "ok"', async () => {
+      // Reproduces the restart-after-token-rotation scenario: the previous
+      // process left the Redis flag at 'unauthorized'; the new process
+      // hydrates `initialAuthState` from it so the first 2xx is a real
+      // edge, not a deduped no-op. Without this, the dashboard would
+      // stay red forever after the operator rotates a busted token.
+      fetchMock.mockResolvedValueOnce(mockResponse({ body: { ok: true } }));
+      const onAuthStateChange = vi.fn();
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, {
+        onAuthStateChange,
+        initialAuthState: 'unauthorized',
+      });
+
+      await client.get('/x');
+      expect(onAuthStateChange).toHaveBeenCalledTimes(1);
+      expect(onAuthStateChange).toHaveBeenCalledWith('ok');
+    });
+
+    it('hook throwing does not break the request', async () => {
+      fetchMock.mockResolvedValueOnce(mockResponse({ status: 401, body: {} }));
+      const onAuthStateChange = vi.fn(() => {
+        throw new Error('hook broken');
+      });
+      const warn = vi.fn();
+      const client = makeClient(fetchMock as unknown as typeof globalThis.fetch, {
+        onAuthStateChange,
+        logger: { warn, error: vi.fn() },
+      });
+
+      await expect(client.get('/x')).rejects.toMatchObject({ status: 401 });
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ err: 'hook broken' }),
+        'bitbucket: onAuthStateChange threw',
+      );
+    });
+  });
+
   describe('rate-limit tracking', () => {
     it('captures X-RateLimit-* headers and exposes them via getRateLimit()', async () => {
       const resetSec = Math.floor(Date.now() / 1000) + 600;

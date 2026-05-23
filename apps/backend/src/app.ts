@@ -7,11 +7,13 @@ import { adminRoutes } from './routes/admin.js';
 import { statsRoutes } from './routes/stats.js';
 import { activityRoutes } from './routes/activity.js';
 import { liveRoutes } from './routes/live.js';
+import { bitbucketRoutes } from './routes/bitbucket.js';
 import { createEventBus, type EventBus } from './events/bus.js';
 import type { AppConfig } from './config.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
 import type { StatsStore, UserSummary } from './dashboard/stats-store.js';
 import type { UserSummaryCache } from './dashboard/user-summary-cache.js';
+import type { CacheClient } from './cache/redis.js';
 
 export interface BuildAppOptions {
   config: AppConfig;
@@ -31,6 +33,10 @@ export interface BuildAppOptions {
   // shared with the sync runner so publish() events fan out to SSE
   // subscribers. Tests can pass their own to assert publish calls.
   bus?: EventBus;
+  // Shared Redis client. When set, `/api/bitbucket/auth-state` reads
+  // the auth-health flag from it. Without it the route still registers
+  // and returns 'ok' — fine in tests / no-Redis dev.
+  redis?: CacheClient;
 }
 
 export async function buildApp({
@@ -41,6 +47,7 @@ export async function buildApp({
   statsStore,
   userSummaryCache,
   bus,
+  redis,
 }: BuildAppOptions) {
   // Fastify 5: a pre-built pino instance goes on `loggerInstance`, not `logger`
   // (which is for config). Same instance ends up at app.log either way.
@@ -61,6 +68,10 @@ export async function buildApp({
   // SSE so it doesn't poll a static dataset).
   const eventBus = bus ?? createEventBus();
   await app.register(liveRoutes, { prefix: '/api', bus: eventBus });
+
+  // BB credential health surface — registered unconditionally. The flag
+  // is per-Redis-instance; without Redis the route returns 'ok'.
+  await app.register(bitbucketRoutes, { prefix: '/api/bitbucket', ...(redis ? { redis } : {}) });
 
   if (syncDeps) {
     await app.register(adminRoutes, { prefix: '/api/admin', syncDeps });

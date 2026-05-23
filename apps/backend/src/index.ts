@@ -17,7 +17,7 @@ import {
   isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
 } from './sync/runner.js';
-import { createCache } from './cache/redis.js';
+import { bitbucketAuthStateCache, createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
 import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import { createRedisUserSummaryCache, type UserSummaryCache } from './dashboard/user-summary-cache.js';
@@ -82,6 +82,17 @@ async function main(): Promise<void> {
     const prStore = createDrizzlePrStore(db);
     const rollupStore = createDrizzleRollupStore(db);
     userSummaryCache = createRedisUserSummaryCache<UserSummary>(redis);
+    // Hydrate the client's auth-state from Redis — see sync/index.ts for
+    // the rationale (recover a stale 'unauthorized' flag after restart).
+    let initialAuthState: 'ok' | 'unauthorized' = 'ok';
+    try {
+      initialAuthState = await bitbucketAuthStateCache.get(redis);
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err) },
+        'bitbucket auth-state: redis read at startup failed — assuming ok',
+      );
+    }
     const client = new BitbucketClient({
       baseUrl: config.BITBUCKET_BASE_URL,
       email: config.BITBUCKET_AUTH_EMAIL,
@@ -90,6 +101,24 @@ async function main(): Promise<void> {
       minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,
       maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,
       logger,
+      initialAuthState,
+      // Surface BB credential health to the dashboard. On 401/403 we set
+      // a Redis flag; the next 2xx clears it. We also publish through the
+      // already-Redis-bridged bus so the cron host's auth events reach
+      // SSE clients connected here (and vice versa).
+      onAuthStateChange: (state) => {
+        const op =
+          state === 'unauthorized'
+            ? bitbucketAuthStateCache.setUnauthorized(redis)
+            : bitbucketAuthStateCache.clear(redis);
+        void op.catch((err) =>
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), state },
+            'bitbucket auth-state: redis write failed',
+          ),
+        );
+        bus.publish({ event: 'bitbucket.auth-state', payload: { state } });
+      },
     });
     // Seed file path: explicit env wins; otherwise default to
     // `<repo-root>/tracked-repos.yaml`. Required when explicit so a typo
@@ -130,6 +159,7 @@ async function main(): Promise<void> {
     syncDeps,
     statsStore,
     bus,
+    redis,
     ...(userSummaryCache ? { userSummaryCache } : {}),
   });
 
