@@ -30,6 +30,12 @@ COPY apps/frontend apps/frontend
 # `/api/*` call to the page's own origin — which nginx (below) proxies to the
 # backend container.
 ENV VITE_API_BASE_URL=""
+# Contact email shown in the page footer. Passed at build time because Vite
+# bakes `import.meta.env.VITE_*` into the bundle. Empty by default — the
+# footer simply hides the contact link when unset. Compose interpolates
+# this from the host shell / `.env`; production builds set it explicitly.
+ARG VITE_CONTACT_EMAIL=""
+ENV VITE_CONTACT_EMAIL=$VITE_CONTACT_EMAIL
 RUN pnpm --filter @bbstat/frontend build
 
 # ─── runtime ────────────────────────────────────────────────────────────────

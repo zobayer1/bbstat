@@ -153,6 +153,11 @@ services:
     build:
       context: .
       dockerfile: apps/frontend/Dockerfile
+      args:
+        # Pulled from the host shell / `.env` at build time (compose
+        # auto-loads `.env`). Empty default keeps the build green when
+        # unset; the footer simply hides the contact link.
+        VITE_CONTACT_EMAIL: ${VITE_CONTACT_EMAIL:-}
     labels:
       - 'traefik.enable=true'
       # Tell Traefik which docker network to use to reach this service. The
