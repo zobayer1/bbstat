@@ -31,6 +31,8 @@ const sample: RepoActivity = {
       additionsWindow: 0,
       deletionsWindow: 0,
       reposWindow: 1,
+      momentum: null,
+      consistency90d: null,
     },
   ],
 };

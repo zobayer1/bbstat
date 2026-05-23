@@ -25,6 +25,8 @@ const sample: ProjectStats = {
       reposWindow: 1,
       additions30d: 0,
       deletions30d: 0,
+      momentum: null,
+      consistency90d: null,
     },
   ],
   repositories: [

@@ -13,7 +13,7 @@ vi.mock('../src/api/client', () => ({
 import { api } from '../src/api/client';
 
 const sampleOverview = {
-  users: 49,
+  contributors: 49,
   repositories: 3,
   projects: 1,
   totalCommits: 1234,
@@ -30,6 +30,8 @@ const sampleContributors = [
     additionsWindow: 0,
     deletionsWindow: 0,
     reposWindow: 1,
+    momentum: null,
+    consistency90d: null,
   },
   {
     userId: 2,
@@ -40,6 +42,8 @@ const sampleContributors = [
     additionsWindow: 0,
     deletionsWindow: 0,
     reposWindow: 1,
+    momentum: null,
+    consistency90d: null,
   },
 ];
 const sampleRepositories = [
@@ -123,6 +127,8 @@ describe('stats store', () => {
         additionsWindow: 0,
         deletionsWindow: 0,
         reposWindow: 1,
+        momentum: null,
+        consistency90d: null,
       },
     ]);
     const store = useStatsStore();

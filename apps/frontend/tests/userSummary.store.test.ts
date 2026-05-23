@@ -11,7 +11,14 @@ import { api } from '../src/api/client';
 import type { UserSummary } from '../src/api/client';
 
 const sampleSummary: UserSummary = {
-  user: { id: 7, bitbucketUuid: '{u7}', displayName: 'Alice', email: 'alice@example.com' },
+  user: {
+    id: 7,
+    bitbucketUuid: '{u7}',
+    displayName: 'Alice',
+    email: 'alice@example.com',
+    badge: null,
+    badgeTier: null,
+  },
   totals: {
     commits7d: 12,
     commits30d: 40,
