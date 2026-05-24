@@ -41,7 +41,7 @@ import type { PrTickOptions } from './pr-tick.js';
 import type { RepoPrSyncResult } from './pull-requests.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
-import type { UserScoreRollupResult } from '../scoring/rollup.js';
+import type { AllScoresRollupResult } from '../scoring/rollup.js';
 
 export type SyncTrigger = 'manual' | 'cron' | 'webhook';
 
@@ -97,14 +97,16 @@ export interface SyncRunnerDeps {
   // deepen-backfill.ts) also publish `repository.sync-excluded`
   // through this bus. Optional — omit in tests that don't care.
   bus?: EventBus;
-  // ShipShow Score nightly rollup (docs/scoring.md phase 3). When wired,
-  // runs at the end of every successful runCommitsSync — after all
-  // commit-side ingest (delta + deepen + is-merge + diff-stats backfill)
-  // has landed, so the eligible commit set is as fresh as it gets.
-  // Failures here are score-freshness blips and never poison the sync
-  // result; the next tick will recompute the same set. Omit in tests
-  // that don't care about scoring.
-  recomputeUserScores?: () => Promise<UserScoreRollupResult>;
+  // ShipShow Score rollup (docs/scoring.md phase 3 + Phase 5). When
+  // wired, runs at the end of every successful runCommitsSync — after
+  // all commit-side ingest (delta + deepen + is-merge + diff-stats
+  // backfill) has landed, so the eligible commit set is as fresh as it
+  // gets. Drives both per-alias `user_score` and per-person
+  // `person_score` passes via `recomputeAllScores`. Failures here are
+  // score-freshness blips and never poison the sync result; the next
+  // tick will recompute the same set. Omit in tests that don't care
+  // about scoring.
+  recomputeAllScores?: () => Promise<AllScoresRollupResult>;
 }
 
 interface BaseResult {
@@ -363,16 +365,17 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   }
 
   // Score rollup runs last, after every commit-side ingest path has had
-  // its turn. Wrapped in try/catch — a stale leaderboard for one tick
-  // is much less bad than a failed sync, and the next tick recomputes
-  // the same set.
-  if (deps.recomputeUserScores !== undefined) {
+  // its turn. Runs both passes (user_score + person_score) under one
+  // orchestrator. Wrapped in try/catch — a stale leaderboard for one
+  // tick is much less bad than a failed sync, and the next tick
+  // recomputes the same set.
+  if (deps.recomputeAllScores !== undefined) {
     try {
-      await deps.recomputeUserScores();
+      await deps.recomputeAllScores();
     } catch (err) {
       deps.logger.warn?.(
         { err: err instanceof Error ? err.message : String(err) },
-        'user score rollup: tick failed — leaderboard stale until next tick',
+        'score rollup: tick failed — leaderboard stale until next tick',
       );
     }
   }

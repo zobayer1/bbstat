@@ -64,15 +64,17 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
   });
 
   // Manual trigger for the ShipShow Score rollup (docs/scoring.md
-  // phase 3). The sync runner already fires this at the end of every
-  // commits-sync tick; this endpoint exists for backfills after threshold
-  // tuning, for the post-deploy verification step, and for the dev
-  // smoke loop.
+  // phase 3 + Phase 5). Runs both passes — per-alias `user_score` and
+  // per-person `person_score`. The sync runner already fires this at
+  // the end of every commits-sync tick; this endpoint exists for
+  // backfills after threshold tuning, for the post-deploy verification
+  // step, and for the dev smoke loop. Returns `{ user, person }`
+  // with timings + row counts for each pass.
   app.post('/scores/recompute', async (_request, reply) => {
-    if (opts.syncDeps.recomputeUserScores === undefined) {
+    if (opts.syncDeps.recomputeAllScores === undefined) {
       return reply.code(503).send({ error: 'score_rollup_not_wired' });
     }
-    return opts.syncDeps.recomputeUserScores();
+    return opts.syncDeps.recomputeAllScores();
   });
 
   // Force a fresh delta pull for a single tracked repo. Useful for backfills,
