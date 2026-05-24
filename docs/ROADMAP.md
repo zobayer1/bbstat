@@ -170,13 +170,42 @@ Per-developer ranking metrics layered onto the existing rollups — no new BitBu
 
 **Status:** Landed across `f6c0b8c`..`be739f9` (12 commits). See [`docs/scoring.md`](scoring.md) for the algorithm, schema, badge cascade, and operator notes.
 
-### Phase 5 — User alias merge (planning TBD)
+### Phase 5 — Person layer (alias merge) (~5–6 days)
 
-One human, many `bitbucket_uuid`s. Today a contributor who pushes from a personal account and a corp account shows up as two `users` rows with disjoint commit histories; aggregates split and leaderboards under-count them. This phase reconciles those identities.
+One human, many `bitbucket_uuid`s. Today a contributor who uses both a corp and a personal BB account — pushing with different git emails from each — shows up as two `users` rows with disjoint commit histories; aggregates split, the leaderboard under-counts them, and Lorenz / Gini under-represent concentration. Phase 5 adds a **person** layer above `users` that the operator builds by hand (no auto-detection — the Members page's existing Fuse.js search across name / username / email is how candidates are found), and routes leaderboard-style reads through that layer. Attach and detach are both first-class admin operations; `commits.author_user_id` is **never** rewritten, so detach is a one-row UPDATE.
 
-- Design open: operator-curated alias table vs. auto-detect-by-email, how to recompute rollups after a merge, whether to keep history on the alias path or rewrite `author_user_id` in place.
-- No schema yet — `aliases` table shape and migration plan are part of the planning step.
-- Blocks Phase 4.5's scoring accuracy at the long tail (anyone with multi-account history is currently under-scored).
+- **Schema additions** (one migration, Drizzle + Flyway mirror per the existing lockstep workflow):
+  - New `people` table: `id serial PK`, `display_name text NULL` (NULL → UI falls back to the primary alias's name), `primary_user_id integer NULL FK users(id) ON DELETE SET NULL`, `created_at` / `updated_at`.
+  - New `users.person_id integer NULL FK people(id) ON DELETE SET NULL` with a partial index `WHERE person_id IS NOT NULL`. NULL = unattached.
+  - New `person_score` table mirroring `user_score` shape, keyed on `person_id PK FK ON DELETE CASCADE`. Indexed on `score_trending DESC NULLS LAST` and `volume_30d DESC NULLS LAST` (parity with `user_score`).
+  - New view `leaderboard_entries` unioning per-person rows with per-(unattached-)user rows.
+- **Migration / backfill mechanics** — by design, the migration ships **empty**: no data rewrite, no auto-population, fully opt-in.
+  - The `ALTER TABLE users` is non-destructive (adds a nullable column with no default). Every existing `users` row stays `person_id = NULL`, behavior identical to today.
+  - `people` and `person_score` are created empty. The next commit-sync tick's `person_score` recompute pass is a no-op until the first `POST /api/admin/people` lands.
+  - `commit_daily`, `user_score`, all existing `bbstat:user-summary:*` rollups: untouched. No rebuild, no data shuffle. The deploy's only cache-side action is the `FLUSHDB` covered below — required for the shape-change to `WorkspaceMember` / `UserSummary`, not for any data drift.
+  - **First-merge runbook** (operator, after deploy): (1) find duplicate identities via `/members` name / email search; (2) `POST /api/admin/people {"displayName":"Jane Doe","primaryUserId":<canonical alias id>}` → returns `{id}`; (3) `POST /api/admin/people/{id}/attach {"userId":<other alias id>}`. The attach endpoint inline-recomputes `person_score` for that person from the unioned commit set, invalidates the affected Redis keys, and emits an SSE event so open browser tabs refresh. Repeat per merged identity.
+  - **Rollback** is a clean drop: `DROP VIEW leaderboard_entries; DROP TABLE person_score; ALTER TABLE users DROP COLUMN person_id; DROP TABLE people;` returns to current state because no existing row was modified.
+- **Person-aware scoring rollup** — the bulk of the implementation effort. `apps/backend/src/scoring/rollup.ts` keeps the existing per-alias `user_score` pass (drives the per-user detail page unchanged) and adds a parallel per-person pass: for each `people` row, fetch commits across all attached aliases (`WHERE author_user_id = ANY(attached_user_ids)`) and run the same `commit-score` / `decay` / `consistency` / `badge` functions over the unioned set, writing to `person_score`. Split-log churn, volume sums, and trending decay compose linearly across aliases; `consistency_90d`, `p95_churn_cap`, `median_churn_90d`, `days_since_first_commit` recompute against the unioned commit set rather than summing. `is_dormant` is `AND` across aliases; workspace-member status at person scope is `OR` across aliases (drives the active-vs-dormant Members filter). Both passes triggered at the tail of every commit-sync tick. `make recompute-user-scores` (and the matching admin endpoint) extends to cover both tables.
+- **Admin endpoints** (curl-only this phase — operator UI is Phase 8 scope):
+  - `POST   /api/admin/people` — `{ displayName?, primaryUserId? }` → `{ id }`
+  - `GET    /api/admin/people` — list with attached-alias roster
+  - `GET    /api/admin/people/:id` — one person, full alias detail
+  - `PATCH  /api/admin/people/:id` — edit `displayName` / `primaryUserId`
+  - `POST   /api/admin/people/:id/attach` — `{ userId }` → 204; rejects if user already attached elsewhere (one user maps to ≤1 person)
+  - `POST   /api/admin/people/:id/detach` — `{ userId }` → 204; person survives even if attachments hit zero (operator decides to dissolve)
+  - `DELETE /api/admin/people/:id` — dissolve: NULL `person_id` on every attached user, cascade-delete `person_score`, delete the person row
+  - Every mutation runs in one transaction, then synchronously: (a) recomputes `person_score` for the affected person(s), (b) invalidates `bbstat:user-summary:{id}` for every affected alias plus the new `bbstat:person-summary:{person_id}` keys, (c) emits SSE events (`person.attached`, `person.detached`, `person.dissolved`).
+- **Leaderboard read path** — `/api/stats/members`, Top Contributors, Lorenz / Gini, activity-status donut switch to selecting from `leaderboard_entries`. Per-user pages (`/users/:id`) keep reading `user_score` directly so the per-alias view stays meaningful.
+- **Frontend**:
+  - `/members` rows for merged entries carry a small "merged from N accounts" pill; row links to the new person detail page when `kind = 'person'`, else to the user detail page as today.
+  - New page `/people/:id` (`apps/frontend/src/views/Person.vue`) — aggregated equivalent of user detail, with an "Attached accounts" panel listing each alias (display name, email, BB UUID, link to per-alias detail).
+  - `/users/:id` gains a header banner "Part of: <person name>" linking to the person page when attached.
+  - New Pinia stores: `usePersonStore`, `usePersonSummaryStore`. `WorkspaceMember` gains `personId?` + `personDisplayName?`; `UserSummary` gains `person?: { id, displayName }`; new `PersonSummary` shape.
+- **Cache versioning** — `WorkspaceMember` and `UserSummary` shape changes → `CACHE_VERSION` bump in the same commit (per `docs/frontend-cache.md`). New `bbstat:person-summary:*` Redis prefix → pair the deploy with `docker compose exec redis redis-cli FLUSHDB` per the Redis-bust rule.
+- **Docs** — new `docs/people.md` (schema, attach / detach mechanics, person-aware rollup, the unified leaderboard view, FLUSHDB reminder, curl recipes for every admin endpoint); `docs/scoring.md` gains a "Person-aware rollup" section.
+- **Out of scope** — auto-detection of merge candidates (operator uses existing name search); admin UI for merging (Phase 8); rewriting `commits.author_user_id` (stays alias-pinned forever); cross-alias email reconciliation (`users.email` stays write-once per alias; a person's "primary email" surfaces via `primary_user_id`).
+
+**Estimate:** ~5–6 days. Schema + person-aware scoring rollup is the bulk (~3 days); admin endpoints, the leaderboard view, and the person detail page round it out.
 
 ### Phase 6 — Org-email auth + BitBucket account linking (planning TBD)
 
