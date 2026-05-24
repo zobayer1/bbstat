@@ -18,6 +18,7 @@ const sampleSummary: UserSummary = {
     email: 'alice@example.com',
     badge: null,
     badgeTier: null,
+    person: null,
   },
   totals: {
     commits7d: 12,

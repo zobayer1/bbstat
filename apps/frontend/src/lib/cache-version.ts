@@ -16,7 +16,11 @@
 // — auto-flushing on every boot would defeat the cache. Treat that as
 // a separate decision documented under "Pair every WorkspaceMember /
 // UserSummary shape change with a Redis bust" in the memory.
-export const CACHE_VERSION = 13;
+// Bumped to 14 for Phase 5: WorkspaceMember switched from `userId` to
+// the `entityKind` / `entityId` / `attachedUserIds` discriminated shape,
+// and UserSummary.user gained the `person` field. New persisted store
+// `personSummary` also participates via the global prefix.
+export const CACHE_VERSION = 14;
 
 // localStorage key holding the integer above as a string. Lives outside
 // the `bbstat-` prefix so the bust function doesn't wipe its own sentinel

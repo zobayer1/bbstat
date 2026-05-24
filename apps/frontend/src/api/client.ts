@@ -91,6 +91,10 @@ export interface UserSummary {
     // the dev is dormant / no persona matched.
     badge: UserBadge | null;
     badgeTier: UserBadgeTier | null;
+    // Phase 5 alias merge — non-null when this user is attached to a
+    // person. The user detail page renders a "Part of: <displayName>"
+    // banner linking to /people/:id. Null when unattached.
+    person: { id: number; displayName: string } | null;
   };
   totals: {
     commits7d: number;
@@ -189,23 +193,31 @@ export type UserBadge = 'fresh_meat' | 'deep_diver' | 'ai_alex' | 'steady_eddie'
 // frontend renders it as a colored ring around the badge icon.
 export type UserBadgeTier = 'bronze' | 'silver' | 'gold';
 
-// One row on the /members page. Mirror of WorkspaceMember in
+// One row on the /members leaderboard. Mirror of WorkspaceMember in
 // apps/backend/src/dashboard/stats-store.ts — keep in lockstep.
-// `email` is the git-author email parsed from commits.author.raw on
-// ingest — best-effort, not a verified workspace email. See the
-// comment on users.email in schema.ts for caveats.
+// Phase 5: each row is either an unattached user or a merged person,
+// discriminated by `entityKind`. `email` is the git-author email
+// parsed from commits.author.raw on ingest — best-effort, not a
+// verified workspace email. See the comment on users.email in
+// schema.ts for caveats.
 export interface WorkspaceMember {
-  userId: number;
-  bitbucketUuid: string;
+  // 'user' → unattached user; entityId is users.id; link to /users/:id.
+  // 'person' → merged person; entityId is people.id; link to /people/:id.
+  entityKind: 'user' | 'person';
+  entityId: number;
+  // Primary alias's UUID for person rows; the user's own for user rows.
+  // Null only for a person with aliases but no primary flagged (edge).
+  bitbucketUuid: string | null;
   displayName: string;
   username: string | null;
   email: string | null;
-  // Mirrors users.is_workspace_member — TRUE for current workspace
-  // members (discovered via member sync), FALSE for ex-employees /
-  // never-members / externals (auto-created during commit ingest or
-  // by the anonymous-sweep runner). Drives the Members table's
-  // muted styling for out-of-workspace contributors.
+  // Person rows: OR across attached aliases. User rows: the user's own.
+  // Drives muted styling for out-of-workspace contributors.
   isWorkspaceMember: boolean;
+  // The user_ids behind this row, primary-first. Length 1 for user
+  // rows; ≥1 for person rows. Drives the "merged from N accounts" pill
+  // and lets SSE handlers know which per-user caches to drop.
+  attachedUserIds: number[];
   // Both windows ship in every row so the table can render
   // `{commits} ({repos})` cells side-by-side for 7d and 30d without
   // re-fetching on toggle.
@@ -217,10 +229,11 @@ export interface WorkspaceMember {
   reposAllTime: number;
   lastActiveAt: string | null;
   last30Days: number[];
-  // ShipShow Score columns (docs/scoring.md). LEFT-JOINed from
-  // user_score on the backend — null when the row isn't written yet
-  // (between member sync and the next commits-sync tick). The table
-  // sorts by scoreTrending DESC by default.
+  // ShipShow Score columns (docs/scoring.md). Sourced from the
+  // leaderboard_entries view (user_score for user rows, person_score
+  // for person rows) — null when the row isn't written yet (between
+  // member sync and the next commits-sync tick). The table sorts by
+  // scoreTrending DESC by default.
   scoreTrending: number | null;
   consistency90d: number | null;
   badge: UserBadge | null;
@@ -228,6 +241,49 @@ export interface WorkspaceMember {
   // the colored ring around the badge icon.
   badgeTier: UserBadgeTier | null;
   isDormant: boolean;
+}
+
+// Phase 5 — the Person detail page payload. Mirror of PersonSummary
+// in apps/backend/src/dashboard/stats-store.ts. Same shape as
+// UserSummary plus the `attachedUsers` roster of underlying aliases.
+export interface PersonSummary {
+  person: {
+    id: number;
+    displayName: string;
+    bitbucketUuid: string | null;
+    email: string | null;
+    badge: UserBadge | null;
+    badgeTier: UserBadgeTier | null;
+  };
+  attachedUsers: Array<{
+    id: number;
+    bitbucketUuid: string;
+    displayName: string;
+    username: string | null;
+    email: string | null;
+    isPrimary: boolean;
+  }>;
+  totals: {
+    commits7d: number;
+    commits30d: number;
+    commitsAllTime: number;
+    additions7d: number;
+    deletions7d: number;
+    additions30d: number;
+    deletions30d: number;
+    repositoriesAllTime: number;
+  };
+  dailyCommits: Array<{ date: string; commits: number }>;
+  topRepos: Array<{
+    workspace: string;
+    slug: string;
+    fullName: string;
+    project: string | null;
+    commits: number;
+    syncStatus: RepoSyncStatus;
+    additions30d: number;
+    deletions30d: number;
+  }>;
 }
 
 export interface TrackedRepositorySummary {
@@ -349,6 +405,7 @@ export const api = {
   topContributors: (window: ContributorWindow = '7d') =>
     request<TopContributorWithSparkline[]>(`/api/stats/top-contributors?window=${window}`),
   userSummary: (userId: number) => request<UserSummary>(`/api/stats/users/${userId}/summary`),
+  personSummary: (personId: number) => request<PersonSummary>(`/api/stats/people/${personId}/summary`),
   projectStats: (projectKey: string) => request<ProjectStats>(`/api/stats/projects/${encodeURIComponent(projectKey)}`),
   repositoryActivity: (workspace: string, slug: string) =>
     request<RepoActivity>(
@@ -444,6 +501,37 @@ export interface BitbucketAuthStatePayload {
   state: 'ok' | 'unauthorized';
 }
 
+// Phase 5 — person-layer mutation events. Mirror of the backend
+// payloads in apps/backend/src/events/bus.ts. The Members store
+// re-fetches the leaderboard on any of these; per-user-summary
+// stores drop the affected aliases' cached entries.
+export interface PersonCreatedPayload {
+  personId: number;
+  primaryUserId: number | null;
+}
+export interface PersonUpdatedPayload {
+  personId: number;
+}
+export interface PersonAttachedPayload {
+  personId: number;
+  userId: number;
+  becamePrimary: boolean;
+}
+export interface PersonDetachedPayload {
+  personId: number;
+  userId: number;
+  wasPrimary: boolean;
+}
+export interface PersonPrimaryChangedPayload {
+  personId: number;
+  previousPrimaryUserId: number | null;
+  newPrimaryUserId: number;
+}
+export interface PersonDissolvedPayload {
+  personId: number;
+  detachedUserIds: number[];
+}
+
 // Map from event-name → payload shape. `lib/live.ts` uses this for
 // type-safe handler registration (`bus.on('tick.commits.complete', p => ...)`).
 export interface LiveEventMap {
@@ -453,6 +541,12 @@ export interface LiveEventMap {
   'repository.included': RepositoryIncludedPayload;
   'repository.deleted': RepositoryDeletedPayload;
   'bitbucket.auth-state': BitbucketAuthStatePayload;
+  'person.created': PersonCreatedPayload;
+  'person.updated': PersonUpdatedPayload;
+  'person.attached': PersonAttachedPayload;
+  'person.detached': PersonDetachedPayload;
+  'person.primary-changed': PersonPrimaryChangedPayload;
+  'person.dissolved': PersonDissolvedPayload;
 }
 
 export type LiveEventName = keyof LiveEventMap;

@@ -7,6 +7,7 @@ import type {
   ActivityFilters,
   LatestCommit,
   OverviewStats,
+  PersonSummary,
   ProjectStats,
   RepoActivity,
   StatsStore,
@@ -68,6 +69,7 @@ function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {
     getLatestCommitForRepository: vi.fn(),
     getTopContributors: vi.fn(),
     getUserSummary: vi.fn(),
+    getPersonSummary: vi.fn(),
     getProjectStats: vi.fn(),
     getRepositoryActivity: vi.fn(),
     listTrackedRepositoriesWithStats: vi.fn(),
@@ -241,12 +243,14 @@ describe('GET /api/stats/members', () => {
 
   const sampleMembers: WorkspaceMember[] = [
     {
-      userId: 1,
+      entityKind: 'user',
+      entityId: 1,
       bitbucketUuid: '{u1}',
       displayName: 'Alice',
       username: 'alice',
       email: 'alice@example.com',
       isWorkspaceMember: true,
+      attachedUserIds: [1],
       commits7d: 12,
       repos7d: 3,
       commits30d: 45,
@@ -262,12 +266,14 @@ describe('GET /api/stats/members', () => {
       isDormant: false,
     },
     {
-      userId: 2,
+      entityKind: 'person',
+      entityId: 9,
       bitbucketUuid: '{u2}',
       displayName: 'Bob',
       username: null,
       email: null,
       isWorkspaceMember: false,
+      attachedUserIds: [2, 7],
       commits7d: 0,
       repos7d: 0,
       commits30d: 0,
@@ -321,6 +327,7 @@ const sampleUserSummary: UserSummary = {
     email: 'alice@example.com',
     badge: 'steady_eddie',
     badgeTier: 'gold',
+    person: null,
   },
   totals: {
     commits7d: 12,
@@ -421,6 +428,90 @@ describe('GET /api/stats/users/:userId/summary', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toEqual({ error: 'invalid_user_id' });
     expect(statsStore.getUserSummary).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/stats/people/:personId/summary', () => {
+  let appInstance: Awaited<ReturnType<typeof buildApp>> | undefined;
+
+  const samplePersonSummary: PersonSummary = {
+    person: {
+      id: 3,
+      displayName: 'Jane Doe',
+      bitbucketUuid: '{u4}',
+      email: 'jane.work@example.com',
+      badge: 'steady_eddie',
+      badgeTier: 'silver',
+    },
+    attachedUsers: [
+      {
+        id: 4,
+        bitbucketUuid: '{u4}',
+        displayName: 'jane.work',
+        username: 'janew',
+        email: 'jane.work@example.com',
+        isPrimary: true,
+      },
+      {
+        id: 5,
+        bitbucketUuid: '{u5}',
+        displayName: 'janedoe93',
+        username: null,
+        email: 'jane@personal.com',
+        isPrimary: false,
+      },
+    ],
+    totals: {
+      commits7d: 4,
+      commits30d: 20,
+      commitsAllTime: 300,
+      additions7d: 100,
+      deletions7d: 30,
+      additions30d: 800,
+      deletions30d: 250,
+      repositoriesAllTime: 12,
+    },
+    dailyCommits: [{ date: '2026-05-20', commits: 3 }],
+    topRepos: [],
+  };
+
+  afterEach(async () => {
+    if (appInstance) await appInstance.close();
+    appInstance = undefined;
+  });
+
+  it('returns the person summary from the store (uncached)', async () => {
+    const getPersonSummary = vi.fn().mockResolvedValue(samplePersonSummary);
+    const statsStore = makeStatsStore({ getPersonSummary });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/people/3/summary' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual(samplePersonSummary);
+    expect(getPersonSummary).toHaveBeenCalledWith(3);
+  });
+
+  it('returns 404 when the person does not exist', async () => {
+    const getPersonSummary = vi.fn().mockResolvedValue(null);
+    const statsStore = makeStatsStore({ getPersonSummary });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/people/99/summary' });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'not_found', personId: 99 });
+  });
+
+  it('returns 400 when personId is not a positive integer', async () => {
+    const statsStore = makeStatsStore();
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/stats/people/0/summary' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({ error: 'invalid_person_id' });
+    expect(statsStore.getPersonSummary).not.toHaveBeenCalled();
   });
 });
 

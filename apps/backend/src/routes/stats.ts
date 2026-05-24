@@ -70,6 +70,22 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
     return summary;
   });
 
+  // Phase 5 — Person detail read. Not Redis-cached (yet): the three
+  // aggregate pulls are cheap at the current scale and merges are rare,
+  // so a read-through cache would add an invalidation surface (every
+  // person.* admin mutation would need to DEL it) for little gain. If
+  // person pages get hot, mirror the user-summary cache pattern here
+  // and DEL from refreshAfterPersonMutation in routes/admin.ts.
+  app.get<{ Params: { personId: string } }>('/people/:personId/summary', async (request, reply) => {
+    const parsed = userIdSchema.safeParse(request.params.personId);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    const summary = await opts.statsStore.getPersonSummary(parsed.data);
+    if (summary === null) return reply.code(404).send({ error: 'not_found', personId: parsed.data });
+    return summary;
+  });
+
   app.get<{ Params: { projectKey: string } }>('/projects/:projectKey', async (request, reply) => {
     const stats = await opts.statsStore.getProjectStats(request.params.projectKey);
     if (stats === null) return reply.code(404).send({ error: 'not_found', projectKey: request.params.projectKey });

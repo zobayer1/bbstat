@@ -495,7 +495,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                      normal-color email). -->
           <tr
             v-for="m in paged"
-            :key="m.bitbucketUuid"
+            :key="`${m.entityKind}:${m.entityId}`"
             :class="['hover:bg-slate-50', m.isDormant ? 'bg-slate-50/40 text-slate-400 opacity-70' : '']"
             :title="m.isDormant ? 'Dormant — no eligible activity in the last 90 days' : ''"
           >
@@ -503,11 +503,26 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
               <BadgeIcon :badge="m.badge" :tier="m.badgeTier" />
             </td>
             <td class="px-4 py-2">
+              <!-- Person rows link to /people/:id, user rows to /users/:id.
+                   The merged-from pill only renders on person rows with
+                   >1 attached alias (a single-alias person is possible
+                   transiently between create and the second attach). -->
               <RouterLink
-                :to="{ name: 'user', params: { userId: m.userId } }"
+                :to="
+                  m.entityKind === 'person'
+                    ? { name: 'person', params: { personId: m.entityId } }
+                    : { name: 'user', params: { userId: m.entityId } }
+                "
                 :class="['block font-medium hover:text-slate-600', m.isDormant ? 'text-slate-500' : 'text-slate-900']"
               >
                 {{ m.displayName }}
+                <span
+                  v-if="m.entityKind === 'person' && m.attachedUserIds.length > 1"
+                  class="ml-1.5 inline-block rounded-full bg-violet-100 px-1.5 py-0.5 align-middle text-[10px] font-medium text-violet-700"
+                  :title="`Merged from ${m.attachedUserIds.length} BitBucket accounts`"
+                >
+                  merged ×{{ m.attachedUserIds.length }}
+                </span>
               </RouterLink>
               <!-- Git-author email: best-effort, parsed from commits.author.raw at
                    ingest. Rendered muted under the displayName when the BB

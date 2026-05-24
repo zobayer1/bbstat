@@ -20,6 +20,9 @@ export const router = createRouter({
     // table of every tracked repo plus a sync-health donut.
     { path: '/repositories', name: 'repositories', component: () => import('@/views/Repositories.vue') },
     { path: '/users/:userId', name: 'user', component: UserSummary, props: true },
+    // Person detail (Phase 5 alias merge) — lazy-loaded; aggregated
+    // equivalent of the user page over a merged person's attached aliases.
+    { path: '/people/:personId', name: 'person', component: () => import('@/views/Person.vue'), props: true },
     { path: '/projects/:projectKey', name: 'project', component: ProjectStats, props: true },
     {
       path: '/repositories/:workspace/:slug',

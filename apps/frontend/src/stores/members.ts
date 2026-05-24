@@ -57,6 +57,29 @@ export const useMembersStore = defineStore(
     liveBus.on('repository.deleted', () => {
       void applyTickComplete();
     });
+    // Phase 5 — any person-layer mutation reshapes the leaderboard:
+    // a create / attach collapses rows into one, a detach / dissolve
+    // splits them back out, and a primary swap or display-name edit
+    // changes a row's label. All of them warrant a re-fetch so the
+    // table reflects the new merge state without a manual reload.
+    liveBus.on('person.created', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.updated', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.attached', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.detached', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.primary-changed', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.dissolved', () => {
+      void applyTickComplete();
+    });
     liveBus.onFallback(() => {
       void applyTickComplete();
     });

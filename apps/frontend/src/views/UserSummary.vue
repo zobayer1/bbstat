@@ -77,6 +77,18 @@ const projectOptions = computed<string[]>(() => {
            regular font; UUID stays monospaced since it's an identifier. -->
       <p v-if="summary?.user.email" class="mt-1 text-xs text-slate-400">{{ summary.user.email }}</p>
       <p v-else-if="summary" class="mt-1 font-mono text-xs text-slate-400">{{ summary.user.bitbucketUuid }}</p>
+      <!-- Phase 5 — when this account is merged into a person, surface
+           the link so the viewer knows the canonical aggregate lives
+           on the person page (and that this page is just one alias). -->
+      <p v-if="summary?.user.person" class="mt-2 text-xs">
+        <span class="text-slate-500">Part of</span>
+        <RouterLink
+          :to="{ name: 'person', params: { personId: summary.user.person.id } }"
+          class="ml-1 rounded-full bg-violet-100 px-2 py-0.5 font-medium text-violet-700 hover:bg-violet-200"
+        >
+          {{ summary.user.person.displayName }} →
+        </RouterLink>
+      </p>
     </header>
 
     <p v-if="loading && !summary" class="text-sm text-slate-400">Loading…</p>

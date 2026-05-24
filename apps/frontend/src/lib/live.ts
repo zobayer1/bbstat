@@ -106,6 +106,12 @@ const EVENT_NAMES: readonly LiveEventName[] = [
   'repository.included',
   'repository.deleted',
   'bitbucket.auth-state',
+  'person.created',
+  'person.updated',
+  'person.attached',
+  'person.detached',
+  'person.primary-changed',
+  'person.dissolved',
 ] as const;
 
 export interface LiveStreamHandle {
