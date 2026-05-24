@@ -6,12 +6,13 @@ right move is usually to extract it here and link from both.
 
 ## Main feature docs
 
-| Doc                        | Covers                                                                                                                                                                                                   |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`ROADMAP.md`](ROADMAP.md) | Phased plan, what's landed, what's deferred, what's next. Start here for the bird's-eye view.                                                                                                            |
-| [`sync.md`](sync.md)       | Backpressure algorithm, the five sync queues, commit / PR / diff-stats / deepen / is-merge ticks, the `/api/activity` feed, live updates (SSE), tuning playbook. The workhorse doc.                      |
-| [`scoring.md`](scoring.md) | ShipShow Score: per-commit scoring, 30-day-half-life decay, consistency, badge cascade, Steady Eddie tiers, member persona categorization (active / dormant / ex-member), recompute hooks.               |
-| [`members.md`](members.md) | `/members` page surface — eligibility, sort / search / pagination, activity-status donut, Lorenz curve, sparkline column, SSE wiring, git-author email capture + admin backfill. Doubles as leaderboard. |
+| Doc                        | Covers                                                                                                                                                                                                    |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`ROADMAP.md`](ROADMAP.md) | Phased plan, what's landed, what's deferred, what's next. Start here for the bird's-eye view.                                                                                                             |
+| [`sync.md`](sync.md)       | Backpressure algorithm, the five sync queues, commit / PR / diff-stats / deepen / is-merge ticks, the `/api/activity` feed, live updates (SSE), tuning playbook. The workhorse doc.                       |
+| [`scoring.md`](scoring.md) | ShipShow Score: per-commit scoring, 30-day-half-life decay, consistency, badge cascade, Steady Eddie tiers, member persona categorization (active / dormant / ex-member), recompute hooks.                |
+| [`members.md`](members.md) | `/members` page surface — eligibility, sort / search / pagination, activity-status donut, Lorenz curve, sparkline column, SSE wiring, git-author email capture + admin backfill. Doubles as leaderboard.  |
+| [`people.md`](people.md)   | Phase 5 person layer (alias merge) — schema + `leaderboard_entries` view, person-aware rollup, the seven `/api/admin/people` endpoints with curl recipes, the `/people/:id` surface, deferred follow-ups. |
 
 ## Reference docs
 

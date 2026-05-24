@@ -350,6 +350,37 @@ The leaderboard itself does NOT use Redis — there's no leaderboard cache
 to bust. See [`docs/frontend-cache.md`](frontend-cache.md) for the
 companion Pinia/`CACHE_VERSION` story.
 
+### Person-aware rollup (Phase 5)
+
+Once alias merging landed, `recomputeUserScores` got a sibling pass and a
+shared orchestrator. `recomputeAllScores()` runs both, back-to-back under
+one `now`, and is what every trigger (sync-tick tail, admin endpoint, CLI
+script) calls:
+
+- **`recomputeUserScores`** — unchanged. One `user_score` row per
+  `users.id`. Still drives the per-user detail page.
+- **`recomputePersonScores`** — one `person_score` row per merged
+  `people.id`. Reuses the same pure `aggregateUserScores()` by remapping
+  the integer key from `author_user_id` to `users.person_id` (a JOIN
+  `commits → users WHERE person_id IS NOT NULL`, partial-index-backed),
+  then runs the identical formulas over the unioned commit set.
+
+Composition is exact because the per-commit score is summed within a key
+group: "all of Alice-corp + Alice-personal under key = person 42" yields
+the same totals Alice would post from one account. The distributional
+fields (`p95_churn_cap`, `consistency_90d`, the churn percentiles) are
+recomputed against the union rather than summed — the aggregator sees the
+combined bag as one. `days_since_first_commit` is the oldest commit
+across aliases; `is_dormant` is true iff the union is empty in the window.
+
+The person pass also **prunes** `person_score` rows whose person has no
+attached aliases anymore (the SELECT is filtered to `person_id IS NOT
+NULL`, so an emptied person produces no UPSERT and would otherwise leave
+a stale row). The `leaderboard_entries` view `UNION ALL`s per-person rows
+with per-(unattached-)user rows; the Members table reads from it. Full
+mechanics, schema, and the admin endpoints live in
+[`docs/people.md`](people.md).
+
 ## Things deliberately out of scope for v1
 
 - **Auto-adjusting thresholds** (percentile-based badge cutoffs). Static is
@@ -358,8 +389,11 @@ companion Pinia/`CACHE_VERSION` story.
   trick). Full nightly recompute is sub-second at 52k commits / 110 devs.
 - **Per-repo weighting** (vendor forks vs primary repos). All tracked repos
   count equally. Add a `repositories.scoring_weight` later if needed.
-- **Committer vs author attribution split.** We attribute to author. The
-  forthcoming aliasing system will unify a single person's multiple emails.
+- **Committer vs author attribution split.** We attribute to author.
+  Multi-account humans are unified by the Phase 5 person layer (see
+  [`docs/people.md`](people.md)), which collapses several `users` rows
+  into one canonical person for the leaderboard — distinct from the
+  committer/author distinction, which we still don't split.
 - **Webhook-driven recompute.** Sync-tick-driven is fine for the rollup.
 
 ## Decisions logged

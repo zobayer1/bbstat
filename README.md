@@ -239,6 +239,7 @@ The [`docs/`](docs/README.md) folder is the canonical home for narrative documen
 | [`docs/sync.md`](docs/sync.md)                     | Backpressure algorithm, the five sync queues, commit / PR / diff-stats / deepen / is-merge ticks, `/api/activity`, live updates, tuning playbook. |
 | [`docs/scoring.md`](docs/scoring.md)               | ShipShow Score — per-commit math, decay, consistency, badge cascade, Steady Eddie tiers, member persona categorization.                           |
 | [`docs/members.md`](docs/members.md)               | `/members` page surface — eligibility, sort / search / pagination, donut + Lorenz charts, SSE, email capture. Doubles as the leaderboard.         |
+| [`docs/people.md`](docs/people.md)                 | Phase 5 person layer (alias merge) — schema + leaderboard view, person-aware rollup, `/api/admin/people` endpoints + curl recipes, `/people/:id`. |
 | [`docs/admin.md`](docs/admin.md)                   | Every `/api/admin/*` endpoint — sync triggers, curated-set management, archive / rename / include, score recompute. With curl examples.           |
 | [`docs/frontend-cache.md`](docs/frontend-cache.md) | The `CACHE_VERSION` mechanism that wipes stale Pinia `localStorage` on shape changes; when to bump, side effects, multi-tab edge case.            |
 | [`etc/tls/README.md`](etc/tls/README.md)           | Local TLS cookbook — OpenSSL commands, Linux system-trust steps, Chrome NSS `certutil` flow, rotation playbook.                                   |

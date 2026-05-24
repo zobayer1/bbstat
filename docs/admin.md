@@ -11,6 +11,11 @@ present.
 Curl examples assume local TLS (`-k` to skip cert verification against
 the dev CA) and the default backend at `bbstat.localhost:8443`.
 
+> The Phase 5 person-layer endpoints (`/api/admin/people/*` — create /
+> attach / detach / primary / dissolve) are documented separately in
+> [`people.md`](people.md), which carries the full table + curl recipes
+> and the schema invariants they preserve.
+
 ## Sync triggers
 
 Manual analogues of the cron-driven sync jobs. Idempotent — re-running
