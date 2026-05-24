@@ -16,6 +16,7 @@ A dashboard-style web application for reviewing developer contributions across a
 | Server-side cache      | Redis 7 — _scoped to user-summary rollups only_                                                        |
 | Background sync        | node-cron + shared `runSync()` for manual / cron / webhook triggers (see [docs/sync.md](docs/sync.md)) |
 | Admin endpoints        | `/api/admin/*` for sync triggers + curated-repo management (see [docs/admin.md](docs/admin.md))        |
+| Leaderboard / scoring  | Per-developer ShipShow Score, badges, persona tiers — see [docs/scoring.md](docs/scoring.md)           |
 | Reverse proxy / TLS    | Traefik 3 in dev (`compose.override.yaml`), deployer's proxy in prod; self-signed CA for local dev     |
 | Container runtime      | Docker CE — full stack via `compose.yaml` + `compose.override.yaml` (multi-stage, distroless backend)  |
 | Tests / lint / format  | Vitest, ESLint flat config, Prettier                                                                   |
@@ -172,12 +173,7 @@ pnpm --filter @bbstat/frontend exec vitest run tests/StatCard.test.ts
 
 Both dev servers terminate HTTPS directly using the self-signed material under `etc/tls/`. Those files are **gitignored** — they are per-developer fixtures, not committed material.
 
-To generate them on a fresh checkout (one-time per developer), use the SAN config at `etc/tls/server.san` with OpenSSL to produce:
-
-- `ca.crt` / `ca.key` — local development CA
-- `server.crt` / `server.key` — server cert signed by the CA, scoped to `bbstat.localhost`, `localhost`, `127.0.0.1`
-
-Then **import `ca.crt` into your OS / browser trust store** so HTTPS to `bbstat.localhost` is trusted without warnings.
+On a fresh checkout (one-time per developer), generate the CA + server cert and trust the CA in your OS and browser. The full cookbook — OpenSSL commands using `etc/tls/server.san`, Linux trust-store steps for Fedora / Debian / Arch, the Chrome-on-Linux NSS `certutil` flow, and the rotation playbook — lives in [`etc/tls/README.md`](etc/tls/README.md).
 
 ## Development standards
 
@@ -233,9 +229,33 @@ Strict mode is on across the monorepo (`tsconfig.base.json`):
 
 See `CLAUDE.md` for the full rationale on each.
 
+## Documentation
+
+The [`docs/`](docs/README.md) folder is the canonical home for narrative documentation. Start at [`docs/README.md`](docs/README.md) for the full index; the table below is the quick-jump.
+
+| Doc                                                | Covers                                                                                                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md)               | Phased plan — what's landed, what's deferred, what's next.                                                                                        |
+| [`docs/sync.md`](docs/sync.md)                     | Backpressure algorithm, the five sync queues, commit / PR / diff-stats / deepen / is-merge ticks, `/api/activity`, live updates, tuning playbook. |
+| [`docs/scoring.md`](docs/scoring.md)               | ShipShow Score — per-commit math, decay, consistency, badge cascade, Steady Eddie tiers, member persona categorization.                           |
+| [`docs/members.md`](docs/members.md)               | `/members` page surface — eligibility, sort / search / pagination, donut + Lorenz charts, SSE, email capture. Doubles as the leaderboard.         |
+| [`docs/admin.md`](docs/admin.md)                   | Every `/api/admin/*` endpoint — sync triggers, curated-set management, archive / rename / include, score recompute. With curl examples.           |
+| [`docs/frontend-cache.md`](docs/frontend-cache.md) | The `CACHE_VERSION` mechanism that wipes stale Pinia `localStorage` on shape changes; when to bump, side effects, multi-tab edge case.            |
+| [`etc/tls/README.md`](etc/tls/README.md)           | Local TLS cookbook — OpenSSL commands, Linux system-trust steps, Chrome NSS `certutil` flow, rotation playbook.                                   |
+| [`CLAUDE.md`](CLAUDE.md)                           | Architecture rules — Postgres / Redis / Pinia layering, auth posture, persisted-store-shape bump checklist, container-stack mechanics.            |
+
+## Releases
+
+Full notes in [`CHANGELOG.md`](CHANGELOG.md). Untagged work-in-progress lives on `main` between releases.
+
+| Version | Date       | Headline                                                                                                                                        |
+| ------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.1.0   | 2026-05-24 | ShipShow Score leaderboard, member persona tiers (active / dormant / ex-member), BB token-expiry surface, merge-exclusion rollup fix            |
+| 1.0.0   | 2026-05-21 | First tagged release — BitBucket ingest pipeline, rollups + dashboard, Projects / Repositories / Members / Activity pages, containerized deploy |
+
 ## Agents
 
-This repo is developed with [Claude Code](https://claude.com/claude-code) and GitHub Copilot. AI-authored changes follow the same standards as human-authored ones — same lint, same tests, same review.
+This repo is developed with [Claude Code](https://claude.com/claude-code). AI-authored changes follow the same standards as human-authored ones — same lint, same tests, same review.
 
 ## License
 

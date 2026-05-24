@@ -1,12 +1,24 @@
 # ShipShow Score — developer ranking metrics
 
-Design + implementation plan for the per-developer "ShipShow Score" leaderboard.
-Captures the decisions reached in the 2026-05-21 design discussion so the
-implementation phases can proceed without re-litigating them.
+Operator + reader reference for the per-developer "ShipShow Score" leaderboard
+(Phase 4.5 in the [ROADMAP](ROADMAP.md)). Captures the algorithm, the schema
+delta, and the operational hooks so the engine is debuggable without spelunking
+through commits. Calibration history (the 2026-05-21 design discussion that
+fixed the floor, half-life, and badge thresholds against the live corpus) is
+preserved inline so a future tuning pass starts from the same baseline.
 
-Architectural fit: Postgres = truth, Redis caches the sorted leaderboard read,
-Pinia mirrors it for the browser. All scoring is precomputed in a rollup;
-nothing is computed on the request path (per `CLAUDE.md`).
+**Status:** Landed across `f6c0b8c`..`be739f9` (12 commits — see ROADMAP Phase
+4.5 for the bundle summary). Engine source: `apps/backend/src/scoring/`.
+Schema: `bbstat.user_score` (+ `user_badge` / `user_badge_tier` enums, +
+`commit_daily.merge_commit_count`). UI surface: the Members page is the
+leaderboard — `scoreTrending` is the default sort and the Momentum / per-window
+volume / Badge columns sit on the right side of the vertical separator.
+
+Architectural fit: Postgres = truth (the `user_score` rollup), Pinia mirrors
+it for the browser. No Redis layer for leaderboard reads — the live corpus
+fits in cache so the rollup is read directly from Postgres; the earlier
+leaderboard-cache code was removed in `be739f9`. All scoring is precomputed
+in the rollup; nothing is computed on the request path (per `CLAUDE.md`).
 
 ## What we are ranking and why
 
@@ -286,25 +298,57 @@ Indexes:
 
 Skip the rest; 110 rows fits in cache, full-scan is free.
 
-## Phase plan
+## Operating the rollup
 
-Each phase is its own commit (migrations especially — separate commit per
-the standing convention).
+The `user_score` table is rebuilt by `recomputeUserScores()` (`apps/backend/src/scoring/rollup.ts`).
+Two ways it runs:
 
-| Phase | Scope                                                                                                                     |
-| ----- | ------------------------------------------------------------------------------------------------------------------------- |
-| **1** | Schema: `commit_daily.merge_commit_count` + `user_score` table. Drizzle migration + Flyway mirror.                        |
-| **2** | Pure-function scoring engine in `apps/backend/src/scoring/`: `commit-score`, `decay`, `consistency`, `badge`. Unit tests. |
-| **3** | Rollup runner `recomputeUserScores()`. Wire into `runSync`. Admin endpoint for manual triggers. Redis invalidation.       |
-| **4** | Read API: `GET /api/stats/leaderboard?sort=…`, `GET /api/stats/leaderboard/:userId/breakdown`. Redis cached.              |
-| **5** | Frontend: Pinia store (bump `CACHE_VERSION`), Leaderboard page, UserBadge component, MethodologyModal.                    |
-| **6** | Rollout: migrate → backfill `merge_commit_count` → first manual recompute → smoke through `make up`.                      |
+- **Automatic** — tail of every successful `runCommitsSync` tick. The hook
+  fires after the inline rollup recompute + cache invalidation, so the
+  leaderboard reflects the freshest commit ingest in the same cron cycle.
+  Failure is failure-isolated: a rollup error logs warn and never poisons
+  the commit-sync result.
+- **Manual** — `POST /api/admin/scores/recompute` (open by design, see
+  [`docs/admin.md`](admin.md)) or `make recompute-user-scores`. Use after
+  threshold tuning, after a `commit_daily` rebuild via
+  `make rebuild-rollups`, or as the post-deploy smoke step.
 
-### Phase 6 post-deploy
+The recompute reads two SELECTs (per-user totals + the eligible-commit
+pull), runs `aggregateUserScores()` (pure function — fully unit-tested),
+and UPSERTs into `user_score`. Sub-second at the live corpus
+(~110 devs, ~52k eligible commits, ~4 MB pull). Streaming / incremental
+decay was considered and rejected — full recompute is cheaper than the
+bookkeeping, and re-runnable from cold without a rebuild script.
 
-`docker compose exec redis redis-cli FLUSHDB` after the deploy — we are
-adding `bbstat:leaderboard:*` keys and the existing per-deploy bust
-convention covers them.
+### Member persona surface
+
+Beyond the badge cascade, the scoring rollup feeds three persona tiers
+visible on the Members page:
+
+- **Active workspace members** — `users.is_workspace_member = true` AND
+  `user_score.is_dormant = false`. Rendered normally; the leaderboard
+  default sort is "shipping right now."
+- **Dormant workspace members** — `users.is_workspace_member = true` AND
+  `user_score.is_dormant = true` (`active_days_90d = 0`). Row grayed
+  out via the `is_dormant` flag; no badge.
+- **Ex-members / external contributors** — `users.is_workspace_member = false`.
+  Auto-created during commit ingest when BB attributed a commit to a UUID
+  we hadn't seen in `/workspaces/{ws}/members`. Email line is tinted red
+  on the Members row to visually distinguish them from the workspace
+  team. Flag flips back to `true` the moment they reappear in member
+  sync — rejoiners self-heal in one tick.
+
+The three flags are orthogonal in the schema (membership in `users`,
+dormancy in `user_score`), so the UI compositing rules live in
+`apps/frontend/src/views/Members.vue`.
+
+### Post-deploy reminder
+
+`docker compose exec redis redis-cli FLUSHDB` after the deploy only if
+the change touches a `bbstat:*` Redis-cached shape (today: `UserSummary`).
+The leaderboard itself does NOT use Redis — there's no leaderboard cache
+to bust. See [`docs/frontend-cache.md`](frontend-cache.md) for the
+companion Pinia/`CACHE_VERSION` story.
 
 ## Things deliberately out of scope for v1
 
@@ -318,15 +362,31 @@ convention covers them.
   forthcoming aliasing system will unify a single person's multiple emails.
 - **Webhook-driven recompute.** Sync-tick-driven is fine for the rollup.
 
-## Open implementation details
+## Decisions logged
 
-Decisions deferred to the relevant phase:
+The open questions from the design phase resolved as follows:
 
-1. Methodology modal rendering — plain text + monospace, or KaTeX for the
-   formulas? Lean: plain text, no math-rendering dep.
-2. Badge display label — keep the playful names (`Batch Betty`) or use
-   neutral labels (`Batch Worker`)?
-3. Leaderboard nav placement — top-level or under an existing page?
-4. Rollup cadence — every sync tick (cheap) or once a day?
-5. Coverage-warning threshold — at what `coverage_pct` does the UI flag
-   "diff stats pending" on a user's row? Lean: < 0.90.
+1. **Methodology modal rendering** — KaTeX. The split-log formula and the
+   gap-CV expression read poorly in monospace; the audience includes
+   non-engineers; KaTeX is a 30 kB CSS + tiny JS surface. Lives in
+   `apps/frontend/src/components/MethodologyModal.vue`.
+2. **Badge display labels** — kept playful (`Batch Betty`, `Steady Eddie`).
+   Tone matches the "ShipShow" brand. Reachable as the `<BadgeIcon>` column
+   on the Members leaderboard.
+3. **Leaderboard nav placement** — folded into the Members page rather
+   than a standalone `/leaderboard` route. The Members page already had
+   the searchable / sortable / sparkline table; adding the Momentum +
+   per-window volume + Badge columns turned it into the leaderboard
+   without a second surface to navigate to. Default sort = `scoreTrending`
+   desc.
+4. **Rollup cadence** — every commits-sync tick. Cheap enough at current
+   scale (~ms), and the alternative (nightly cron) would lag the
+   freshness story behind the rest of the dashboard. Hooked into
+   `runCommitsSync` so a single cron firing recomputes scores along with
+   the per-repo `commit_daily` recompute.
+5. **Coverage-warning threshold** — not implemented yet. Diff-stats
+   backfill drains so quickly under the current load that pending
+   coverage hasn't shown up as a noticeable UI problem. Revisit if a
+   freshly-tracked large repo lands and the leaderboard reads obviously
+   wrong while diff-stats catches up. The field (`coverage_pct`) is in
+   the schema for when it does.

@@ -1,0 +1,19 @@
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = bbstat.localhost
+
+[v3_req]
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+basicConstraints = CA:FALSE
+
+[alt_names]
+DNS.1 = bbstat.localhost
+DNS.2 = localhost
+DNS.3 = traefik.localhost
+IP.1 = 127.0.0.1

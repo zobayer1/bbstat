@@ -11,6 +11,13 @@ for, with org-wide aggregates at the top and a searchable / sortable
 table below. Reachable from the dashboard's "Workspace Members" stat
 card (the third card on the top row) — `apps/frontend/src/views/Dashboard.vue:163`.
 
+The page also doubles as the **ShipShow Score leaderboard** — the default
+sort is `scoreTrending` (Momentum), with per-window volume columns and
+the persona-badge column to its right. The ranking algorithm, badge
+cascade, and persona / dormant / ex-member categorization rules all live
+in [`docs/scoring.md`](scoring.md); this doc focuses on the page surface
+and how the underlying data is fetched.
+
 ## Data flow
 
 ```

@@ -23,7 +23,7 @@ Techniques applied across every phase, not a phase on their own:
 5. **API call budget per cron tick** — bounded work per run, surplus deferred. Tracked via response rate-limit headers.
 6. **Conditional requests** (ETag / `If-None-Match`) wherever Bitbucket supports them — turns "no change" into a free 304.
 7. **Curated tracked set** — only repos in `repositories` table are ingested. Largest API saving in this project.
-8. **Webhook over poll** for hot repos once Phase 5 lands — replaces dozens of polling calls/hour with zero-cost push events.
+8. **Webhook over poll** for hot repos once Phase 7 lands — replaces dozens of polling calls/hour with zero-cost push events. Currently deferred behind authentication / public-URL work (see Phase 7).
 
 ## Phases
 
@@ -157,15 +157,50 @@ Two new top-level index pages, the supporting backend rollup, and a public-facin
 - **Cache**: `CACHE_VERSION` bumped 2 → 5 — `ProjectStats.topContributors` shape change, `RepoActivity.repository.project` addition, and `TrackedRepositorySummary` adds/dels. Operators should pair this deploy with `docker compose exec redis redis-cli FLUSHDB` per the Redis-bust rule (the `UserSummary` shape itself is unchanged, but the rule's "any `bbstat:*` shape change" coverage applies because the sync also touches `commit_daily`-driven aggregates).
 - **Docs**: [`docs/sync.md`](sync.md) gains the `/api/stats/repo-contributors` row in the endpoint table.
 
-### Phase 5 — Webhook trigger + admin UI (~3–4 days, stretch)
+### Phase 4.5 — ShipShow Score + leaderboard ✅ Landed
 
-Kill polling for hot repos; give operators visibility and self-service.
+Per-developer ranking metrics layered onto the existing rollups — no new BitBucket ingest, pure local compute over `commits`.
 
-- Add `write:webhook:bitbucket` to the API token.
-- One-time bootstrap: register webhook per tracked repo. Receiver verifies signature and dispatches `runSync(trigger='webhook', repositorySlug=…)`.
-- Cron cadence drops from 15 min → 1h (safety net for missed webhooks). Big API savings.
-- Admin UI: per-repo sync state, manual re-sync button, recent sync runs + errors, **add-repo picker** that browses the broader workspace (uses workspace-wide repo enumeration as a one-shot list call, not persisted).
-- **Requires a public URL** — needs ngrok during dev or wait for a staging deploy. Decide at the start of the phase.
+- **Scoring engine** (`apps/backend/src/scoring/`): split-log per-commit score with p95-capped churn floor; 30-day-half-life decayed `score_trending`; un-decayed `volume_7d / 30d / 90d / 365d / all`; 90-day `consistency` from active-day gap CV; six personality badges (`fresh_meat`, `deep_diver`, `ai_alex`, `cleanup_crew`, `batch_betty`, `steady_eddie` catch-all) with momentum-ranked Steady Eddie tiers (`bronze` / `silver` / `gold`). Pure functions, deterministic, fully unit-tested.
+- **`user_score` rollup table** + `user_badge` / `user_badge_tier` enums. Recomputed at the tail of every commit-sync tick; manual rebuild via `POST /api/admin/scores/recompute` (or `make recompute-user-scores`).
+- **Members page as leaderboard** — `scoreTrending` is the default sort; Momentum / 7d / 30d / 90d / 365d / all-time volume columns plus a `BadgeIcon` column with tier-tinted circular backgrounds for Steady Eddie. Search / sort / paginate all client-side over the cached payload.
+- **Methodology modal** — KaTeX-rendered formulas (split-log scoring, decay, consistency, badge cascade) reachable from the Members page header for non-engineer audiences.
+- **Member persona categorization** — three tiers surfaced in the UI: **active workspace members** (`is_workspace_member = true`, `is_dormant = false`), **dormant workspace members** (`is_workspace_member = true`, `active_days_90d = 0` — row grayed via `is_dormant`), **ex-members / external contributors** (`is_workspace_member = false` — red-tinted email line, auto-created during commit ingest when BB attributed a commit to a UUID we'd never seen in `/workspaces/{ws}/members`). The flag flips back to `true` the moment they reappear in member sync, so rejoiners self-heal.
+- **Merge-exclusion fix** — `commit_daily.commit_count / additions / deletions` now exclude `is_merge = true` rows; a new `merge_commit_count` column carries the merge tally separately so repo-level "all commits" reads stay correct without double-counting authorship.
+
+**Status:** Landed across `f6c0b8c`..`be739f9` (12 commits). See [`docs/scoring.md`](scoring.md) for the algorithm, schema, badge cascade, and operator notes.
+
+### Phase 5 — User alias merge (planning TBD)
+
+One human, many `bitbucket_uuid`s. Today a contributor who pushes from a personal account and a corp account shows up as two `users` rows with disjoint commit histories; aggregates split and leaderboards under-count them. This phase reconciles those identities.
+
+- Design open: operator-curated alias table vs. auto-detect-by-email, how to recompute rollups after a merge, whether to keep history on the alias path or rewrite `author_user_id` in place.
+- No schema yet — `aliases` table shape and migration plan are part of the planning step.
+- Blocks Phase 4.5's scoring accuracy at the long tail (anyone with multi-account history is currently under-scored).
+
+### Phase 6 — Org-email auth + BitBucket account linking (planning TBD)
+
+Bridge org identity (Workspace SSO / Google / Microsoft) to BitBucket identity so a logged-in user is bound to one or more `users` rows from Phase 5.
+
+- Design open: which OIDC provider, what the linking flow looks like, where the binding lives (`user_org_identities` table seems likely), how to handle users who log in but have no matching BB commits yet.
+- Depends on Phase 5 to define the canonical-user concept the org-side binding points at.
+- Still **no per-request auth gate** at this phase — adds the identity plumbing without flipping the dashboard from open to gated. The gate flip happens in Phase 7.
+
+### Phase 7 — Authentication + webhook trigger + admin UI
+
+Flip the dashboard from open to gated, take advantage of the public URL that auth requires to also stand up webhooks, and ship the first operator surface.
+
+- Per-request auth gate enforced via the Phase 6 identity plumbing. Admin endpoints get a real role check (today they're open-by-design — see `CLAUDE.md`).
+- **Webhook trigger** (originally Phase 5): add `write:webhook:bitbucket` scope, one-time bootstrap to register webhooks per tracked repo, signature-verifying receiver that dispatches `runSync(trigger='webhook', repositorySlug=…)`. Cron cadence drops from 5 min → 1 h once webhooks are live; the polling tick stays as a safety net for missed events.
+- Admin UI: per-repo sync state, manual re-sync button, recent sync runs + errors, **add-repo picker** that browses the broader workspace (workspace-wide repo enumeration as a one-shot list call, not persisted).
+- **Requires a public URL** — the same dependency that drives webhook readiness drives the OIDC redirect. Today the deploy lives on `bbstat.onudaan.com`, only reachable from the local network, which is why webhooks are still parked. Decide between ngrok-for-dev vs. a staging deploy at the start of the phase.
+
+### Phase 8 — Admin dashboard (planning TBD)
+
+Operator console for the now-authenticated surface from Phase 7. Stretch / nice-to-have.
+
+- Design open: in-app `/admin` route vs. separate app, which Phase-7 admin endpoints get UI surfaces vs. stay curl-only, whether the audit log is a new table or just structured logs.
+- Likely surfaces: alias merge UI (Phase 5), org-identity link inspector (Phase 6), webhook health / re-bootstrap (Phase 7), per-repo backfill controls, scoring threshold tuning preview.
 
 ## Curated list growth
 
@@ -173,14 +208,13 @@ The "start small, expand gradually" approach has a clear path:
 
 1. Seed via `tracked-repos.yaml` at first install (Phase 0–1); hot-reloaded on every discovery sync.
 2. Admin endpoint to add repos (Phase 1) — usable via `curl` immediately.
-3. Admin UI with workspace browser to pick repos (Phase 5).
-4. Removal: keep historical commits but stop syncing — soft-delete via `repositories.tracked = false` if/when needed; not in initial scope.
+3. Admin UI with workspace browser to pick repos (Phase 8).
+4. Removal: today, archive via `POST /api/admin/repositories/:ws/:slug/archive` (Phase 4 follow-up — keeps history, stops sync). Hard delete via `DELETE /api/admin/repositories/:ws/:slug` for the "this repo was a mistake" case.
 
 ## Open future considerations (not scheduled)
 
-- **Login with BitBucket / OAuth** — explicitly deferred. Schema and APIs leave a seam for `userId` / actor identity but no flow is built.
 - **Multi-workspace support** — currently scoped to one workspace via `BITBUCKET_WORKSPACE`. If we add a second, schema needs `workspace_id` propagated.
 - **Service-account credential** — the current API token is personal. For long-running production deploy, switch to a workspace-owned token or service account.
-- **Production deploy / Traefik** — `etc/tls/` and `docker-compose.yml` are dev-only. Production would terminate TLS at Traefik, run sync as a separate service, etc.
 - **Deprecated transitive deps** — `pnpm install` warns about a handful of deprecated subdeps (currently `@esbuild-kit/core-utils`, `@esbuild-kit/esm-loader`, an older `glob` reachable via `tsx`'s dependency chain). Our own code is clean and our `pnpm.overrides` already pin `glob` to v11; the residue is upstream-owned. Worth a revisit once `tsx` / its deps ship modern replacements — at that point bump or swap and drop overrides.
-- **Move "rebuild rollups" to an authenticated admin endpoint** — currently shipped as `make rebuild-rollups` because there's no auth yet. Once OAuth lands, lift `RollupStore.rebuildAll()` into `POST /api/admin/dashboard/rebuild-rollups` (the SQL stays untouched; route is ~5 lines).
+- **Move `make rebuild-rollups` and `make recompute-user-scores` to authenticated admin endpoints** — currently shipped as scripts because there's no auth yet. Once Phase 7 lands, lift `RollupStore.rebuildAll()` into `POST /api/admin/dashboard/rebuild-rollups` alongside the existing `POST /api/admin/scores/recompute` (the SQL stays untouched; route is ~5 lines).
+- **Auto-adjusting badge thresholds** — Phase 4.5 badges use static cutoffs calibrated against the live corpus on 2026-05-21. Percentile-based thresholds become attractive once the org doubles or the static cuts misclassify obvious cases. Spec lives in [`docs/scoring.md`](scoring.md) "Things deliberately out of scope".

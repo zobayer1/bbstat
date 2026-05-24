@@ -55,7 +55,9 @@ Thumbs.db
 
 # --- Local TLS material ---
 # Per-developer self-signed CA + server cert. See CLAUDE.md / etc/tls/README.
-etc/tls/
+etc/tls/*
+!etc/tls/server.san
+!etc/tls/README.md
 
 # --- Curated tracked-repo seed list (per-developer; example is committed) ---
 tracked-repos.yaml
@@ -68,4 +70,7 @@ reports/
 
 # --- Database dumps (per-developer; never committed) ---
 bbstat-data-*.sql
+*.tar.gz
+*.tar
 *.dump
+dump/
