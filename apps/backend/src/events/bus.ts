@@ -27,7 +27,13 @@ export type LiveEvent =
   | { event: 'repository.sync-excluded'; payload: RepositoryExcludedPayload }
   | { event: 'repository.included'; payload: RepositoryIncludedPayload }
   | { event: 'repository.deleted'; payload: RepositoryDeletedPayload }
-  | { event: 'bitbucket.auth-state'; payload: BitbucketAuthStatePayload };
+  | { event: 'bitbucket.auth-state'; payload: BitbucketAuthStatePayload }
+  | { event: 'person.created'; payload: PersonCreatedPayload }
+  | { event: 'person.updated'; payload: PersonUpdatedPayload }
+  | { event: 'person.attached'; payload: PersonAttachedPayload }
+  | { event: 'person.detached'; payload: PersonDetachedPayload }
+  | { event: 'person.primary-changed'; payload: PersonPrimaryChangedPayload }
+  | { event: 'person.dissolved'; payload: PersonDissolvedPayload };
 
 // Slim summary published at the end of `runCommitsSync`. Frontend
 // consumers use this to invalidate cached aggregates ("re-fetch
@@ -93,6 +99,71 @@ export interface RepositoryDeletedPayload {
 // Only edges land here; steady-state stable streams emit nothing.
 export interface BitbucketAuthStatePayload {
   state: 'ok' | 'unauthorized';
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 — person layer (alias merge)
+// ---------------------------------------------------------------------------
+//
+// Slim event payloads — the frontend uses these as "re-fetch yourself"
+// signals on the Members / leaderboard surface, so the wire shape stays
+// the entity-level identifiers needed to address a cache key and nothing
+// more. Larger detail (display name updates, full attached-user
+// rosters) is pulled via the dashboard endpoints after the event fires.
+
+// Person row created via POST /api/admin/people. `primaryUserId` is set
+// only when the creation also did a first-attach (the operator passed
+// `primaryUserId` in the request body).
+export interface PersonCreatedPayload {
+  personId: number;
+  primaryUserId: number | null;
+}
+
+// Display-name change on an existing person via PATCH /api/admin/people/:id.
+// Does NOT fire for primary-alias swaps (those have their own event) or
+// attach/detach (ditto). Pure metadata edit.
+export interface PersonUpdatedPayload {
+  personId: number;
+}
+
+// Attach event — one user joined the person. `becamePrimary` is true
+// iff this attach also set the new alias as primary (either because the
+// caller passed `makePrimary: true` or because the person had no primary
+// yet and the attach auto-elected this alias).
+export interface PersonAttachedPayload {
+  personId: number;
+  userId: number;
+  becamePrimary: boolean;
+}
+
+// Detach event — one user left the person. `wasPrimary` is true iff
+// the detached alias was the primary; consumers may want to highlight
+// that the person now has no primary alias (until the operator picks
+// one or auto-election kicks in via a later attach).
+export interface PersonDetachedPayload {
+  personId: number;
+  userId: number;
+  wasPrimary: boolean;
+}
+
+// Primary swap via POST /api/admin/people/:id/primary. Carries both
+// previous and new primary ids so the frontend can patch its cached
+// roster in place without re-fetching.
+export interface PersonPrimaryChangedPayload {
+  personId: number;
+  // Null when the person had no primary set before the swap (e.g.,
+  // detach cleared it, then the operator picks one).
+  previousPrimaryUserId: number | null;
+  newPrimaryUserId: number;
+}
+
+// Person row deleted via DELETE /api/admin/people/:id. `detachedUserIds`
+// lists every alias whose `person_id` was cleared as part of the
+// dissolve — used by the frontend to refresh those users' rows back to
+// `kind: 'user'` on the leaderboard.
+export interface PersonDissolvedPayload {
+  personId: number;
+  detachedUserIds: number[];
 }
 
 export type Subscriber = (event: LiveEvent) => void;

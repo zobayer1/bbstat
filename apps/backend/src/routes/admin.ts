@@ -20,6 +20,12 @@ import { deepenOneRepo } from '../sync/deepen-backfill.js';
 import { addTrackedRepository } from '../sync/discovery.js';
 import { syncRepositoryPullRequests } from '../sync/pull-requests.js';
 import { runCommitsSync, runDiscoverySync, runPullRequestsSync } from './../sync/runner.js';
+import {
+  PersonNotFoundError,
+  UserAlreadyAttachedError,
+  UserNotAttachedToPersonError,
+  UserNotFoundError,
+} from '../people/errors.js';
 import type { RepositoryHandle } from '../sync/commits.js';
 import type { PrSyncOptions } from '../sync/pull-requests.js';
 import type { SyncRunnerDeps } from '../sync/runner.js';
@@ -789,5 +795,273 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       affectedRepos: rangeByRepo.size,
       hasMore,
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 5 — person layer (alias merge) admin endpoints
+  // ---------------------------------------------------------------------------
+  //
+  // Operator-curated CRUD for merging multiple BitBucket user rows into a
+  // single canonical person. Discovery happens out-of-band (operator uses
+  // the existing /members name search to find dupes); these endpoints are
+  // the actuators that wire the merge into the DB.
+  //
+  // Every mutation goes through PeopleStore (transactional, schema-
+  // invariant-preserving) and is followed by:
+  //   (a) a person_score recompute via opts.syncDeps.recomputeAllScores
+  //       so the leaderboard reflects the merge immediately;
+  //   (b) Redis user-summary cache invalidation for every affected alias
+  //       so per-user pages stay coherent with the new person attribution;
+  //   (c) an SSE event on opts.syncDeps.bus so open browser tabs refresh.
+  //
+  // setPrimary is a UI-only flag swap — no commit attribution changes —
+  // so it skips (a). All paths emit (c).
+  //
+  // When `opts.syncDeps.peopleStore` is undefined (test scaffolding that
+  // doesn't wire the store), every people endpoint 503s with
+  // `people_store_not_wired`. Production entrypoints always wire it.
+
+  const createPersonBody = z.object({
+    displayName: z.string().min(1).nullable().optional(),
+    primaryUserId: z.number().int().positive().optional(),
+  });
+  const updatePersonBody = z.object({
+    displayName: z.string().min(1).nullable(),
+  });
+  const attachBody = z.object({
+    userId: z.number().int().positive(),
+    makePrimary: z.boolean().optional(),
+  });
+  const detachBody = z.object({
+    userId: z.number().int().positive(),
+  });
+  const setPrimaryBody = z.object({
+    userId: z.number().int().positive(),
+  });
+
+  // Refresh path after mutations that change commit attribution. Runs
+  // both scoring passes (cheap — under 200ms on the live corpus) and
+  // DELs the per-user summary Redis keys for every affected alias.
+  // Errors are surfaced to the caller — the mutation already
+  // committed, so a recompute failure is informational; the next sync
+  // tick will redo it.
+  async function refreshAfterPersonMutation(affectedUserIds: ReadonlyArray<number>): Promise<void> {
+    if (opts.syncDeps.recomputeAllScores !== undefined) {
+      await opts.syncDeps.recomputeAllScores();
+    }
+    if (opts.syncDeps.userSummaryCache !== undefined) {
+      await Promise.all(affectedUserIds.map((id) => opts.syncDeps.userSummaryCache!.invalidate(id)));
+    }
+  }
+
+  app.post('/people', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const body = createPersonBody.parse(request.body);
+    try {
+      const person = await opts.syncDeps.peopleStore.create({
+        displayName: body.displayName ?? null,
+        primaryUserId: body.primaryUserId ?? null,
+      });
+      if (body.primaryUserId !== undefined) {
+        await refreshAfterPersonMutation([body.primaryUserId]);
+      }
+      opts.syncDeps.bus?.publish({
+        event: 'person.created',
+        payload: { personId: person.id, primaryUserId: body.primaryUserId ?? null },
+      });
+      if (body.primaryUserId !== undefined) {
+        opts.syncDeps.bus?.publish({
+          event: 'person.attached',
+          payload: { personId: person.id, userId: body.primaryUserId, becamePrimary: true },
+        });
+      }
+      return reply.code(201).send(person);
+    } catch (err) {
+      if (err instanceof UserNotFoundError) {
+        return reply.code(404).send({ error: 'user_not_found', userId: err.userId });
+      }
+      if (err instanceof UserAlreadyAttachedError) {
+        return reply
+          .code(409)
+          .send({ error: 'user_already_attached', userId: err.userId, currentPersonId: err.currentPersonId });
+      }
+      throw err;
+    }
+  });
+
+  app.get('/people', async (_request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    return await opts.syncDeps.peopleStore.list();
+  });
+
+  app.get<{ Params: { id: string } }>('/people/:id', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    const person = await opts.syncDeps.peopleStore.get(id);
+    if (person === null) {
+      return reply.code(404).send({ error: 'person_not_found', personId: id });
+    }
+    return person;
+  });
+
+  app.patch<{ Params: { id: string } }>('/people/:id', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    const body = updatePersonBody.parse(request.body);
+    try {
+      const person = await opts.syncDeps.peopleStore.updateDisplayName(id, body.displayName);
+      opts.syncDeps.bus?.publish({ event: 'person.updated', payload: { personId: id } });
+      return person;
+    } catch (err) {
+      if (err instanceof PersonNotFoundError) {
+        return reply.code(404).send({ error: 'person_not_found', personId: id });
+      }
+      throw err;
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/people/:id/attach', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    const body = attachBody.parse(request.body);
+    try {
+      const result = await opts.syncDeps.peopleStore.attach(id, body.userId, {
+        ...(body.makePrimary !== undefined ? { makePrimary: body.makePrimary } : {}),
+      });
+      await refreshAfterPersonMutation([body.userId]);
+      opts.syncDeps.bus?.publish({
+        event: 'person.attached',
+        payload: { personId: id, userId: body.userId, becamePrimary: result.becamePrimary },
+      });
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof PersonNotFoundError) {
+        return reply.code(404).send({ error: 'person_not_found', personId: id });
+      }
+      if (err instanceof UserNotFoundError) {
+        return reply.code(404).send({ error: 'user_not_found', userId: err.userId });
+      }
+      if (err instanceof UserAlreadyAttachedError) {
+        return reply
+          .code(409)
+          .send({ error: 'user_already_attached', userId: err.userId, currentPersonId: err.currentPersonId });
+      }
+      throw err;
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/people/:id/detach', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    const body = detachBody.parse(request.body);
+    try {
+      const result = await opts.syncDeps.peopleStore.detach(id, body.userId);
+      await refreshAfterPersonMutation([body.userId]);
+      opts.syncDeps.bus?.publish({
+        event: 'person.detached',
+        payload: { personId: id, userId: body.userId, wasPrimary: result.wasPrimary },
+      });
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof UserNotFoundError) {
+        return reply.code(404).send({ error: 'user_not_found', userId: err.userId });
+      }
+      if (err instanceof UserNotAttachedToPersonError) {
+        return reply.code(400).send({
+          error: 'user_not_attached_to_person',
+          userId: err.userId,
+          expectedPersonId: err.personId,
+          actualPersonId: err.actualPersonId,
+        });
+      }
+      throw err;
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/people/:id/primary', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    const body = setPrimaryBody.parse(request.body);
+    try {
+      const result = await opts.syncDeps.peopleStore.setPrimary(id, body.userId);
+      // setPrimary doesn't change commit attribution — skip the
+      // recompute + user-summary cache bust. Still emit SSE so any
+      // open browser sees the new primary on the next read.
+      opts.syncDeps.bus?.publish({
+        event: 'person.primary-changed',
+        payload: {
+          personId: id,
+          previousPrimaryUserId: result.previousPrimaryUserId,
+          newPrimaryUserId: body.userId,
+        },
+      });
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof UserNotFoundError) {
+        return reply.code(404).send({ error: 'user_not_found', userId: err.userId });
+      }
+      if (err instanceof UserNotAttachedToPersonError) {
+        return reply.code(400).send({
+          error: 'user_not_attached_to_person',
+          userId: err.userId,
+          expectedPersonId: err.personId,
+          actualPersonId: err.actualPersonId,
+        });
+      }
+      throw err;
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>('/people/:id', async (request, reply) => {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_person_id' });
+    }
+    try {
+      const result = await opts.syncDeps.peopleStore.dissolve(id);
+      await refreshAfterPersonMutation(result.detachedUserIds);
+      opts.syncDeps.bus?.publish({
+        event: 'person.dissolved',
+        payload: { personId: id, detachedUserIds: result.detachedUserIds },
+      });
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof PersonNotFoundError) {
+        return reply.code(404).send({ error: 'person_not_found', personId: id });
+      }
+      throw err;
+    }
   });
 };

@@ -41,6 +41,7 @@ import type { PrTickOptions } from './pr-tick.js';
 import type { RepoPrSyncResult } from './pull-requests.js';
 import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
+import type { PeopleStore } from '../people/store.js';
 import type { AllScoresRollupResult } from '../scoring/rollup.js';
 
 export type SyncTrigger = 'manual' | 'cron' | 'webhook';
@@ -107,6 +108,13 @@ export interface SyncRunnerDeps {
   // tick will recompute the same set. Omit in tests that don't care
   // about scoring.
   recomputeAllScores?: () => Promise<AllScoresRollupResult>;
+  // Phase 5 alias-merge layer (docs/ROADMAP.md). When wired, the
+  // /api/admin/people/* endpoints are reachable; otherwise they 503
+  // with `people_store_not_wired`. The sync runner itself does NOT
+  // call into the people store — it carries the field purely so admin
+  // routes can reach it via opts.syncDeps. Omit in tests that don't
+  // exercise the people endpoints.
+  peopleStore?: PeopleStore;
 }
 
 interface BaseResult {

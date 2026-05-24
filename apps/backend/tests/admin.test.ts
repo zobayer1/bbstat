@@ -14,6 +14,13 @@ import type {
 import type { SyncRunnerDeps } from '../src/sync/runner.js';
 import type { DayRange, RollupStore } from '../src/dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../src/dashboard/user-summary-cache.js';
+import { createEventBus, type LiveEvent } from '../src/events/bus.js';
+import {
+  PersonNotFoundError,
+  UserAlreadyAttachedError,
+  UserNotAttachedToPersonError,
+  UserNotFoundError,
+} from '../src/people/errors.js';
 
 const testConfig: AppConfig = {
   NODE_ENV: 'test',
@@ -2348,6 +2355,420 @@ describe('admin routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ updated: 0 });
+    });
+  });
+
+  describe('people endpoints (Phase 5)', () => {
+    function makePeopleStub() {
+      return {
+        list: vi.fn(),
+        get: vi.fn(),
+        create: vi.fn(),
+        updateDisplayName: vi.fn(),
+        attach: vi.fn(),
+        detach: vi.fn(),
+        setPrimary: vi.fn(),
+        dissolve: vi.fn(),
+      };
+    }
+
+    function makeCacheSpy(): { cache: UserSummaryCache; invalidates: number[] } {
+      const invalidates: number[] = [];
+      return {
+        invalidates,
+        cache: {
+          async get() {
+            return null;
+          },
+          async set() {},
+          async invalidate(userId) {
+            invalidates.push(userId);
+          },
+        },
+      };
+    }
+
+    function captureBus(): { bus: ReturnType<typeof createEventBus>; events: LiveEvent[] } {
+      const events: LiveEvent[] = [];
+      const bus = createEventBus();
+      bus.subscribe((e) => events.push(e));
+      return { bus, events };
+    }
+
+    function makePeopleSyncDeps(
+      overrides: Partial<SyncRunnerDeps> & { peopleStoreStub?: ReturnType<typeof makePeopleStub> } = {},
+    ) {
+      const { deps } = makeSyncDeps(vi.fn());
+      const peopleStore = overrides.peopleStoreStub ?? makePeopleStub();
+      const { cache, invalidates } = makeCacheSpy();
+      const { bus, events } = captureBus();
+      const recomputeAllScores = vi.fn().mockResolvedValue({
+        user: { startedAt: '', finishedAt: '', durationMs: 0, devsProcessed: 0 },
+        person: { startedAt: '', finishedAt: '', durationMs: 0, peopleProcessed: 0 },
+      });
+      return {
+        deps: {
+          ...deps,
+          peopleStore: peopleStore as unknown as SyncRunnerDeps['peopleStore'],
+          userSummaryCache: cache,
+          bus,
+          recomputeAllScores,
+          ...overrides,
+        },
+        peopleStore,
+        invalidates,
+        events,
+        recomputeAllScores,
+      };
+    }
+
+    it('503s every people endpoint when peopleStore is not wired', async () => {
+      const { deps } = makeSyncDeps(vi.fn());
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+      for (const url of ['/api/admin/people', '/api/admin/people/1']) {
+        const res = await appInstance.inject({ method: 'GET', url });
+        expect(res.statusCode).toBe(503);
+        expect(res.json()).toMatchObject({ error: 'people_store_not_wired' });
+      }
+      const post = await appInstance.inject({ method: 'POST', url: '/api/admin/people', payload: {} });
+      expect(post.statusCode).toBe(503);
+      const del = await appInstance.inject({ method: 'DELETE', url: '/api/admin/people/1' });
+      expect(del.statusCode).toBe(503);
+    });
+
+    describe('POST /api/admin/people', () => {
+      it('201s, emits person.created, and skips recompute when no primaryUserId is passed', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.create.mockResolvedValue({
+          id: 1,
+          displayName: 'Jane Doe',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [],
+        });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people',
+          payload: { displayName: 'Jane Doe' },
+        });
+
+        expect(res.statusCode).toBe(201);
+        expect(res.json()).toMatchObject({ id: 1, displayName: 'Jane Doe' });
+        expect(setup.peopleStore.create).toHaveBeenCalledWith({ displayName: 'Jane Doe', primaryUserId: null });
+        expect(setup.recomputeAllScores).not.toHaveBeenCalled();
+        expect(setup.invalidates).toEqual([]);
+        expect(setup.events.map((e) => e.event)).toEqual(['person.created']);
+      });
+
+      it('201s, emits both person.created and person.attached, recomputes + invalidates when primaryUserId is passed', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.create.mockResolvedValue({
+          id: 7,
+          displayName: 'Jane',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [
+            { id: 42, displayName: 'jane.work', username: null, email: null, bitbucketUuid: '{u42}', isPrimary: true },
+          ],
+        });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people',
+          payload: { displayName: 'Jane', primaryUserId: 42 },
+        });
+
+        expect(res.statusCode).toBe(201);
+        expect(setup.recomputeAllScores).toHaveBeenCalledOnce();
+        expect(setup.invalidates).toEqual([42]);
+        expect(setup.events).toHaveLength(2);
+        expect(setup.events[0]?.event).toBe('person.created');
+        expect(setup.events[1]).toMatchObject({
+          event: 'person.attached',
+          payload: { personId: 7, userId: 42, becamePrimary: true },
+        });
+      });
+
+      it('404s when create throws UserNotFoundError', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.create.mockRejectedValue(new UserNotFoundError(999));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people',
+          payload: { primaryUserId: 999 },
+        });
+
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toMatchObject({ error: 'user_not_found', userId: 999 });
+      });
+
+      it('409s when create throws UserAlreadyAttachedError', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.create.mockRejectedValue(new UserAlreadyAttachedError(42, 5));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people',
+          payload: { primaryUserId: 42 },
+        });
+
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toMatchObject({ error: 'user_already_attached', userId: 42, currentPersonId: 5 });
+      });
+    });
+
+    describe('GET /api/admin/people', () => {
+      it('returns the list', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.list.mockResolvedValue([
+          { id: 1, displayName: null, createdAt: new Date(), updatedAt: new Date(), attachedUsers: [] },
+        ]);
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({ method: 'GET', url: '/api/admin/people' });
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toHaveLength(1);
+      });
+    });
+
+    describe('GET /api/admin/people/:id', () => {
+      it('200s with the person row', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.get.mockResolvedValue({
+          id: 3,
+          displayName: 'Jane',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [],
+        });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({ method: 'GET', url: '/api/admin/people/3' });
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toMatchObject({ id: 3, displayName: 'Jane' });
+      });
+
+      it('404s when the person is not found', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.get.mockResolvedValue(null);
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({ method: 'GET', url: '/api/admin/people/9' });
+        expect(res.statusCode).toBe(404);
+      });
+
+      it('400s on a non-integer id', async () => {
+        const setup = makePeopleSyncDeps();
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({ method: 'GET', url: '/api/admin/people/abc' });
+        expect(res.statusCode).toBe(400);
+      });
+    });
+
+    describe('PATCH /api/admin/people/:id', () => {
+      it('200s, updates display name, emits person.updated', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.updateDisplayName.mockResolvedValue({
+          id: 1,
+          displayName: 'Renamed',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [],
+        });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'PATCH',
+          url: '/api/admin/people/1',
+          payload: { displayName: 'Renamed' },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(setup.peopleStore.updateDisplayName).toHaveBeenCalledWith(1, 'Renamed');
+        expect(setup.events.map((e) => e.event)).toEqual(['person.updated']);
+        // PATCH is a metadata edit only — no recompute / cache bust.
+        expect(setup.recomputeAllScores).not.toHaveBeenCalled();
+        expect(setup.invalidates).toEqual([]);
+      });
+
+      it('404s when the person does not exist', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.updateDisplayName.mockRejectedValue(new PersonNotFoundError(9));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'PATCH',
+          url: '/api/admin/people/9',
+          payload: { displayName: 'x' },
+        });
+        expect(res.statusCode).toBe(404);
+      });
+    });
+
+    describe('POST /api/admin/people/:id/attach', () => {
+      it('200s, recomputes, invalidates, emits attached event', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.attach.mockResolvedValue({ becamePrimary: false });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/attach',
+          payload: { userId: 42 },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(setup.peopleStore.attach).toHaveBeenCalledWith(3, 42, {});
+        expect(setup.recomputeAllScores).toHaveBeenCalledOnce();
+        expect(setup.invalidates).toEqual([42]);
+        expect(setup.events[0]).toMatchObject({
+          event: 'person.attached',
+          payload: { personId: 3, userId: 42, becamePrimary: false },
+        });
+      });
+
+      it('passes makePrimary=true through to the store', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.attach.mockResolvedValue({ becamePrimary: true });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/attach',
+          payload: { userId: 42, makePrimary: true },
+        });
+
+        expect(setup.peopleStore.attach).toHaveBeenCalledWith(3, 42, { makePrimary: true });
+      });
+
+      it('404s when the person does not exist', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.attach.mockRejectedValue(new PersonNotFoundError(99));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/99/attach',
+          payload: { userId: 42 },
+        });
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toMatchObject({ error: 'person_not_found' });
+      });
+
+      it('409s when the user is already attached', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.attach.mockRejectedValue(new UserAlreadyAttachedError(42, 1));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/attach',
+          payload: { userId: 42 },
+        });
+        expect(res.statusCode).toBe(409);
+      });
+    });
+
+    describe('POST /api/admin/people/:id/detach', () => {
+      it('200s, recomputes, invalidates, emits detached with wasPrimary', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.detach.mockResolvedValue({ wasPrimary: true });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/detach',
+          payload: { userId: 42 },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(setup.recomputeAllScores).toHaveBeenCalledOnce();
+        expect(setup.invalidates).toEqual([42]);
+        expect(setup.events[0]).toMatchObject({
+          event: 'person.detached',
+          payload: { personId: 3, userId: 42, wasPrimary: true },
+        });
+      });
+
+      it('400s when the user is attached to a different person', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.detach.mockRejectedValue(new UserNotAttachedToPersonError(42, 3, 7));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/detach',
+          payload: { userId: 42 },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({
+          error: 'user_not_attached_to_person',
+          userId: 42,
+          expectedPersonId: 3,
+          actualPersonId: 7,
+        });
+      });
+    });
+
+    describe('POST /api/admin/people/:id/primary', () => {
+      it('200s, emits primary-changed, but skips recompute + cache bust', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.setPrimary.mockResolvedValue({ previousPrimaryUserId: 5 });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/primary',
+          payload: { userId: 42 },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(setup.recomputeAllScores).not.toHaveBeenCalled();
+        expect(setup.invalidates).toEqual([]);
+        expect(setup.events[0]).toMatchObject({
+          event: 'person.primary-changed',
+          payload: { personId: 3, previousPrimaryUserId: 5, newPrimaryUserId: 42 },
+        });
+      });
+
+      it('400s when the user is not attached to this person', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.setPrimary.mockRejectedValue(new UserNotAttachedToPersonError(42, 3, null));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/people/3/primary',
+          payload: { userId: 42 },
+        });
+        expect(res.statusCode).toBe(400);
+      });
+    });
+
+    describe('DELETE /api/admin/people/:id', () => {
+      it('200s, recomputes, invalidates every detached user, emits dissolved', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.dissolve.mockResolvedValue({ detachedUserIds: [42, 43, 44] });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({ method: 'DELETE', url: '/api/admin/people/3' });
+
+        expect(res.statusCode).toBe(200);
+        expect(setup.recomputeAllScores).toHaveBeenCalledOnce();
+        expect(setup.invalidates).toEqual([42, 43, 44]);
+        expect(setup.events[0]).toMatchObject({
+          event: 'person.dissolved',
+          payload: { personId: 3, detachedUserIds: [42, 43, 44] },
+        });
+      });
+
+      it('404s when the person does not exist', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.dissolve.mockRejectedValue(new PersonNotFoundError(9));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({ method: 'DELETE', url: '/api/admin/people/9' });
+        expect(res.statusCode).toBe(404);
+      });
     });
   });
 });

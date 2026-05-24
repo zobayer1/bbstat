@@ -447,6 +447,22 @@ export async function recomputePersonScores(deps: UserScoreRollupDeps): Promise<
 
   const rows = aggregatePersonScores(totals, eligible, now);
 
+  // Prune dangling rows — `person_score` entries whose person currently
+  // has no attached aliases (so the totals query above produced nothing
+  // for them). Without this DELETE, a detach that empties a person
+  // would leave its prior person_score row in place with stale
+  // numbers — invisible to the leaderboard view (no aliases → no
+  // leaderboard_entries person row would resolve), but visible to any
+  // direct /api/stats/people/:id reader. The FK ON DELETE CASCADE
+  // covers actual person row deletion; this catches the orphan-stats
+  // case where the person row still exists.
+  await deps.db.execute(sql`
+    DELETE FROM person_score
+    WHERE person_id NOT IN (
+      SELECT DISTINCT person_id FROM users WHERE person_id IS NOT NULL
+    )
+  `);
+
   if (rows.length > 0) {
     await deps.db
       .insert(personScore)

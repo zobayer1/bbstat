@@ -23,6 +23,7 @@ import { createDrizzleStatsStore } from './dashboard/stats-store.js';
 import { createRedisUserSummaryCache, type UserSummaryCache } from './dashboard/user-summary-cache.js';
 import { createEventBus } from './events/bus.js';
 import { wrapBusWithRedis } from './events/redis-bridge.js';
+import { createDrizzlePeopleStore } from './people/store.js';
 import { recomputeAllScores } from './scoring/rollup.js';
 import type { UserSummary } from './dashboard/stats-store.js';
 import type { SyncRunnerDeps } from './sync/runner.js';
@@ -149,6 +150,7 @@ async function main(): Promise<void> {
       backoffOptions: backoffOptionsFromConfig(config),
       bus,
       recomputeAllScores: () => recomputeAllScores({ db, logger }),
+      peopleStore: createDrizzlePeopleStore(db),
     };
   }
 
