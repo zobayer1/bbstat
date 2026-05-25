@@ -20,6 +20,7 @@ const sampleSummary: UserSummary = {
     badgeTier: null,
     person: null,
   },
+  linkedAccounts: [],
   totals: {
     commits7d: 12,
     commits30d: 40,

@@ -22,7 +22,9 @@ const sampleOverview = {
 };
 const sampleContributors = [
   {
-    userId: 1,
+    entityKind: 'user' as const,
+    entityId: 1,
+    attachedUserIds: [1],
     bitbucketUuid: '{u1}',
     displayName: 'Alice',
     commits: 42,
@@ -34,9 +36,11 @@ const sampleContributors = [
     consistency90d: null,
   },
   {
-    userId: 2,
+    entityKind: 'person' as const,
+    entityId: 9,
+    attachedUserIds: [2, 7],
     bitbucketUuid: '{u2}',
-    displayName: 'Bob',
+    displayName: 'Bob (merged)',
     commits: 17,
     last30Days: new Array(30).fill(0),
     additionsWindow: 0,
@@ -119,7 +123,9 @@ describe('stats store', () => {
   it('setContributorsWindow() refetches with the new window', async () => {
     vi.mocked(api.topContributors).mockResolvedValueOnce([
       {
-        userId: 9,
+        entityKind: 'user' as const,
+        entityId: 9,
+        attachedUserIds: [9],
         bitbucketUuid: '{u9}',
         displayName: 'Carol',
         commits: 200,

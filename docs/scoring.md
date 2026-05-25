@@ -344,8 +344,10 @@ dormancy in `user_score`), so the UI compositing rules live in
 
 ### Post-deploy reminder
 
-`docker compose exec redis redis-cli FLUSHDB` after the deploy only if
-the change touches a `bbstat:*` Redis-cached shape (today: `UserSummary`).
+Clear the Redis cache **by prefix** after the deploy only if the change
+touches a `bbstat:*` Redis-cached shape (today: `UserSummary`). The
+managed Redis is shared — **never `FLUSHDB`**; scope it:
+`redis-cli -u "$REDIS_URL" --scan --pattern 'bbstat:user-summary:*' | xargs -r redis-cli -u "$REDIS_URL" UNLINK`.
 The leaderboard itself does NOT use Redis — there's no leaderboard cache
 to bust. See [`docs/frontend-cache.md`](frontend-cache.md) for the
 companion Pinia/`CACHE_VERSION` story.

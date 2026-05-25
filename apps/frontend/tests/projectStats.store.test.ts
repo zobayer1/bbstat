@@ -11,22 +11,19 @@ import type { ProjectStats } from '../src/api/client';
 
 const sample: ProjectStats = {
   project: 'COMM',
-  totals: { commits7d: 250, commits30d: 850, contributorCount7d: 11, repositoryCount: 28 },
+  totals: { commits7d: 250, commits30d: 850, contributorCount30d: 11, repositoryCount: 28 },
   dailyCommits: [{ date: '2026-05-12', commits: 10 }],
   topContributors: [
     {
-      userId: 1,
+      entityKind: 'user',
+      entityId: 1,
+      attachedUserIds: [1],
       bitbucketUuid: '{u1}',
       displayName: 'Alice',
       commits: 42,
       last30Days: new Array(30).fill(0),
-      additionsWindow: 0,
-      deletionsWindow: 0,
-      reposWindow: 1,
       additions30d: 0,
       deletions30d: 0,
-      momentum: null,
-      consistency90d: null,
     },
   ],
   repositories: [

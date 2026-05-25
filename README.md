@@ -251,6 +251,7 @@ Full notes in [`CHANGELOG.md`](CHANGELOG.md). Untagged work-in-progress lives on
 
 | Version | Date       | Headline                                                                                                                                        |
 | ------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.2.0   | 2026-05-25 | Person layer goes end-to-end — Top Contributors, repo / project / activity surfaces all person-aware; multi-actor activity; Linked accounts     |
 | 1.1.0   | 2026-05-24 | ShipShow Score leaderboard, member persona tiers (active / dormant / ex-member), BB token-expiry surface, merge-exclusion rollup fix            |
 | 1.0.0   | 2026-05-21 | First tagged release — BitBucket ingest pipeline, rollups + dashboard, Projects / Repositories / Members / Activity pages, containerized deploy |
 

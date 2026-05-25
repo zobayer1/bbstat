@@ -318,7 +318,8 @@ SQL that produces them):
    — see [docs/frontend-cache.md](frontend-cache.md) for the
    mechanism.
 4. **Bust Redis** if the field flows through the `UserSummary` Redis
-   cache: `docker compose exec redis redis-cli FLUSHDB` after deploy.
+   cache — **by prefix, never `FLUSHDB`** (the managed Redis is shared):
+   `redis-cli -u "$REDIS_URL" --scan --pattern 'bbstat:user-summary:*' | xargs -r redis-cli -u "$REDIS_URL" UNLINK` after deploy.
    (Today the only Redis-cached payload is `UserSummary`; there's no
    automatic version-bumping equivalent server-side.)
 5. Update test fixtures — `apps/backend/tests/stats.test.ts`

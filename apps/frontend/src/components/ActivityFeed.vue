@@ -11,12 +11,15 @@
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { MAX_ENTRIES_PER_FILTER, useActivityStore, type ActivityFilters } from '@/stores/activity';
-import type { ActivityCommit, ActivityEntry } from '@/api/client';
+import type { ActivityActor, ActivityCommit, ActivityEntry } from '@/api/client';
 import ActivityRow from './ActivityRow.vue';
 import CommitDetailModal from './CommitDetailModal.vue';
 
 const props = defineProps<{
-  actor?: number;
+  // Phase 5: an actor scopes the feed to one user OR one person (which
+  // expands server-side to all the person's aliases). Omit for an
+  // unscoped feed.
+  actor?: ActivityActor;
   repo?: string;
   project?: string;
   // Optional fixed CSS height (e.g., '24rem'). When set, the list scrolls

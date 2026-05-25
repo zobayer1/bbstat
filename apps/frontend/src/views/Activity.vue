@@ -11,17 +11,21 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import ActivityRow from '@/components/ActivityRow.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import CommitDetailModal from '@/components/CommitDetailModal.vue';
 import { ACTIVITY_PAGE_SIZE, useActivityPageStore, type ActivityPageFilters } from '@/stores/activity-page';
 import { useStatsStore } from '@/stores/stats';
+import { useMembersStore } from '@/stores/members';
 import { useActivityFilters } from '@/composables/useActivityFilters';
+import { useActorFilter } from '@/composables/useActorFilter';
 import { liveBus } from '@/lib/live';
-import { api, type ActivityCommit } from '@/api/client';
+import { api, type ActivityActor, type ActivityCommit } from '@/api/client';
 
 const route = useRoute();
 const router = useRouter();
 const stats = useStatsStore();
+const members = useMembersStore();
 const store = useActivityPageStore();
 
 // SSE / fallback subscriptions for the year-grid heatmap. The paged
@@ -36,7 +40,12 @@ onMounted(() => {
   // disappear when the user later touches a dropdown. Re-mounts (back
   // button, fresh deep link) re-snapshot naturally.
   initialFilters.value = {
-    actor: typeof route.query.actor === 'string' ? route.query.actor : undefined,
+    // Snapshot the actor as a "kind:id" composite so the chip stays
+    // stable whether the URL carries a user or a person actor.
+    actor:
+      typeof route.query.actor === 'string'
+        ? `${route.query.actorKind === 'person' ? 'person' : 'user'}:${route.query.actor}`
+        : undefined,
     repo: typeof route.query.repo === 'string' ? route.query.repo : undefined,
     project: typeof route.query.project === 'string' ? route.query.project : undefined,
   };
@@ -77,10 +86,7 @@ function clearQueryParams(keys: string[]): void {
   void router.replace({ query: next });
 }
 
-const filterActor = computed<number | undefined>({
-  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
-  set: (v) => setQueryParam('actor', v),
-});
+const filterActor = useActorFilter();
 // Project + repo go through the shared composable so picking a repo
 // auto-fills its project (and vice-versa, trimming the repo dropdown
 // to the chosen project's repos). `repoFilterOptions` is the trimmed
@@ -210,17 +216,19 @@ function chipFor(
   return build(current);
 }
 
-const chipActor = computed<Chip | undefined>(() =>
-  chipFor(typeof route.query.actor === 'string' ? route.query.actor : undefined, initialFilters.value.actor, (v) => {
-    const id = Number(v);
-    if (!Number.isFinite(id) || id <= 0) return undefined;
-    const contrib = stats.topContributors.find((c) => c.userId === id);
-    return {
-      label: contrib?.displayName ?? `User #${v}`,
-      to: { name: 'user', params: { userId: id } },
-    };
-  }),
-);
+const chipActor = computed<Chip | undefined>(() => {
+  const a = filterActor.value;
+  const current = a === undefined ? undefined : `${a.kind}:${a.id}`;
+  return chipFor(current, initialFilters.value.actor, (): Chip | undefined => {
+    if (a === undefined) return undefined;
+    // Resolve the label from the full person-aware roster; link a person
+    // to /people/:id and a user to /users/:id.
+    const m = members.members.find((x) => x.entityKind === a.kind && x.entityId === a.id);
+    const to: Chip['to'] =
+      a.kind === 'person' ? { name: 'person', params: { personId: a.id } } : { name: 'user', params: { userId: a.id } };
+    return { label: m?.displayName ?? `${a.kind === 'person' ? 'Person' : 'User'} #${a.id}`, to };
+  });
+});
 const chipRepo = computed<Chip | undefined>(() =>
   chipFor(typeof route.query.repo === 'string' ? route.query.repo : undefined, initialFilters.value.repo, (v) => {
     const [workspace, slug] = v.split('/');
@@ -322,7 +330,7 @@ const filtersActive = computed(
 
 function clearFilters(): void {
   searchText.value = '';
-  clearQueryParams(['actor', 'repo', 'project', 'after', 'before', 'hash', 'message']);
+  clearQueryParams(['actor', 'actorKind', 'repo', 'project', 'after', 'before', 'hash', 'message']);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,14 +418,14 @@ const dailyData = ref<{ date: string; commits: number }[]>([]);
 
 const chartFiltersKey = computed(() =>
   JSON.stringify({
-    actor: filterActor.value ?? null,
+    actor: filterActor.value === undefined ? null : `${filterActor.value.kind}:${filterActor.value.id}`,
     repo: filterRepo.value ?? null,
     project: filterProject.value ?? null,
   }),
 );
 
 async function loadCharts(): Promise<void> {
-  const q: { actor?: number; repo?: string; project?: string } = {};
+  const q: { actor?: ActivityActor; repo?: string; project?: string } = {};
   if (filterActor.value !== undefined) q.actor = filterActor.value;
   if (filterRepo.value !== undefined) q.repo = filterRepo.value;
   if (filterProject.value !== undefined) q.project = filterProject.value;
@@ -699,17 +707,8 @@ function nextCommit(): void {
           </select>
         </label>
         <label for="activity-filter-user" class="flex items-center gap-1">
-          <span class="text-slate-500">User:</span>
-          <select
-            id="activity-filter-user"
-            v-model.number="filterActor"
-            name="activity-filter-user"
-            class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-            aria-label="Filter by user"
-          >
-            <option :value="undefined">All</option>
-            <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
-          </select>
+          <span class="text-slate-500">Contributor:</span>
+          <ActorPicker id="activity-filter-user" v-model="filterActor" />
         </label>
         <label for="activity-filter-from" class="flex items-center gap-1">
           <span class="text-slate-500">From:</span>

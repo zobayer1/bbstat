@@ -16,11 +16,13 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import SunburstRepoContributors from '@/components/SunburstRepoContributors.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { api, type RepoContributorBreakdown } from '@/api/client';
 import { useStatsStore } from '@/stores/stats';
 import { useActivityFilters } from '@/composables/useActivityFilters';
+import { useActorFilter } from '@/composables/useActorFilter';
 import { liveBus } from '@/lib/live';
 
 const stats = useStatsStore();
@@ -217,17 +219,7 @@ const topContributors = computed(() => stats.topContributors.slice(0, 10));
 // index. URL-synced so deep links work and the Back button behaves.
 // ---------------------------------------------------------------------------
 
-function setQueryParam(key: string, value: string | number | undefined): void {
-  const next = { ...route.query };
-  if (value === undefined || value === '') delete next[key];
-  else next[key] = String(value);
-  void router.replace({ query: next });
-}
-
-const filterActor = computed<number | undefined>({
-  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
-  set: (v) => setQueryParam('actor', v),
-});
+const filterActor = useActorFilter();
 const {
   projectModel: filterProject,
   repoModel: filterRepo,
@@ -244,6 +236,7 @@ const filtersActive = computed(
 function clearFilters(): void {
   const next = { ...route.query };
   delete next.actor;
+  delete next.actorKind;
   delete next.repo;
   delete next.project;
   void router.replace({ query: next });
@@ -465,13 +458,26 @@ function clearFilters(): void {
 
         <!-- RIGHT: chart column. No card chrome of its own — the outer
            panel's bg / border / shadow already wraps it, dropping the
-           inner card avoids the "widget within a widget" feel. Centred
-           so the sunburst sits comfortably even when the table column
-           grew taller than the chart. -->
-        <div class="flex flex-col items-center justify-center px-6 py-2">
-          <p v-if="breakdownError" class="mb-3 text-sm text-red-600">Could not load breakdown: {{ breakdownError }}</p>
-          <p v-if="breakdownLoading && breakdown.length === 0" class="text-sm text-slate-400">Loading…</p>
-          <SunburstRepoContributors v-else :data="breakdown" />
+           inner card avoids the "widget within a widget" feel. A header
+           row mirrors the left column's search/count row (same
+           border-b + py-3) so the "top 15 repos" caption lands on the
+           same baseline as the "X projects" count; the chart centers in
+           the space below it, which sits it a touch lower without
+           growing the shared panel height. -->
+        <div class="flex flex-col">
+          <div class="border-b border-slate-100 px-4 py-3 text-center">
+            <span class="text-xs text-slate-500">Top 15 Repositories</span>
+          </div>
+          <!-- Chart top-aligned (not justify-center) so it sits just
+               under the label — the SVG's own MAX_EXPLODE edge whitespace
+               is the only separation. -->
+          <div class="flex flex-1 flex-col items-center px-6 pb-2">
+            <p v-if="breakdownError" class="mb-3 text-sm text-red-600">
+              Could not load breakdown: {{ breakdownError }}
+            </p>
+            <p v-if="breakdownLoading && breakdown.length === 0" class="text-sm text-slate-400">Loading…</p>
+            <SunburstRepoContributors v-else :data="breakdown" />
+          </div>
         </div>
       </div>
     </section>
@@ -524,14 +530,27 @@ function clearFilters(): void {
         </h2>
         <table v-if="topContributors.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
           <tbody class="divide-y divide-slate-100">
-            <tr v-for="(c, i) in topContributors" :key="c.bitbucketUuid" class="hover:bg-slate-50">
+            <tr v-for="(c, i) in topContributors" :key="`${c.entityKind}:${c.entityId}`" class="hover:bg-slate-50">
               <td class="w-6 px-2 py-2 text-right font-mono text-xs text-slate-400">{{ i + 1 }}</td>
-              <td class="px-3 py-2">
+              <td class="max-w-[12rem] px-3 py-2">
                 <RouterLink
-                  :to="{ name: 'user', params: { userId: c.userId } }"
-                  class="font-medium text-slate-900 hover:text-slate-600"
+                  :to="
+                    c.entityKind === 'person'
+                      ? { name: 'person', params: { personId: c.entityId } }
+                      : { name: 'user', params: { userId: c.entityId } }
+                  "
+                  class="flex items-center gap-1.5 font-medium text-slate-900 hover:text-slate-600"
                 >
-                  {{ c.displayName }}
+                  <span class="min-w-0 truncate" :title="c.displayName">{{ c.displayName }}</span>
+                  <!-- Merged-person marker, same as the Dashboard top-
+                       contributors list. -->
+                  <span
+                    v-if="c.entityKind === 'person' && c.attachedUserIds.length > 1"
+                    class="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
+                    :title="`Merged from ${c.attachedUserIds.length} BitBucket accounts`"
+                  >
+                    ×{{ c.attachedUserIds.length }}
+                  </span>
                 </RouterLink>
               </td>
               <!-- Momentum + Consistency, both right-aligned and visually
@@ -588,17 +607,8 @@ function clearFilters(): void {
             </select>
           </label>
           <label for="projects-activity-filter-user" class="flex items-center gap-1">
-            <span class="text-slate-500">User:</span>
-            <select
-              id="projects-activity-filter-user"
-              v-model.number="filterActor"
-              name="projects-activity-filter-user"
-              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-              aria-label="Filter by user"
-            >
-              <option :value="undefined">All</option>
-              <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
-            </select>
+            <span class="text-slate-500">Contributor:</span>
+            <ActorPicker id="projects-activity-filter-user" v-model="filterActor" />
           </label>
           <button
             v-if="filtersActive"

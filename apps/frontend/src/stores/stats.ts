@@ -1,12 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from '@/api/client';
-import type {
-  ContributorWindow,
-  OverviewStats,
-  TopContributorWithSparkline,
-  TrackedRepositorySummary,
-} from '@/api/client';
+import type { ContributorWindow, OverviewStats, TopContributorEntity, TrackedRepositorySummary } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
 // Pinia is the client-side cache (per CLAUDE.md). Hydrates from
@@ -17,7 +12,7 @@ export const useStatsStore = defineStore(
   'stats',
   () => {
     const overview = ref<OverviewStats | null>(null);
-    const topContributors = ref<TopContributorWithSparkline[]>([]);
+    const topContributors = ref<TopContributorEntity[]>([]);
     const repositories = ref<TrackedRepositorySummary[]>([]);
     const contributorsWindow = ref<ContributorWindow>('7d');
     const lastSyncedAt = ref<string | null>(null);
@@ -101,6 +96,27 @@ export const useStatsStore = defineStore(
       void applyTickComplete();
     });
     liveBus.on('repository.deleted', () => {
+      void applyTickComplete();
+    });
+    // Phase 5 — the dashboard Top Contributors panel is person-aware, so
+    // a merge / detach / dissolve reshapes its rows. Re-fetch on any
+    // person-layer mutation, same as the Members store.
+    liveBus.on('person.created', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.updated', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.attached', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.detached', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.primary-changed', () => {
+      void applyTickComplete();
+    });
+    liveBus.on('person.dissolved', () => {
       void applyTickComplete();
     });
     liveBus.onFallback(() => {

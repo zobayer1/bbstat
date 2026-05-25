@@ -21,18 +21,15 @@ const sample: RepoActivity = {
   diffStats: { additions7d: 0, deletions7d: 0, additions30d: 0, deletions30d: 0 },
   contributors: [
     {
-      userId: 1,
+      entityKind: 'user',
+      entityId: 1,
+      attachedUserIds: [1],
       bitbucketUuid: '{u1}',
       displayName: 'Alice',
       commits: 4,
       last30Days: [0, 1, 0, 3],
       additions30d: 0,
       deletions30d: 0,
-      additionsWindow: 0,
-      deletionsWindow: 0,
-      reposWindow: 1,
-      momentum: null,
-      consistency90d: null,
     },
   ],
 };

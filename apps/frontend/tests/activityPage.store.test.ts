@@ -146,15 +146,17 @@ describe('activity-page store', () => {
     const store = useActivityPageStore();
     vi.mocked(api.activity).mockResolvedValue(pageOf(ACTIVITY_PAGE_SIZE, Date.UTC(2026, 4, 12)));
     mockCount(550);
-    await store.load({ actor: 7, project: 'COMM' });
+    await store.load({ actor: { kind: 'user', id: 7 }, project: 'COMM' });
     mockCount(550);
-    await store.next({ actor: 7, project: 'COMM' });
+    await store.next({ actor: { kind: 'user', id: 7 }, project: 'COMM' });
     expect(store.page).toBe(2);
 
     mockCount(550);
     await store.applyTickComplete();
 
-    expect(api.activity).toHaveBeenLastCalledWith(expect.objectContaining({ actor: 7, project: 'COMM', offset: 0 }));
+    expect(api.activity).toHaveBeenLastCalledWith(
+      expect.objectContaining({ actor: { kind: 'user', id: 7 }, project: 'COMM', offset: 0 }),
+    );
     expect(store.page).toBe(1);
   });
 

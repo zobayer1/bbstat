@@ -1,18 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { RouterLink } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Fuse from 'fuse.js';
 import ActiveMembersBar, { type ActivityBucket } from '@/components/ActiveMembersBar.vue';
+import ActivityFeed from '@/components/ActivityFeed.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import BadgeIcon from '@/components/BadgeIcon.vue';
 import LorenzCurve from '@/components/LorenzCurve.vue';
 import MethodologyModal from '@/components/MethodologyModal.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import { useMembersStore } from '@/stores/members';
 import { useStatsStore } from '@/stores/stats';
+import { useActivityFilters } from '@/composables/useActivityFilters';
+import { useActorFilter } from '@/composables/useActorFilter';
 import type { WorkspaceMember } from '@/api/client';
 
 const store = useMembersStore();
 const stats = useStatsStore();
+const route = useRoute();
+const router = useRouter();
 
 // Workspace for the "View on BitBucket" header link. Derived from
 // the first tracked repo — single-workspace deployment by design,
@@ -34,6 +40,38 @@ const activeMembers = computed<number>(() => store.members.length);
 const inactiveMembers = computed<number | null>(() =>
   totalMembers.value === null ? null : Math.max(0, totalMembers.value - activeMembers.value),
 );
+
+// Activity-feed filters (project / repo / contributor), mirroring the
+// other pages. The page's own search / sort are local refs (not
+// URL-synced), so these can use the default `?project` / `?repo` /
+// `?actor` keys with no collision.
+const filterActor = useActorFilter();
+const {
+  projectModel: filterProject,
+  repoModel: filterRepo,
+  projectOptions: activityProjectOptions,
+  repoOptions: activityRepoOptions,
+} = useActivityFilters({ repositories: computed(() => stats.repositories) });
+const activityFiltersActive = computed(
+  () => filterActor.value !== undefined || filterProject.value !== undefined || filterRepo.value !== undefined,
+);
+function clearActivityFilters(): void {
+  const next = { ...route.query };
+  delete next.project;
+  delete next.repo;
+  delete next.actor;
+  delete next.actorKind;
+  void router.replace({ query: next });
+}
+// 30-day cutoff for the "See all activities →" footer (reuses the
+// existing DAY_MS constant defined below for the activity-status buckets).
+function localDateString(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
 // Membership-status partition of the full ingested roster. Counts the
 // whole payload (NOT filtered by activity window) since these counts
@@ -100,17 +138,27 @@ const search = ref('');
 // "Current calibration" panel (badge counts, tier counts, etc.).
 const showMethodologyModal = ref(false);
 
-// Fuzzy search runs straight over the full roster — no recency-window
-// filter anymore. `threshold: 0.4` is forgiving enough for typos but
-// not so loose that unrelated names collide; `ignoreLocation` lets a
-// match anywhere in the string count (so a search for "han" hits
-// "Zobayer Hasan" without scoring proximity to position 0).
+// Fuzzy search over the full roster, tuned to match the ActorPicker
+// (the activity contributor search) so the two behave identically:
+// threshold 0.3 + minMatchCharLength 2 keeps the long tail out (`Zob`
+// shouldn't surface Apu / Sazibul); weighting displayName above
+// username and email above aliasSearch keeps the displayed identity
+// ranking first. `aliasSearch` carries every linked account's
+// name/username/email so a merged person is findable by a non-primary
+// alias too — the row still shows the canonical person. `ignoreLocation`
+// lets a match land anywhere in the string ("han" hits "Zobayer Hasan").
 const fuse = computed(
   () =>
     new Fuse(store.members, {
-      keys: ['displayName', 'username', 'email'],
-      threshold: 0.4,
+      keys: [
+        { name: 'displayName', weight: 3 },
+        { name: 'username', weight: 1 },
+        { name: 'email', weight: 0.3 },
+        { name: 'aliasSearch', weight: 0.5 },
+      ],
+      threshold: 0.3,
       ignoreLocation: true,
+      minMatchCharLength: 2,
     }),
 );
 
@@ -155,7 +203,7 @@ const sorted = computed<WorkspaceMember[]>(() => {
   return list;
 });
 
-const PAGE_SIZE = 40;
+const PAGE_SIZE = 30;
 const page = ref(1);
 const pageCount = computed(() => Math.max(1, Math.ceil(sorted.value.length / PAGE_SIZE)));
 const pageClamped = computed(() => Math.min(page.value, pageCount.value));
@@ -502,26 +550,30 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
             <td class="px-2 py-2 text-center align-middle">
               <BadgeIcon :badge="m.badge" :tier="m.badgeTier" />
             </td>
-            <td class="px-4 py-2">
+            <td class="max-w-[16rem] px-4 py-2">
               <!-- Person rows link to /people/:id, user rows to /users/:id.
-                   The merged-from pill only renders on person rows with
-                   >1 attached alias (a single-alias person is possible
-                   transiently between create and the second attach). -->
+                   Name truncates with ellipsis and the merged ×N pill
+                   stays on the same line (same treatment as the Top
+                   Contributors lists). The pill only renders on person
+                   rows with >1 attached alias. -->
               <RouterLink
                 :to="
                   m.entityKind === 'person'
                     ? { name: 'person', params: { personId: m.entityId } }
                     : { name: 'user', params: { userId: m.entityId } }
                 "
-                :class="['block font-medium hover:text-slate-600', m.isDormant ? 'text-slate-500' : 'text-slate-900']"
+                :class="[
+                  'flex items-center gap-1.5 font-medium hover:text-slate-600',
+                  m.isDormant ? 'text-slate-500' : 'text-slate-900',
+                ]"
               >
-                {{ m.displayName }}
+                <span class="min-w-0 truncate" :title="m.displayName">{{ m.displayName }}</span>
                 <span
                   v-if="m.entityKind === 'person' && m.attachedUserIds.length > 1"
-                  class="ml-1.5 inline-block rounded-full bg-violet-100 px-1.5 py-0.5 align-middle text-[10px] font-medium text-violet-700"
+                  class="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
                   :title="`Merged from ${m.attachedUserIds.length} BitBucket accounts`"
                 >
-                  merged ×{{ m.attachedUserIds.length }}
+                  ×{{ m.attachedUserIds.length }}
                 </span>
               </RouterLink>
               <!-- Git-author email: best-effort, parsed from commits.author.raw at
@@ -626,5 +678,63 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
     </section>
 
     <p v-if="store.error" class="mt-4 text-sm text-red-600">Could not load members: {{ store.error }}</p>
+
+    <!-- Activity feed with project / repo / contributor filters, same as
+         the Dashboard / Projects / Repositories pages. -->
+    <section class="mb-4 mt-8">
+      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+        <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <label for="members-activity-filter-project" class="flex items-center gap-1">
+            <span class="text-slate-500">Project:</span>
+            <select
+              id="members-activity-filter-project"
+              v-model="filterProject"
+              name="members-activity-filter-project"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter activity by project"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="p in activityProjectOptions" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </label>
+          <label for="members-activity-filter-repo" class="flex items-center gap-1">
+            <span class="text-slate-500">Repository:</span>
+            <select
+              id="members-activity-filter-repo"
+              v-model="filterRepo"
+              name="members-activity-filter-repo"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter activity by repository"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="r in activityRepoOptions" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+            </select>
+          </label>
+          <label for="members-activity-filter-user" class="flex items-center gap-1">
+            <span class="text-slate-500">Contributor:</span>
+            <ActorPicker id="members-activity-filter-user" v-model="filterActor" />
+          </label>
+          <button
+            v-if="activityFiltersActive"
+            type="button"
+            class="cursor-pointer text-slate-500 hover:text-slate-700"
+            @click="clearActivityFilters"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      <ActivityFeed :actor="filterActor" :project="filterProject" :repo="filterRepo" height="24rem">
+        <template #footer>
+          <RouterLink
+            :to="{ name: 'activity', query: { after: activitySinceThirtyDays } }"
+            class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+          >
+            See all activities →
+          </RouterLink>
+        </template>
+      </ActivityFeed>
+    </section>
   </main>
 </template>

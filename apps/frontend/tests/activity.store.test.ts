@@ -50,11 +50,11 @@ describe('activity store', () => {
   it('keys entries by filter triple — actor filter does not share with org-wide view', async () => {
     const store = useActivityStore();
     vi.mocked(api.activity).mockResolvedValueOnce([makeCommit()]);
-    await store.load({ actor: 7 });
+    await store.load({ actor: { kind: 'user', id: 7 } });
     vi.mocked(api.activity).mockResolvedValueOnce([makePr()]);
     await store.load({});
 
-    const keyActor = store.keyFor({ actor: 7 });
+    const keyActor = store.keyFor({ actor: { kind: 'user', id: 7 } });
     const keyAll = store.keyFor({});
     expect(store.byKey[keyActor]).toHaveLength(1);
     expect(store.byKey[keyAll]).toHaveLength(1);
@@ -103,10 +103,10 @@ describe('activity store', () => {
     vi.mocked(api.activity).mockResolvedValueOnce([makeCommit()]);
     await store.load({});
     vi.mocked(api.activity).mockRejectedValueOnce(new Error('boom'));
-    await store.load({ actor: 9 });
+    await store.load({ actor: { kind: 'user', id: 9 } });
 
     const keyAll = store.keyFor({});
-    const keyActor = store.keyFor({ actor: 9 });
+    const keyActor = store.keyFor({ actor: { kind: 'user', id: 9 } });
     expect(store.byKey[keyAll]).toHaveLength(1);
     expect(store.error[keyActor]).toBe('boom');
     expect(store.byKey[keyActor]).toBeUndefined();

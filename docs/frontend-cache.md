@@ -155,11 +155,20 @@ rollups via `apps/backend/src/dashboard/user-summary-cache.ts`)
 survives across browser sessions AND across server restarts.
 Auto-flushing on every boot would defeat the cache.
 
-When a shape change touches a Redis-cached payload, the operator runs:
+When a shape change touches a Redis-cached payload, the operator clears
+that cache **by prefix** after deploy. The managed Redis is shared with
+other projects, so **never `FLUSHDB`** (and don't blindly delete `bbstat:*`
+either — `bbstat:bitbucket-auth-state` is meant to survive deploys). Scope
+it to the affected namespace:
 
 ```bash
-docker compose exec redis redis-cli FLUSHDB
+redis-cli -u "$REDIS_URL" --scan --pattern 'bbstat:user-summary:*' \
+  | xargs -r redis-cli -u "$REDIS_URL" UNLINK
 ```
+
+`--scan` is non-blocking; `xargs -r` is a no-op on zero matches. In the dev
+stack (where redis runs in compose) wrap the pipeline in a shell:
+`docker compose exec redis sh -c "redis-cli --scan --pattern 'bbstat:user-summary:*' | xargs -r redis-cli UNLINK"`.
 
 Today the only Redis-cached payload is `UserSummary`. Surface this as
 part of the post-deploy reminder for any change involving `UserSummary`

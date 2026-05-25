@@ -290,12 +290,10 @@ const legendRows = computed<ProjectLegendEntry[][]>(() => {
        this reads better than a vertical legend stuck to the side — the
        chart gets the full panel width, and the pills naturally flow
        across however many lines they need. -->
-  <!-- Generous gap between chart and legend on purpose: it lifts the
-       component's base height above the typical project table next to
-       it on the Projects page, so when the search filter shrinks the
-       table, the chart side keeps anchoring the row and the outer
-       panel doesn't shrink with it. -->
-  <div class="flex flex-col items-center gap-10">
+  <!-- Chart and legend sit flush — the SVG already carries MAX_EXPLODE
+       whitespace around its edge, so a tight gap keeps the legend close
+       without the two actually touching. -->
+  <div class="flex flex-col items-center gap-1">
     <svg
       :width="size"
       :height="size"

@@ -5,6 +5,135 @@ All notable changes to this project are documented here. Format roughly follows
 strictly SemVer-versioned but releases are tagged in git and each tagged
 release gets a section.
 
+## [1.2.0] — 2026-05-25
+
+Completes the Phase 5 **person layer**: the alias-merge mechanics shipped in
+1.1.x's Phase 5 commits, but person-awareness only reached the `/members`
+leaderboard. 1.2.0 extends it to **every** contributor surface — Top
+Contributors, the repository and project detail pages, multi-actor activity
+filtering, and the Person/User detail pages — so a merged person collapses
+its aliases everywhere, never just in one place. All commit counts continue
+to exclude merge commits. No schema change since 1.1.x's V1_4; the only data
+action this deploy needs is a rollup rebuild (carried over from the 1.1.0
+merge-exclusion fix) + a Redis flush. See the deploy runbook below.
+
+### Added
+
+- **Top Contributors person-awareness** — the dashboard panel
+  (`getTopContributors`) now keys on the merged entity (`TopContributorEntity`:
+  `entityKind` / `entityId` / `attachedUserIds`). A merged person appears once
+  with a violet `×N` pill and links to `/people/:id`; unattached users link to
+  `/users/:id`. (Closes a Phase 5 deferral.)
+- **Multi-actor activity filtering** — `/api/activity`, `/api/activity-count`,
+  and `/api/activity-daily` accept `actor` + `actorKind` (`user` | `person`,
+  default `user` for backward compatibility). A person actor expands
+  server-side to every attached alias (`author_user_id IN (SELECT id FROM users
+WHERE person_id = …)`). Shared `ActorPicker.vue` (Fuse combobox over the
+  person-aware roster) + `useActorFilter` composable replace the per-page user
+  `<select>`s on Dashboard / Activity / Project / Repo detail pages. The
+  Activity page title chip resolves a person _or_ user identically. (Closes a
+  Phase 5 deferral.)
+- **Person detail activity feed** — `/people/:id` now carries the unified
+  commit + PR stream (pinned to the person, expanded across aliases) with
+  project / repo filters, plus a **Last active** column on the Attached
+  accounts table (per-alias `MAX(authored_at)`).
+- **User detail "Linked accounts" table** — a merged account's `/users/:id`
+  page lists its sibling aliases (`UserSummary.linkedAccounts`) in the same
+  table layout as the Person page, with the canonical-person link in the table
+  footer.
+- **Members page activity section + alias search** — the Members page gains an
+  activity feed (same filters as other pages); `WorkspaceMember.aliasSearch`
+  lets a merged person be found by _any_ linked account's name/username/email,
+  not just the primary. Page size set to 30 rows.
+
+### Changed
+
+- **Repository detail contributors are person-aware** — the "Contributors —
+  last 30 days" list and the contributor stat card key on the merged entity
+  (`RepoContributorEntity`); a person's aliases that both touched the repo
+  collapse into one row with the `×N` pill.
+- **Project detail contributors are person-aware** — the contributor stat card
+  changed from 7-day to **30-day** and is now an entity-distinct count; the
+  "Contributors — last 30 days" table is entity-keyed; the repositories table's
+  "Contributors — 30d" column is an entity-distinct count (a merged person
+  counts once even if two aliases touched the repo).
+- **`CACHE_VERSION` 14 → 20** — persisted-store shape changes across the work
+  (`WorkspaceMember` entity shape + `aliasSearch`, `TopContributorEntity`,
+  `PersonSummary.attachedUsers.lastActiveAt`, `UserSummary.linkedAccounts`,
+  `RepoActivity` / `ProjectStats` entity-keyed contributors). The boot-time
+  bust wipes stale `bbstat-*` localStorage on each user's next load.
+
+### Removed
+
+- **Dead contributor types** — `RepoContributor`, `TopContributorWithSparkline`,
+  and `TopContributor` were orphaned once the repo/project lists moved to the
+  entity-keyed shapes; removed from `stats-store.ts` + `client.ts`.
+
+### Operator notes — deploy runbook (1.1.0 → 1.2.0)
+
+Prod runs the containerized stack from `compose.yaml` (no override) behind the
+deployer's reverse proxy; Postgres + Redis are externally managed. The backend
+image is distroless with a `node` ENTRYPOINT — pass `dist/<script>.js`
+directly to `docker compose run`, **never** prefix with `node`.
+
+1. **Build + ship images** (build host):
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.2.0 FRONTEND_IMAGE=bbstat-frontend:v1.2.0 make build-images
+   docker save -o bbstat-v1.2.0.tar bbstat-backend:v1.2.0 bbstat-frontend:v1.2.0
+   scp bbstat-v1.2.0.tar compose.yaml prod:/opt/bbstat/
+   ```
+   The frontend image bakes `CACHE_VERSION=20` + the new components; the backend
+   image carries the person-aware queries + `/api/admin/people` endpoints.
+2. **Load images** (prod):
+   ```bash
+   docker load -i bbstat-v1.2.0.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.2.0 FRONTEND_IMAGE=bbstat-frontend:v1.2.0
+   ```
+3. **Roll out** — the one-shot `migrate` service runs first and gates backend /
+   sync via `depends_on: service_completed_successfully`:
+   ```bash
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml logs migrate   # confirm migrations applied
+   ```
+   This applies **V1_4** (`people`, `users.person_id` + `is_primary_for_person`,
+   `person_score`, the `leaderboard_entries` view, the partial-unique index, and
+   the primary-requires-person CHECK) if it wasn't already on this database. The
+   view DDL ships inside Drizzle `0003_cuddly_network.sql`, so no manual
+   `CREATE VIEW` step is needed.
+4. **Rebuild rollups** — **required**. The 1.1.0 merge-exclusion fix
+   (`commit_daily` excludes merges) was never force-rebuilt in prod, so the
+   on-disk rollup still carries merge-inflated counts that every person-aware
+   read would inherit:
+   ```bash
+   docker compose -f compose.yaml run --rm backend dist/scripts/rebuild-rollups.js
+   ```
+5. **Recompute scores** (user + person passes; person is a no-op until the
+   first merge exists, but harmless):
+   ```bash
+   docker compose -f compose.yaml run --rm backend dist/scripts/recompute-user-scores.js
+   ```
+6. **Clear the stale user-summary cache** — `UserSummary` gained
+   `linkedAccounts`, and the rollup rebuild changed cached aggregates. The
+   managed Redis is shared with other projects, so **do not `FLUSHDB`** —
+   delete only this app's user-summary keys by prefix (this also leaves the
+   `bbstat:bitbucket-auth-state` flag intact, which is meant to survive
+   deploys):
+   ```bash
+   redis-cli -u "$REDIS_URL" --scan --pattern 'bbstat:user-summary:*' \
+     | xargs -r redis-cli -u "$REDIS_URL" UNLINK
+   ```
+   `--scan` is non-blocking (SCAN under the hood); `xargs -r` is a no-op when
+   there are zero matches. Order matters: rebuild → recompute → clear, so
+   reads repopulate from fresh data.
+7. **Browser cache** — automatic. The `CACHE_VERSION=20` boot-bust wipes stale
+   `bbstat-*` localStorage on each user's next page load; no manual action.
+8. **Smoke** — load the dashboard; confirm Members + Top Contributors render,
+   counts look merge-excluded and sane, and the browser console is clean.
+
+**Rollback:** redeploy the `v1.1.x` images and re-run steps 4–6. The schema is
+forward-compatible (no destructive change), so no down-migration is needed; a
+person layer with zero merges is behaviorally identical to 1.1.x.
+
 ## [1.1.0] — 2026-05-24
 
 ShipShow Score / leaderboard, member persona categorization, and a handful of
@@ -107,36 +236,68 @@ shipped migrations.
   cache hop was dead weight. `bbstat:leaderboard:*` keys are not produced
   by any current code path.
 
-### Operator notes
-
-- **No FLUSHDB required for this deploy.** The Redis-cached payload set is
-  unchanged — `UserSummary` shape is untouched, the leaderboard isn't
-  cached. The new `bbstat:bitbucket-auth-state` key lives in its own
-  namespace and survives across deploys intentionally.
-- **No `CACHE_VERSION` bump.** `WorkspaceMember` gained `scoreTrending` /
-  `consistency90d` / `badge` / `badgeTier` fields, but those landed
-  alongside the matching frontend code; the additive nature plus
-  always-fresh sort defaults mean stale persisted rows still render
-  correctly. (If you see odd behavior after upgrade, a
-  `localStorage.clear()` from the console resolves it.)
-- **First post-deploy step:** `make stack-migrate` (Drizzle picks up
-  `0001_overrated_james_howlett.sql` + `0002_sleepy_betty_ross.sql`). Then
-  either wait one commits-sync tick for `user_score` to populate
-  automatically, or kick it manually with `make recompute-user-scores`.
-
 ## [1.0.0] — 2026-05-21
 
-First tagged release. Foundations through Phase 4 follow-ups: BitBucket
-ingest pipeline (commits, PRs, diff-stats, deepen-backfill, is-merge
-backfill, adaptive backpressure), `commit_daily` rollup + Redis user-summary
-cache, dashboard (overview / top contributors / activity feed / heatmap /
-sparklines), Projects / Repositories / Members / Activity pages with
-filter interlock, SSE live-updates with polling fallback, full
-containerized deploy (compose split + distroless backend + nginx-unprivileged
-frontend + Traefik dev overlay), production tarball distribution, off-disk
-secret interpolation, `bbstat` Postgres schema namespace. See git history
-prior to v1.0.0 for the full commit set, and [`docs/ROADMAP.md`](docs/ROADMAP.md)
-for the phase-by-phase landed summary.
+First tagged release — the full ingest-to-dashboard pipeline through the
+Phase 4 follow-ups (per-developer scoring / leaderboard arrives in 1.1.0).
+Everything below is net-new; there is no prior release to diff against.
 
+### Added
+
+- **BitBucket ingest pipeline** — HTTP client with Basic auth
+  (`<email>:<api-token>`), exponential-backoff retries, 429-aware pacing off
+  `Retry-After`, and a self-counted call-budget ledger. Per-repo delta commit
+  pull keyed on `sync_state.last_seen_sha` so idle repos cost a single call;
+  pull-request ingest on the same cursor pattern; per-commit diff stats
+  (additions / deletions) on a newest-first global pickup. A self-queueing
+  deepen-backfill walks history backwards within the remaining budget, and
+  adaptive pacing doubles on every 429 to ride under BB Cloud's burst
+  limiter. Author resolution joins `commits.author_user_id` by BitBucket
+  UUID; unmatched commits stay anonymous, with a standalone
+  anonymous-commit sweep runner to re-attribute them once the author is known.
+- **Curated tracked set** — only repos in the `repositories` table are
+  ingested (untracked repos cost zero API calls). Seeded from
+  `tracked-repos.yaml` (hot-reloaded on every discovery sync) and grown via
+  `POST /api/admin/repositories`; archive / unarchive / hard-delete admin
+  endpoints manage the set, archive keeping history while stopping sync.
+- **Rollups + Redis user-summary cache** — a single
+  `commit_daily(day, repository_id, author_user_id, commit_count, additions,
+deletions)` base table backs every per-user / per-repo / per-project
+  aggregation as a SQL roll-up (no parallel summary tables). The expensive
+  per-user summary is cached in Redis (`bbstat:user-summary:{id}`, 1h TTL),
+  recomputed-then-invalidated after each sync so a read never serves a torn
+  value. `make rebuild-rollups` repairs drift on demand.
+- **Dashboard + detail pages** — overview stat cards, a Top Contributors
+  panel with a 7d / 30d window toggle and per-developer 30-day sparklines,
+  a unified commit + PR activity feed, and a 365-day contribution heatmap.
+  Standalone `/projects`, `/repositories`, `/members`, and `/activity` index
+  pages (search / sort / filter / paginate) plus `/users/:id`,
+  `/projects/:key`, and `/repositories/:ws/:slug` detail pages, all reachable
+  from the dashboard. Project↔repo filter interlock (pick a repo and its
+  project fills in; pick a project and the repo list trims). The Members page
+  carries an activity-status donut + a Lorenz/Gini commit-concentration curve;
+  git-author email is captured at ingest with a retroactive admin backfill.
+  Sync-health is surfaced as a per-repo state icon across every list and
+  detail page.
+- **Live updates** — Server-Sent Events push sync-tick / repository-change
+  events to open tabs, with a polling fallback when SSE is unavailable. Pinia
+  stores persist across reloads as an offline-first read cache, guarded by a
+  `CACHE_VERSION` boot-bust that wipes stale `bbstat-*` localStorage whenever
+  a persisted-store shape changes.
+- **Containerized deploy** — `compose.yaml` production base (migrate / backend
+  / sync / frontend) + `compose.override.yaml` dev overlay (postgres / redis /
+  Traefik). Multi-stage builds produce a distroless `node` backend and an
+  nginx-unprivileged frontend; one backend image serves all three roles via
+  `command:` overrides, with the migrate one-shot gating backend / sync through
+  `depends_on: service_completed_successfully`. Production tarball distribution
+  (`docker save` → `scp` → `docker load`), BitBucket credentials interpolated
+  from shell env (off-disk secrets), and every table under a dedicated
+  `bbstat` Postgres schema namespace.
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
+(Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
+commit set.
+
+[1.2.0]: https://github.com/tigerit/bbstat/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tigerit/bbstat/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/tigerit/bbstat/releases/tag/v1.0.0

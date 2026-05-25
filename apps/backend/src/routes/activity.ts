@@ -6,10 +6,19 @@
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import type { ActivityDailyFilters, ActivityFilters, StatsStore } from '../dashboard/stats-store.js';
+import type { ActivityActor, ActivityDailyFilters, ActivityFilters, StatsStore } from '../dashboard/stats-store.js';
 
 export interface ActivityRouteOptions {
   statsStore: StatsStore;
+}
+
+// Build the actor filter from the parsed query. `actorKind` defaults to
+// 'user' so the legacy `?actor=5` shape (no kind) still means "user 5" —
+// stale frontend caches keep working through a rolling deploy. A person
+// actor expands to its alias set inside the store SQL.
+function toActor(q: { actor?: number; actorKind?: 'user' | 'person' }): ActivityActor | null {
+  if (q.actor === undefined) return null;
+  return { kind: q.actorKind ?? 'user', id: q.actor };
 }
 
 // Activity feed query params. All filters are optional; bare `GET /api/activity`
@@ -23,6 +32,10 @@ export interface ActivityRouteOptions {
 // (`message_tsv`) and a cheap ILIKE on PR titles.
 const activityQuerySchema = z.object({
   actor: z.coerce.number().int().positive().optional(),
+  // Phase 5: discriminates whether `actor` is a users.id or a people.id.
+  // Defaults to 'user' in toActor() so omitting it preserves the legacy
+  // single-user behavior.
+  actorKind: z.enum(['user', 'person']).optional(),
   repo: z
     .string()
     .regex(/^[^/]+\/[^/]+$/, 'must be "<workspace>/<slug>"')
@@ -49,6 +62,7 @@ const activityQuerySchema = z.object({
 // slice?" regardless of the page's date window or text search.
 const activityDailyQuerySchema = z.object({
   actor: z.coerce.number().int().positive().optional(),
+  actorKind: z.enum(['user', 'person']).optional(),
   repo: z
     .string()
     .regex(/^[^/]+\/[^/]+$/, 'must be "<workspace>/<slug>"')
@@ -69,7 +83,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRouteOptions> = async (a
       repo = { workspace, slug };
     }
     const filters: ActivityFilters = {
-      actor: q.actor ?? null,
+      actor: toActor(q),
       repo,
       project: q.project ?? null,
       before: q.before !== undefined ? new Date(q.before) : null,
@@ -98,7 +112,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRouteOptions> = async (a
       repo = { workspace, slug };
     }
     const filters: ActivityFilters = {
-      actor: q.actor ?? null,
+      actor: toActor(q),
       repo,
       project: q.project ?? null,
       before: q.before !== undefined ? new Date(q.before) : null,
@@ -124,7 +138,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRouteOptions> = async (a
       repo = { workspace, slug };
     }
     const filters: ActivityDailyFilters = {
-      actor: q.actor ?? null,
+      actor: toActor(q),
       repo,
       project: q.project ?? null,
     };

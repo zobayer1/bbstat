@@ -1,13 +1,13 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import { api, type ActivityEntry } from '@/api/client';
+import { api, type ActivityActor, type ActivityEntry } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
 // Filter axes for the activity feed. The store keys its cache by the
 // serialized triple, so switching between an actor-filtered view and the
 // org-wide view doesn't blow away the data we already paginated.
 export interface ActivityFilters {
-  actor?: number;
+  actor?: ActivityActor;
   repo?: string; // "<workspace>/<slug>"
   project?: string;
 }
@@ -24,7 +24,9 @@ export const MAX_ENTRIES_PER_FILTER = 500;
 
 function keyFor(filters: ActivityFilters): string {
   return JSON.stringify({
-    actor: filters.actor ?? null,
+    // Serialize the discriminated actor so a person filter and a user
+    // filter with the same numeric id never collide on the same cache key.
+    actor: filters.actor === undefined ? null : `${filters.actor.kind}:${filters.actor.id}`,
     repo: filters.repo ?? null,
     project: filters.project ?? null,
   });
@@ -109,9 +111,18 @@ export const useActivityStore = defineStore('activity', () => {
     const keys = Object.keys(byKey.value);
     await Promise.all(
       keys.map((key) => {
-        const filters = JSON.parse(key) as { actor: number | null; repo: string | null; project: string | null };
+        const filters = JSON.parse(key) as { actor: string | null; repo: string | null; project: string | null };
         const restored: ActivityFilters = {};
-        if (filters.actor !== null) restored.actor = filters.actor;
+        if (filters.actor !== null) {
+          // Stored as "kind:id" (see keyFor) — split back into the
+          // discriminated actor.
+          const sep = filters.actor.indexOf(':');
+          const kind = filters.actor.slice(0, sep);
+          const id = Number(filters.actor.slice(sep + 1));
+          if ((kind === 'user' || kind === 'person') && Number.isFinite(id)) {
+            restored.actor = { kind, id };
+          }
+        }
         if (filters.repo !== null) restored.repo = filters.repo;
         if (filters.project !== null) restored.project = filters.project;
         return load(restored);
@@ -129,6 +140,17 @@ export const useActivityStore = defineStore('activity', () => {
     void applyTickComplete();
   });
   liveBus.on('repository.deleted', () => {
+    void applyTickComplete();
+  });
+  // Phase 5 — attach / detach / dissolve changes which commits a person
+  // filter resolves to, so any cached person-filtered feed must refetch.
+  liveBus.on('person.attached', () => {
+    void applyTickComplete();
+  });
+  liveBus.on('person.detached', () => {
+    void applyTickComplete();
+  });
+  liveBus.on('person.dissolved', () => {
     void applyTickComplete();
   });
   liveBus.onFallback(() => {

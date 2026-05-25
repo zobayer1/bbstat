@@ -11,7 +11,7 @@ import type {
   ProjectStats,
   RepoActivity,
   StatsStore,
-  TopContributorWithSparkline,
+  TopContributorEntity,
   UserSummary,
   WorkspaceMember,
 } from '../src/dashboard/stats-store.js';
@@ -173,9 +173,11 @@ describe('GET /api/stats/top-contributors', () => {
   });
 
   it('defaults to a 7-day window when no query param is given', async () => {
-    const contributors: TopContributorWithSparkline[] = [
+    const contributors: TopContributorEntity[] = [
       {
-        userId: 1,
+        entityKind: 'user',
+        entityId: 1,
+        attachedUserIds: [1],
         bitbucketUuid: '{u1}',
         displayName: 'Alice',
         commits: 42,
@@ -187,9 +189,11 @@ describe('GET /api/stats/top-contributors', () => {
         consistency90d: 0.42,
       },
       {
-        userId: 2,
+        entityKind: 'person',
+        entityId: 9,
+        attachedUserIds: [2, 7],
         bitbucketUuid: '{u2}',
-        displayName: 'Bob',
+        displayName: 'Bob (merged)',
         commits: 17,
         last30Days: new Array(30).fill(0),
         additionsWindow: 500,
@@ -251,6 +255,7 @@ describe('GET /api/stats/members', () => {
       email: 'alice@example.com',
       isWorkspaceMember: true,
       attachedUserIds: [1],
+      aliasSearch: 'Alice alice alice@example.com',
       commits7d: 12,
       repos7d: 3,
       commits30d: 45,
@@ -274,6 +279,7 @@ describe('GET /api/stats/members', () => {
       email: null,
       isWorkspaceMember: false,
       attachedUserIds: [2, 7],
+      aliasSearch: 'Bob bob bob@example.com Carol carol carol@example.com',
       commits7d: 0,
       repos7d: 0,
       commits30d: 0,
@@ -329,6 +335,7 @@ const sampleUserSummary: UserSummary = {
     badgeTier: 'gold',
     person: null,
   },
+  linkedAccounts: [],
   totals: {
     commits7d: 12,
     commits30d: 40,
@@ -451,6 +458,7 @@ describe('GET /api/stats/people/:personId/summary', () => {
         username: 'janew',
         email: 'jane.work@example.com',
         isPrimary: true,
+        lastActiveAt: '2026-05-20T10:00:00.000Z',
       },
       {
         id: 5,
@@ -459,6 +467,7 @@ describe('GET /api/stats/people/:personId/summary', () => {
         username: null,
         email: 'jane@personal.com',
         isPrimary: false,
+        lastActiveAt: '2026-03-11T08:00:00.000Z',
       },
     ],
     totals: {
@@ -526,22 +535,19 @@ describe('GET /api/stats/projects/:projectKey', () => {
   it('returns the project stats from the store', async () => {
     const project: ProjectStats = {
       project: 'COMM',
-      totals: { commits7d: 1, commits30d: 2, contributorCount7d: 3, repositoryCount: 4 },
+      totals: { commits7d: 1, commits30d: 2, contributorCount30d: 3, repositoryCount: 4 },
       dailyCommits: [{ date: '2026-05-12', commits: 2 }],
       topContributors: [
         {
-          userId: 1,
+          entityKind: 'user',
+          entityId: 1,
+          attachedUserIds: [1],
           bitbucketUuid: '{u1}',
           displayName: 'Alice',
           commits: 9,
           last30Days: new Array(30).fill(0),
           additions30d: 120,
           deletions30d: 45,
-          additionsWindow: 120,
-          deletionsWindow: 45,
-          reposWindow: 2,
-          momentum: null,
-          consistency90d: null,
         },
       ],
       repositories: [
@@ -599,18 +605,15 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
       diffStats: { additions7d: 0, deletions7d: 0, additions30d: 0, deletions30d: 0 },
       contributors: [
         {
-          userId: 1,
+          entityKind: 'user',
+          entityId: 1,
+          attachedUserIds: [1],
           bitbucketUuid: '{u1}',
           displayName: 'Alice',
           commits: 4,
           last30Days: [0, 1, 0, 3],
           additions30d: 0,
           deletions30d: 0,
-          additionsWindow: 0,
-          deletionsWindow: 0,
-          reposWindow: 1,
-          momentum: null,
-          consistency90d: null,
         },
       ],
     };
@@ -824,7 +827,7 @@ describe('GET /api/activity', () => {
 
     expect(res.statusCode).toBe(200);
     expect(getActivity).toHaveBeenCalledWith({
-      actor: 7,
+      actor: { kind: 'user', id: 7 },
       repo: { workspace: 'tigerit', slug: 'boing-server' },
       project: 'COMM',
       before: new Date('2026-05-12T18:00:00.000Z'),
@@ -834,6 +837,28 @@ describe('GET /api/activity', () => {
       limit: 25,
       offset: 200,
     });
+  });
+
+  it('maps actorKind=person to a person actor (expands to aliases in the store)', async () => {
+    const getActivity = vi.fn<(f: ActivityFilters) => Promise<ActivityEntry[]>>().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?actor=3&actorKind=person' });
+
+    expect(res.statusCode).toBe(200);
+    expect(getActivity).toHaveBeenCalledWith(expect.objectContaining({ actor: { kind: 'person', id: 3 } }));
+  });
+
+  it('defaults actorKind to user when actor is given without a kind (legacy clients)', async () => {
+    const getActivity = vi.fn<(f: ActivityFilters) => Promise<ActivityEntry[]>>().mockResolvedValue([]);
+    const statsStore = makeStatsStore({ getActivity });
+    appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
+
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?actor=5' });
+
+    expect(res.statusCode).toBe(200);
+    expect(getActivity).toHaveBeenCalledWith(expect.objectContaining({ actor: { kind: 'user', id: 5 } }));
   });
 
   it('lowercases the hashPrefix before passing it to the store', async () => {
@@ -939,7 +964,7 @@ describe('GET /api/activity-daily', () => {
 
     expect(res.statusCode).toBe(200);
     expect(getActivityDaily).toHaveBeenCalledWith({
-      actor: 7,
+      actor: { kind: 'user', id: 7 },
       repo: { workspace: 'tigerit', slug: 'boing-server' },
       project: 'COMM',
     });
@@ -989,7 +1014,7 @@ describe('GET /api/activity-count', () => {
     expect(res.statusCode).toBe(200);
     expect(getActivityCount).toHaveBeenCalledWith(
       expect.objectContaining({
-        actor: 7,
+        actor: { kind: 'user', id: 7 },
         repo: { workspace: 'tigerit', slug: 'r1' },
         project: 'COMM',
         after: new Date('2026-05-01T00:00:00.000Z'),

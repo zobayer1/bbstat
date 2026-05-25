@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
-import { api, type ActivityEntry } from '@/api/client';
+import { api, type ActivityActor, type ActivityEntry } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
 // Filter axes for the dedicated Activity page. Wider than the embedded
@@ -8,7 +8,7 @@ import { liveBus } from '@/lib/live';
 // the date-range bounds + commit-hash prefix + free-text message search.
 // Kept as a flat shape so URL <-> store wiring is mechanical.
 export interface ActivityPageFilters {
-  actor?: number;
+  actor?: ActivityActor;
   repo?: string;
   project?: string;
   after?: string; // ISO 8601, inclusive lower bound

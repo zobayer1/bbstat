@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { useRoute, useRouter, RouterLink } from 'vue-router';
+import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import { useProjectStatsStore } from '@/stores/projectStats';
 import { useStatsStore } from '@/stores/stats';
 import { useActivityFilters } from '@/composables/useActivityFilters';
+import { useActorFilter } from '@/composables/useActorFilter';
 
 const route = useRoute();
-const router = useRouter();
 const store = useProjectStatsStore();
 const globalStats = useStatsStore();
 
@@ -40,10 +41,6 @@ const { repoModel: filterRepo, repoOptions: repoFilterOptions } = useActivityFil
   pinProject: () => projectKey.value,
 });
 
-// User dropdown reads from the project's own top contributors — more
-// relevant than the workspace-wide leaderboard.
-const userOptions = computed(() => stats.value?.topContributors ?? []);
-
 // Workspace of any repo in the project. Picking the first one is
 // safe — the tracked set is single-workspace per deployment per
 // CLAUDE.md, and a BB project always lives inside exactly one
@@ -62,15 +59,7 @@ function localDateString(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
-const filterActor = computed<number | undefined>({
-  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
-  set: (v) => {
-    const next = { ...route.query };
-    if (v === undefined) delete next.actor;
-    else next.actor = String(v);
-    void router.replace({ query: next });
-  },
-});
+const filterActor = useActorFilter();
 
 const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
 
@@ -122,7 +111,7 @@ const pagedRepositories = computed(() => {
       <section class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Commits — last 7 days" :value="stats.totals.commits7d" />
         <StatCard label="Commits — last 30 days" :value="stats.totals.commits30d" />
-        <StatCard label="Active contributors — 7d" :value="stats.totals.contributorCount7d" />
+        <StatCard label="Active contributors — 30d" :value="stats.totals.contributorCount30d" />
         <StatCard label="Repositories" :value="stats.totals.repositoryCount" />
       </section>
 
@@ -220,16 +209,32 @@ const pagedRepositories = computed(() => {
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Contributors — last 30 days</h2>
         <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
           <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
-            <li v-for="(c, i) in stats.topContributors" :key="c.bitbucketUuid">
+            <li v-for="(c, i) in stats.topContributors" :key="`${c.entityKind}:${c.entityId}`">
+              <!-- Person rows link to /people/:id, user rows to /users/:id.
+                   Name follows the dashboard Top Contributors pattern:
+                   truncate + ×N merged pill when a person has >1 alias. -->
               <RouterLink
-                :to="{ name: 'user', params: { userId: c.userId } }"
+                :to="
+                  c.entityKind === 'person'
+                    ? { name: 'person', params: { personId: c.entityId } }
+                    : { name: 'user', params: { userId: c.entityId } }
+                "
                 class="group flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
               >
-                <div class="flex items-center gap-3">
+                <div class="flex min-w-0 items-center gap-3">
                   <span class="w-5 shrink-0 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-                  <span class="text-sm font-medium text-slate-900">{{ c.displayName }}</span>
+                  <span class="flex min-w-0 items-center gap-1.5 text-sm font-medium text-slate-900">
+                    <span class="truncate" :title="c.displayName">{{ c.displayName }}</span>
+                    <span
+                      v-if="c.entityKind === 'person' && c.attachedUserIds.length > 1"
+                      class="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
+                      :title="`Merged from ${c.attachedUserIds.length} BitBucket accounts`"
+                    >
+                      ×{{ c.attachedUserIds.length }}
+                    </span>
+                  </span>
                 </div>
-                <div class="flex items-center gap-3">
+                <div class="flex shrink-0 items-center gap-3">
                   <Sparkline
                     :points="c.last30Days ?? []"
                     :width="128"
@@ -275,17 +280,8 @@ const pagedRepositories = computed(() => {
               </select>
             </label>
             <label for="project-filter-user" class="flex items-center gap-1">
-              <span class="text-slate-500">User:</span>
-              <select
-                id="project-filter-user"
-                v-model.number="filterActor"
-                name="project-filter-user"
-                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-                aria-label="Filter by user"
-              >
-                <option :value="undefined">All</option>
-                <option v-for="u in userOptions" :key="u.userId" :value="u.userId">{{ u.displayName }}</option>
-              </select>
+              <span class="text-slate-500">Contributor:</span>
+              <ActorPicker id="project-filter-user" v-model="filterActor" />
             </label>
           </div>
         </div>

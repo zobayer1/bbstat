@@ -20,7 +20,30 @@
 // the `entityKind` / `entityId` / `attachedUserIds` discriminated shape,
 // and UserSummary.user gained the `person` field. New persisted store
 // `personSummary` also participates via the global prefix.
-export const CACHE_VERSION = 14;
+//
+// 15: the dashboard `stats` store's `topContributors` switched from the
+// per-user TopContributorWithSparkline to the person-aware
+// TopContributorEntity (`entityKind` / `entityId` / `attachedUserIds`).
+//
+// 16: WorkspaceMember gained `aliasSearch` (search-only blob of every
+// linked alias's name/username/email) so a merged person is findable
+// by any account, not just the primary.
+//
+// 17: PersonSummary.attachedUsers rows gained `lastActiveAt` (per-alias
+// MAX(authored_at)) for the Person page's Attached-accounts table.
+//
+// 18: UserSummary gained `linkedAccounts` (sibling aliases of a merged
+// person, self excluded) for the Linked-accounts table on /users/:id.
+//
+// 19: RepoActivity.contributors switched from the per-user RepoContributor
+// to the person-aware RepoContributorEntity (`entityKind` / `entityId` /
+// `attachedUserIds`) so the repo-detail list + contributor count collapse
+// a person's aliases into one row.
+//
+// 20: ProjectStats — totals.contributorCount7d → contributorCount30d, and
+// topContributors switched to the person-aware RepoContributorEntity. Repo
+// table contributors30d is now an entity-distinct count (no shape change).
+export const CACHE_VERSION = 20;
 
 // localStorage key holding the integer above as a string. Lives outside
 // the `bbstat-` prefix so the bust function doesn't wipe its own sentinel

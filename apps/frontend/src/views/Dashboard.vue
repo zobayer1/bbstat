@@ -4,10 +4,12 @@ import { RouterLink, useRoute, useRouter } from 'vue-router';
 import StatCard3D from '@/components/StatCard3D.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useStatsStore } from '@/stores/stats';
 import { useActivityFilters } from '@/composables/useActivityFilters';
+import { useActorFilter } from '@/composables/useActorFilter';
 import { api, type ContributorWindow } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
@@ -44,18 +46,8 @@ onUnmounted(() => {
 
 // Filter state is URL-synced (router.replace, no history entries) so deep
 // links work — e.g. /?actor=42&repo=tigerit/foo lands on a pre-filtered
-// view. Bare values get omitted from the query string when cleared.
-function setQueryParam(key: string, value: string | number | undefined) {
-  const next = { ...route.query };
-  if (value === undefined || value === '') delete next[key];
-  else next[key] = String(value);
-  void router.replace({ query: next });
-}
-
-const filterActor = computed<number | undefined>({
-  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
-  set: (v) => setQueryParam('actor', v),
-});
+// view. The actor filter (user or person) is owned by useActorFilter.
+const filterActor = useActorFilter();
 // Project + repo share a single composable that owns the URL sync and
 // the project↔repo interlock (picking a repo auto-fills its project;
 // picking a project trims the repo dropdown and clears a now-mismatched
@@ -76,6 +68,7 @@ const filtersActive = computed(
 function clearFilters() {
   const next = { ...route.query };
   delete next.actor;
+  delete next.actorKind;
   delete next.repo;
   delete next.project;
   void router.replace({ query: next });
@@ -435,17 +428,8 @@ const topRepos = computed(() =>
             </select>
           </label>
           <label for="dashboard-filter-user" class="flex items-center gap-1">
-            <span class="text-slate-500">User:</span>
-            <select
-              id="dashboard-filter-user"
-              v-model.number="filterActor"
-              name="dashboard-filter-user"
-              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-              aria-label="Filter by user"
-            >
-              <option :value="undefined">All</option>
-              <option v-for="c in stats.topContributors" :key="c.userId" :value="c.userId">{{ c.displayName }}</option>
-            </select>
+            <span class="text-slate-500">Contributor:</span>
+            <ActorPicker id="dashboard-filter-user" v-model="filterActor" />
           </label>
           <button
             v-if="filtersActive"
@@ -467,18 +451,30 @@ const topRepos = computed(() =>
       >
         <div :style="{ height: ACTIVITY_PANEL_HEIGHT, overflowY: 'hidden' }">
           <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
-            <li v-for="(c, i) in stats.topContributors" :key="c.bitbucketUuid">
+            <li v-for="(c, i) in stats.topContributors" :key="`${c.entityKind}:${c.entityId}`">
               <!-- Whole row is one link target — `group` lives on the
                    RouterLink so descendant `group-hover:*` variants still
                    match on hover, and the row gets a soft slate-50 wash so
-                   it reads as clickable everywhere, not just on the name. -->
+                   it reads as clickable everywhere, not just on the name.
+                   Person rows link to /people/:id, user rows to /users/:id. -->
               <RouterLink
-                :to="{ name: 'user', params: { userId: c.userId } }"
+                :to="
+                  c.entityKind === 'person'
+                    ? { name: 'person', params: { personId: c.entityId } }
+                    : { name: 'user', params: { userId: c.entityId } }
+                "
                 class="group flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
               >
                 <span class="w-5 shrink-0 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-                <span class="w-48 shrink-0 truncate text-sm font-medium text-slate-900" :title="c.displayName">
-                  {{ c.displayName }}
+                <span class="flex w-48 shrink-0 items-center gap-1.5 truncate text-sm font-medium text-slate-900">
+                  <span class="truncate" :title="c.displayName">{{ c.displayName }}</span>
+                  <span
+                    v-if="c.entityKind === 'person' && c.attachedUserIds.length > 1"
+                    class="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
+                    :title="`Merged from ${c.attachedUserIds.length} BitBucket accounts`"
+                  >
+                    ×{{ c.attachedUserIds.length }}
+                  </span>
                 </span>
                 <!-- Vertical dividers flank the share bar — same height as
                    the bar, same `gap-3` spacing on both sides — so the bar

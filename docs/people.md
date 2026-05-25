@@ -109,46 +109,119 @@ flag swap and skips the recompute / cache bust.
 | `POST /people/:id/primary` | `{ userId }`                       | Atomic primary swap (no recompute).                                                                        |
 | `DELETE /people/:id`       | —                                  | Dissolve: clear `person_id` on all aliases, cascade-delete `person_score`.                                 |
 
-### First-merge recipe
+### Merge recipe (curl)
+
+Set `BASE` once. In dev it's the host backend; in containerized prod it's
+the same path behind the deployer's reverse proxy (there's no script-only
+variant, unlike the rollup / sweep one-shots).
 
 ```bash
-BASE=https://bbstat.localhost:8443/api/admin/people
+BASE=https://bbstat.localhost:8443/api/admin/people   # dev
+# BASE=https://bbstat.onudaan.com/api/admin/people    # prod
 
-# 1. Find the duplicate identities via the /members name/email search.
-#    Note the two users.id values (say 4 = corp, 5 = personal).
-
-# 2. Create the person, attaching the corp account as primary.
-PID=$(curl -ks -X POST "$BASE" -H 'content-type: application/json' \
-  -d '{"displayName":"Jane Doe","primaryUserId":4}' | jq -r .id)
-
-# 3. Attach the second account.
-curl -ks -X POST "$BASE/$PID/attach" -H 'content-type: application/json' \
-  -d '{"userId":5}'
-
-# 4. (optional) move primary to the personal account.
-curl -ks -X POST "$BASE/$PID/primary" -H 'content-type: application/json' \
-  -d '{"userId":5}'
-
-# Undo entirely:
-curl -ks -X DELETE "$BASE/$PID"
+# 0. Find the duplicate identities via the /members name/email search.
+#    Note the users.id values — say 4 = corp account, 5 = personal account.
+#    (You can also list every user the API knows via the members endpoint:)
+#    curl -ks https://bbstat.localhost:8443/api/stats/members | jq '.[] | {entityId, displayName, email}'
 ```
 
-In the containerized prod stack these are reached through the deployer's
-reverse proxy at the same `/api/admin/people` paths; there's no
-script-only variant (unlike the rollup / sweep one-shots).
+**Create the person with a canonical name + designate the primary in one
+call.** `primaryUserId` first-attaches that alias _and_ flags it primary,
+so the person's display name, avatar, and mailto default to it:
+
+```bash
+PID=$(curl -ks -X POST "$BASE" -H 'content-type: application/json' \
+  -d '{"displayName":"Jane Doe","primaryUserId":4}' | jq -r .id)
+echo "created person $PID"
+```
+
+**Attach the other alias.** Default keeps the existing primary (alias 4):
+
+```bash
+curl -ks -X POST "$BASE/$PID/attach" -H 'content-type: application/json' \
+  -d '{"userId":5}' | jq
+```
+
+Attach **and** make this one primary in a single call (use when the alias
+you're adding should be the canonical face):
+
+```bash
+curl -ks -X POST "$BASE/$PID/attach" -H 'content-type: application/json' \
+  -d '{"userId":5,"makePrimary":true}' | jq
+```
+
+**Naming variants:**
+
+```bash
+# Rename later (operator-canonical name beats the primary alias's name):
+curl -ks -X PATCH "$BASE/$PID" -H 'content-type: application/json' \
+  -d '{"displayName":"Jane Q. Doe"}' | jq
+
+# Clear the override so the UI falls back to the primary alias's name:
+curl -ks -X PATCH "$BASE/$PID" -H 'content-type: application/json' \
+  -d '{"displayName":null}' | jq
+
+# Create without a name (display falls back to primary alias) but still set primary:
+curl -ks -X POST "$BASE" -H 'content-type: application/json' \
+  -d '{"primaryUserId":4}' | jq
+```
+
+**Swap the primary** without changing attribution (UI-only flag, no
+recompute):
+
+```bash
+curl -ks -X POST "$BASE/$PID/primary" -H 'content-type: application/json' \
+  -d '{"userId":5}' | jq
+```
+
+**Inspect / undo:**
+
+```bash
+curl -ks "$BASE/$PID" | jq               # one person + full alias roster
+curl -ks "$BASE" | jq                    # every person
+curl -ks -X POST "$BASE/$PID/detach" -H 'content-type: application/json' \
+  -d '{"userId":5}' | jq                 # detach one alias (person survives)
+curl -ks -X DELETE "$BASE/$PID" | jq     # dissolve entirely → {detachedUserIds:[…]}
+```
+
+**Errors worth knowing:** attaching a user already on another person →
+`409 user_already_attached` (one user maps to ≤1 person); detaching a user
+not on this person → `400 user_not_attached_to_person`; a bad person id →
+`404 person_not_found`.
 
 ## Frontend surface
+
+Person-awareness reaches **every** contributor surface (1.2.0) — a merged
+person collapses its aliases everywhere it's counted, never just on one
+page. The shared `×N` violet pill + `/people/:id` link pattern is reused
+on every list.
 
 - **`/members`** — person rows carry a violet `merged ×N` pill and link
   to `/people/:id`; unattached users link to `/users/:id`. The
   Lorenz/Gini + activity-status charts derive from the unified entity
-  list, so concentration reflects the merged reality.
+  list, so concentration reflects the merged reality. `aliasSearch` makes
+  a merged person findable by **any** linked account's name / username /
+  email, not just the primary. The page also carries an activity feed.
+- **Dashboard Top Contributors** — keys on the merged entity
+  (`TopContributorEntity`), so a person appears once with the `×N` pill.
+- **`/repositories/:ws/:slug`** — the "Contributors — last 30 days" list
+  and the contributor stat card are entity-keyed
+  (`RepoContributorEntity`); aliases that both touched the repo collapse.
+- **`/projects/:key`** — the "Contributors — last 30 days" table, the
+  "Active contributors — 30d" stat card, and the repositories table's
+  per-repo "Contributors — 30d" column are all entity-distinct.
+- **Activity (`/activity` + every embedded feed)** — the `ActorPicker`
+  filter and `/api/activity*` accept a person _or_ user actor; a person
+  expands server-side across all aliases. The page title chip resolves
+  either entity kind identically.
 - **`/people/:id`** (`apps/frontend/src/views/Person.vue`) — aggregated
-  detail: stat cards, 365-day commit heatmap, top-repos table, and an
-  "Attached accounts" panel listing each alias (with primary badge) that
-  links through to its `/users/:id` page.
-- **`/users/:id`** — gains a "Part of: <person>" banner when the account
-  is attached.
+  detail: stat cards, 365-day commit heatmap, top-repos table, the
+  unified commit+PR activity feed (expanded across aliases), and an
+  "Attached accounts" panel listing each alias (primary badge + per-alias
+  **Last active**) linking through to its `/users/:id` page.
+- **`/users/:id`** — gains a "Part of: <person>" link by the name when
+  attached, plus a "Linked accounts" table of the sibling aliases with
+  the canonical-person link in its footer.
 - **Live updates** — the six `person.*` SSE events
   (`created` / `updated` / `attached` / `detached` / `primary-changed` /
   `dissolved`) re-fetch the Members store and the keyed person-summary
@@ -156,30 +229,32 @@ script-only variant (unlike the rollup / sweep one-shots).
 
 ## When you change a person-facing shape
 
-`WorkspaceMember`, `UserSummary.user.person`, and `PersonSummary` are
-mirrored between `apps/backend/src/dashboard/stats-store.ts` and
+`WorkspaceMember`, `UserSummary` (incl. `user.person` + `linkedAccounts`),
+`PersonSummary`, `TopContributorEntity`, and `RepoContributorEntity` (used
+by both `RepoActivity.contributors` and `ProjectStats.topContributors`)
+are mirrored between `apps/backend/src/dashboard/stats-store.ts` and
 `apps/frontend/src/api/client.ts`. On any shape change:
 
 1. Update both mirrors in lockstep.
 2. Bump `CACHE_VERSION` in `apps/frontend/src/lib/cache-version.ts` (the
    Pinia persisted stores `members` + `personSummary` cache these
    payloads — a stale shape renders `undefined`).
-3. `docker compose exec redis redis-cli FLUSHDB` after deploy if the
-   change touches a `bbstat:*` Redis-cached payload (today: `UserSummary`
-   via the user-summary cache; `PersonSummary` is uncached for now).
+3. Clear the affected Redis cache **by prefix** after deploy if the change
+   touches a `bbstat:*` Redis-cached payload (today: `UserSummary` via the
+   user-summary cache; `PersonSummary` is uncached for now). The managed
+   Redis is shared, so **never `FLUSHDB`** — scope it:
+   `redis-cli -u "$REDIS_URL" --scan --pattern 'bbstat:user-summary:*' | xargs -r redis-cli -u "$REDIS_URL" UNLINK`
+   (this also preserves `bbstat:bitbucket-auth-state`, which survives deploys).
 
 See [`docs/frontend-cache.md`](frontend-cache.md) for the `CACHE_VERSION`
 mechanism.
 
-## Deferred (out of Phase 5 scope)
+## Deferred (still out of scope)
 
-- **Per-person activity feed** — `/api/activity` filters by a single
-  `actor` (user_id). A person feed needs multi-actor support; the Person
-  page ships without the unified commit+PR stream for now.
-- **Top Contributors person-awareness** — the dashboard panel
-  (`getTopContributors`) still groups per user, so a merged person's
-  aliases appear as separate rows there. Only the `/members` leaderboard
-  is person-aware.
+The two read-path deferrals from the original Phase 5 commits — per-person
+activity feed and Top Contributors person-awareness — **landed in 1.2.0**
+(see Frontend surface above). What's left:
+
 - **`bbstat:person-summary:*` Redis cache** — `/api/stats/people/:id/summary`
   reads through to Postgres on every request. Cheap at current scale;
   mirror the user-summary cache pattern (and DEL from

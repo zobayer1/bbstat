@@ -50,7 +50,9 @@ const pr: ActivityEntry = {
   occurredAt: '2026-05-12T14:00:00.000Z',
 };
 
-async function mountFeed(filters: { actor?: number; repo?: string; project?: string } = {}) {
+async function mountFeed(
+  filters: { actor?: { kind: 'user' | 'person'; id: number }; repo?: string; project?: string } = {},
+) {
   const w = mount(ActivityFeed, {
     props: filters,
     global: {
@@ -117,9 +119,9 @@ describe('ActivityFeed', () => {
   it('forwards filter props into the API call', async () => {
     vi.mocked(api.activity).mockResolvedValueOnce([]);
 
-    await mountFeed({ actor: 7, repo: 'tigerit/r1' });
+    await mountFeed({ actor: { kind: 'user', id: 7 }, repo: 'tigerit/r1' });
 
-    expect(api.activity).toHaveBeenCalledWith({ actor: 7, repo: 'tigerit/r1', limit: 50 });
+    expect(api.activity).toHaveBeenCalledWith({ actor: { kind: 'user', id: 7 }, repo: 'tigerit/r1', limit: 50 });
   });
 
   it('renders an uppercase state badge for PR entries', async () => {

@@ -41,31 +41,27 @@ export interface LatestCommit {
   authorBitbucketUuid: string | null;
 }
 
-export interface TopContributor {
-  userId: number;
-  bitbucketUuid: string;
+// Phase 5 — the Dashboard org-wide Top Contributors panel row, keyed on
+// the merged entity (person or unattached user). Mirror of
+// TopContributorEntity in apps/backend/src/dashboard/stats-store.ts.
+// Carries a 30-day commit sparkline + window-scoped adds/dels and the
+// ShipShow Score signals the Dashboard sorts + renders by. The per-repo /
+// per-project lists use the trimmed RepoContributorEntity variant.
+export interface TopContributorEntity {
+  entityKind: 'user' | 'person';
+  entityId: number;
+  // Primary-first attached user_ids (length 1 for user rows). The
+  // Dashboard activity-filter dropdown filters by attachedUserIds[0]
+  // since the activity feed is single-actor — persons resolve to their
+  // primary alias until multi-actor filtering lands.
+  attachedUserIds: number[];
+  bitbucketUuid: string | null;
   displayName: string;
   commits: number;
-}
-
-// Phase 4 T24 — top-contributors leaderboard rows additionally carry a
-// 30-day per-day commit-count series for the sparkline on the Dashboard's
-// Top Contributors panel. Project / repo contributor lists stay on the
-// base shape.
-export interface TopContributorWithSparkline extends TopContributor {
   last30Days: number[];
-  // Adds / dels for the same window as `commits` (merges excluded).
   additionsWindow: number;
   deletionsWindow: number;
-  // Distinct repos this contributor landed code in over the same
-  // window. Mirrors the Members table's "Repos" column.
   reposWindow: number;
-  // ShipShow Score signals (docs/scoring.md). Server orders the list
-  // by `momentum DESC NULLS LAST` so the Dashboard panel surfaces the
-  // top-of-the-cohort regardless of window-scoped commit count; the
-  // per-row bar normalises consistency relative to the displayed
-  // group. Both fields may be null for users whose user_score row
-  // hasn't landed yet, or for cold-start consistency.
   momentum: number | null;
   consistency90d: number | null;
 }
@@ -96,6 +92,18 @@ export interface UserSummary {
     // banner linking to /people/:id. Null when unattached.
     person: { id: number; displayName: string } | null;
   };
+  // Phase 5 — sibling aliases merged into the same person (this account
+  // excluded). Empty for an unattached user. Same shape as
+  // PersonSummary.attachedUsers; drives the "Linked accounts" table.
+  linkedAccounts: Array<{
+    id: number;
+    bitbucketUuid: string;
+    displayName: string;
+    username: string | null;
+    email: string | null;
+    isPrimary: boolean;
+    lastActiveAt: string | null;
+  }>;
   totals: {
     commits7d: number;
     commits30d: number;
@@ -124,19 +132,22 @@ export interface ProjectStats {
   totals: {
     commits7d: number;
     commits30d: number;
-    contributorCount7d: number;
+    // Phase 5: distinct contributors over 30d, person-aware (a merged
+    // person's aliases collapse to one).
+    contributorCount30d: number;
     repositoryCount: number;
   };
   dailyCommits: Array<{ date: string; commits: number }>;
-  // Project-scoped contributor table — same enriched shape as the
-  // repo detail page's per-repo contributors (30-day sparkline + adds /
-  // dels excluding merges) so both pages reuse the same row layout.
-  topContributors: RepoContributor[];
+  // Project-scoped contributor table — Phase 5 person-aware, same
+  // entity-keyed shape as the repo detail page's contributors so both
+  // pages reuse the same row layout + merged-name pattern.
+  topContributors: RepoContributorEntity[];
   repositories: Array<{
     workspace: string;
     slug: string;
     fullName: string;
     commits30d: number;
+    // Phase 5: per-repo distinct contributors, person-aware.
     contributors30d: number;
     lastCommitAt: string | null;
     syncStatus: RepoSyncStatus;
@@ -170,15 +181,26 @@ export interface RepoActivity {
     additions30d: number;
     deletions30d: number;
   };
-  // Sparkline `last30Days` is scoped to this repo (this user's commits in
-  // this repo, day-by-day over the trailing 30 days). Same shape as the
-  // dashboard's top-contributors list so the Sparkline component renders
-  // unchanged. Diff-stat fields are 30-day, exclude merges, read zero
-  // when no diff-stat fetch has landed for any of this user's commits.
-  contributors: RepoContributor[];
+  // Phase 5: contributors are keyed on the merged ENTITY (person or
+  // unattached user) — a person's aliases that both touched this repo
+  // collapse into one row, so the count + list are person-aware. Sparkline
+  // `last30Days` is repo-scoped (this entity's commits in this repo,
+  // day-by-day over the trailing 30 days). Diff-stat fields are 30-day,
+  // exclude merges, read zero when no diff-stat fetch has landed yet.
+  contributors: RepoContributorEntity[];
 }
 
-export interface RepoContributor extends TopContributorWithSparkline {
+// Phase 5 — mirror of RepoContributorEntity in the backend stats-store.
+// Repo-detail contributor row keyed on the merged entity; the ×N pill +
+// person/user link follow the dashboard Top Contributors pattern.
+export interface RepoContributorEntity {
+  entityKind: 'user' | 'person';
+  entityId: number;
+  attachedUserIds: number[];
+  bitbucketUuid: string | null;
+  displayName: string;
+  commits: number;
+  last30Days: number[];
   additions30d: number;
   deletions30d: number;
 }
@@ -218,6 +240,10 @@ export interface WorkspaceMember {
   // rows; ≥1 for person rows. Drives the "merged from N accounts" pill
   // and lets SSE handlers know which per-user caches to drop.
   attachedUserIds: number[];
+  // Search-only — every attached alias's name / username / email
+  // concatenated, so a merged person is findable by any linked account.
+  // A Fuse key on the Members table + ActorPicker; never rendered.
+  aliasSearch: string;
   // Both windows ship in every row so the table can render
   // `{commits} ({repos})` cells side-by-side for 7d and 30d without
   // re-fetching on toggle.
@@ -262,6 +288,7 @@ export interface PersonSummary {
     username: string | null;
     email: string | null;
     isPrimary: boolean;
+    lastActiveAt: string | null;
   }>;
   totals: {
     commits7d: number;
@@ -360,11 +387,18 @@ export interface RepoContributorBreakdown {
   fullName: string;
   project: string | null;
   commits: number;
-  contributors: Array<{ userId: number; displayName: string; commits: number }>;
+  // Phase 5 — bands keyed per entity (a merged person's aliases collapse
+  // into one band). The sunburst renders displayName + commits only.
+  contributors: Array<{ entityKind: 'user' | 'person'; entityId: number; displayName: string; commits: number }>;
 }
 
+// Phase 5 — the activity actor filter. A 'user' matches one users.id;
+// a 'person' expands server-side to every alias attached to the person.
+// Mirror of ActivityActor in apps/backend/src/dashboard/stats-store.ts.
+export type ActivityActor = { kind: 'user' | 'person'; id: number };
+
 export interface ActivityQuery {
-  actor?: number;
+  actor?: ActivityActor;
   repo?: string; // "<workspace>/<slug>"
   project?: string;
   before?: string; // ISO 8601 — cursor / range upper bound (exclusive)
@@ -382,7 +416,12 @@ export interface ActivityQuery {
 // can't drift on which params they include.
 function encodeActivityQuery(query: ActivityQuery): string {
   const params = new URLSearchParams();
-  if (query.actor !== undefined) params.set('actor', String(query.actor));
+  if (query.actor !== undefined) {
+    params.set('actor', String(query.actor.id));
+    // Omit actorKind for 'user' to keep the common URL compact and
+    // backward-compatible (?actor=5); only emit it for persons.
+    if (query.actor.kind === 'person') params.set('actorKind', 'person');
+  }
   if (query.repo !== undefined) params.set('repo', query.repo);
   if (query.project !== undefined) params.set('project', query.project);
   if (query.before !== undefined) params.set('before', query.before);
@@ -403,7 +442,7 @@ export const api = {
       `/api/stats/repositories/${encodeURIComponent(workspace)}/${encodeURIComponent(slug)}/latest-commit`,
     ),
   topContributors: (window: ContributorWindow = '7d') =>
-    request<TopContributorWithSparkline[]>(`/api/stats/top-contributors?window=${window}`),
+    request<TopContributorEntity[]>(`/api/stats/top-contributors?window=${window}`),
   userSummary: (userId: number) => request<UserSummary>(`/api/stats/users/${userId}/summary`),
   personSummary: (personId: number) => request<PersonSummary>(`/api/stats/people/${personId}/summary`),
   projectStats: (projectKey: string) => request<ProjectStats>(`/api/stats/projects/${encodeURIComponent(projectKey)}`),
@@ -424,9 +463,12 @@ export const api = {
     return request<RepoContributorBreakdown[]>(`/api/stats/repo-contributors${qs.length > 0 ? `?${qs}` : ''}`);
   },
   members: () => request<WorkspaceMember[]>('/api/stats/members'),
-  activityDaily: (query: { actor?: number; repo?: string; project?: string } = {}) => {
+  activityDaily: (query: { actor?: ActivityActor; repo?: string; project?: string } = {}) => {
     const params = new URLSearchParams();
-    if (query.actor !== undefined) params.set('actor', String(query.actor));
+    if (query.actor !== undefined) {
+      params.set('actor', String(query.actor.id));
+      if (query.actor.kind === 'person') params.set('actorKind', 'person');
+    }
     if (query.repo !== undefined) params.set('repo', query.repo);
     if (query.project !== undefined) params.set('project', query.project);
     const qs = params.toString();

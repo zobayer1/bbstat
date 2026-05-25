@@ -31,18 +31,27 @@ export interface UseActivityFiltersOptions {
   // this project regardless of the URL `?project=` value. Used on
   // project-detail pages where the project is fixed by the route.
   pinProject?: () => string | undefined;
+  // Optional custom query-param keys for the project / repo axes. Lets a
+  // page that already uses `?project` for a different control (e.g. the
+  // Repositories table's project filter) host an independent activity
+  // filter pair without colliding on the URL. Defaults to project / repo.
+  queryKeys?: { project?: string; repo?: string };
 }
 
 export function useActivityFilters(opts: UseActivityFiltersOptions) {
   const route = useRoute();
   const router = useRouter();
+  const pKey = opts.queryKeys?.project ?? 'project';
+  const rKey = opts.queryKeys?.repo ?? 'repo';
 
-  const filterProject = computed<string | undefined>(() =>
-    typeof route.query.project === 'string' && route.query.project !== '' ? route.query.project : undefined,
-  );
-  const filterRepo = computed<string | undefined>(() =>
-    typeof route.query.repo === 'string' && route.query.repo !== '' ? route.query.repo : undefined,
-  );
+  const filterProject = computed<string | undefined>(() => {
+    const raw = route.query[pKey];
+    return typeof raw === 'string' && raw !== '' ? raw : undefined;
+  });
+  const filterRepo = computed<string | undefined>(() => {
+    const raw = route.query[rKey];
+    return typeof raw === 'string' && raw !== '' ? raw : undefined;
+  });
 
   const projectOptions = computed<string[]>(() => {
     const set = new Set<string>();
@@ -59,21 +68,21 @@ export function useActivityFilters(opts: UseActivityFiltersOptions) {
 
   function setProject(v: string | undefined): void {
     const next = { ...route.query };
-    if (v === undefined || v === '') delete next.project;
-    else next.project = v;
+    if (v === undefined || v === '') delete next[pKey];
+    else next[pKey] = v;
     // Interlock: if the new project doesn't include the current repo,
     // drop the repo selection so the dropdowns stay coherent.
-    if (v !== undefined && v !== '' && typeof next.repo === 'string') {
-      const repo = opts.repositories.value.find((r) => r.fullName === next.repo);
-      if (repo && repo.project !== v) delete next.repo;
+    if (v !== undefined && v !== '' && typeof next[rKey] === 'string') {
+      const repo = opts.repositories.value.find((r) => r.fullName === next[rKey]);
+      if (repo && repo.project !== v) delete next[rKey];
     }
     void router.replace({ query: next });
   }
 
   function setRepo(v: string | undefined): void {
     const next = { ...route.query };
-    if (v === undefined || v === '') delete next.repo;
-    else next.repo = v;
+    if (v === undefined || v === '') delete next[rKey];
+    else next[rKey] = v;
     // Interlock: auto-select the chosen repo's project so the project
     // dropdown reflects reality (a repo belongs to exactly one project).
     // Skip when `pinProject` is set — the project is already known to
@@ -81,8 +90,8 @@ export function useActivityFilters(opts: UseActivityFiltersOptions) {
     // adds redundant noise.
     if (v !== undefined && v !== '' && opts.pinProject === undefined) {
       const repo = opts.repositories.value.find((r) => r.fullName === v);
-      if (repo?.project !== null && repo?.project !== undefined && repo.project !== next.project) {
-        next.project = repo.project;
+      if (repo?.project !== null && repo?.project !== undefined && repo.project !== next[pKey]) {
+        next[pKey] = repo.project;
       }
     }
     void router.replace({ query: next });

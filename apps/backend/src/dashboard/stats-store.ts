@@ -36,38 +36,32 @@ export interface LatestCommit {
   authorBitbucketUuid: string | null;
 }
 
-export interface TopContributor {
-  userId: number;
-  bitbucketUuid: string;
+// Phase 5 — the dashboard org-wide Top Contributors panel row, plus the
+// per-repo / per-project contributor lists (RepoContributorEntity is a
+// trimmed variant). Keyed on the merged entity (person or unattached
+// user) rather than a bare user_id, so a merged person appears once
+// instead of as N alias rows. Carries a 30-day commit sparkline +
+// window-scoped adds/dels (commit_daily already excludes merges) and the
+// ShipShow Score fields the Dashboard sorts + renders by.
+export interface TopContributorEntity {
+  // 'user' → unattached user; entityId is users.id; link to /users/:id.
+  // 'person' → merged person; entityId is people.id; link to /people/:id.
+  entityKind: 'user' | 'person';
+  entityId: number;
+  // Primary-first attached user_ids. Length 1 for user rows. The
+  // dashboard activity-filter dropdown uses attachedUserIds[0] as the
+  // single-actor filter value — persons filter by their primary alias
+  // until multi-actor activity filtering lands (see docs/people.md
+  // "Deferred").
+  attachedUserIds: number[];
+  // Primary alias's UUID for person rows; the user's own for user rows.
+  bitbucketUuid: string | null;
   displayName: string;
   commits: number;
-}
-
-// Phase 4 T24 — TopContributor enriched with a 30-day commit sparkline.
-// Used only on the org-wide `getTopContributors` leaderboard so the
-// Dashboard's Top Contributors panel can render a per-user trend line.
-// Project / repo contributor lists deliberately stay on the base shape;
-// adding sparklines to those would require parallel CTEs without giving
-// the dashboard any new information.
-export interface TopContributorWithSparkline extends TopContributor {
-  // Length 30, oldest-first, zeros for days with no commits.
   last30Days: number[];
-  // Adds / dels for the same window as `commits`. Sourced from
-  // commit_daily, which already excludes merge commits, so these
-  // match the per-repo / per-member adds/dels conventions used
-  // elsewhere on the dashboard.
   additionsWindow: number;
   deletionsWindow: number;
-  // Distinct repositories the contributor landed code in over the
-  // same window. Same metric the Members table surfaces as "Repos".
   reposWindow: number;
-  // ShipShow Score fields (docs/scoring.md). Both pulled from the
-  // user_score rollup — null when the row doesn't exist yet (e.g.
-  // a contributor whose first user_score write hasn't landed
-  // between member sync and the next commits-sync tick) or when
-  // consistency is in cold-start. The Dashboard sorts by
-  // `momentum` desc and renders normalized consistency in the
-  // per-row bar.
   momentum: number | null;
   consistency90d: number | null;
 }
@@ -94,6 +88,19 @@ export interface UserSummary {
     // primary alias the same way the leaderboard_entries view does.
     person: { id: number; displayName: string } | null;
   };
+  // Phase 5 — sibling aliases merged into the same person, this account
+  // excluded. Empty for an unattached user. Same shape (incl. per-alias
+  // lastActiveAt) as PersonSummary.attachedUsers; drives the "Linked
+  // accounts" table on /users/:id for merged accounts.
+  linkedAccounts: Array<{
+    id: number;
+    bitbucketUuid: string;
+    displayName: string;
+    username: string | null;
+    email: string | null;
+    isPrimary: boolean;
+    lastActiveAt: string | null;
+  }>;
   totals: {
     commits7d: number;
     commits30d: number;
@@ -163,6 +170,10 @@ export interface PersonSummary {
     username: string | null;
     email: string | null;
     isPrimary: boolean;
+    // MAX(commits.authored_at) for this single alias — null if it has no
+    // commits yet. The person's own "last active" is the max across all
+    // aliases (see listWorkspaceMembers); this is the per-account split.
+    lastActiveAt: string | null;
   }>;
   totals: {
     commits7d: number;
@@ -195,24 +206,29 @@ export interface ProjectStats {
   totals: {
     commits7d: number;
     commits30d: number;
-    contributorCount7d: number;
+    // Phase 5: distinct contributors over the last 30 days, counted per
+    // ENTITY (a merged person's aliases collapse to one). Matches the
+    // person-aware Members roster + the repo-table contributors30d below.
+    contributorCount30d: number;
     repositoryCount: number;
   };
   // Last 365 calendar days, oldest first. Zero-commit days omitted —
   // the frontend backfills gaps when rendering the contribution heatmap.
   // Aggregates across every repo carrying this project's key.
   dailyCommits: Array<{ date: string; commits: number }>;
-  // Project-scoped contributor table — same enriched shape as the
-  // per-repo contributor list (30-day sparkline + adds/dels excluding
-  // merges) so the Project detail page can reuse the repo-page's row
-  // layout verbatim. Aggregates across every repo carrying this
-  // project's key.
-  topContributors: RepoContributor[];
+  // Project-scoped contributor table — Phase 5 person-aware, same
+  // entity-keyed shape as the per-repo contributor list so the Project
+  // detail page reuses the repo-page row layout verbatim. A person's
+  // aliases that both touched the project collapse into one row.
+  // Aggregates across every repo carrying this project's key.
+  topContributors: RepoContributorEntity[];
   repositories: Array<{
     workspace: string;
     slug: string;
     fullName: string;
     commits30d: number;
+    // Phase 5: per-repo distinct contributors, counted per entity (a
+    // merged person counts once even if two aliases touched the repo).
     contributors30d: number;
     lastCommitAt: string | null;
     syncStatus: RepoSyncStatus;
@@ -247,15 +263,36 @@ export interface RepoActivity {
     deletions30d: number;
   };
   // All contributors active in the last 30 days, ordered by commit count desc.
-  // `last30Days` is repo-scoped (this user's commits in THIS repo, day-by-day)
-  // so the repo-detail sparkline reflects the contributor's activity here,
-  // not their workspace-wide pattern. Diff-stat fields are 30-day,
-  // exclude merges, read zero when no diff-stat ingest has landed
-  // yet for this repo (transient — the backfill tick will fill in).
-  contributors: RepoContributor[];
+  // Phase 5: keyed on the merged ENTITY (person or unattached user) — a
+  // person's aliases that both touched this repo collapse into one row,
+  // so the count + list match the person-aware roster elsewhere.
+  // `last30Days` is repo-scoped (this entity's commits in THIS repo,
+  // day-by-day) so the repo-detail sparkline reflects activity here, not
+  // the workspace-wide pattern. Diff-stat fields are 30-day, exclude
+  // merges, read zero when no diff-stat ingest has landed yet for this
+  // repo (transient — the backfill tick will fill in).
+  contributors: RepoContributorEntity[];
 }
 
-export interface RepoContributor extends TopContributorWithSparkline {
+// Phase 5 — repo detail "Contributors — last 30 days" row, keyed on the
+// merged entity rather than a bare user_id so a person appears once
+// instead of as N alias rows. Mirrors the dashboard TopContributorEntity
+// identity fields (entityKind / entityId / attachedUserIds → name pattern
+// + person/user link). The repo list doesn't surface scoring or a
+// distinct-repo count (it's one repo by definition), so those fields are
+// omitted vs the dashboard shape.
+export interface RepoContributorEntity {
+  entityKind: 'user' | 'person';
+  entityId: number;
+  // Primary-first attached user_ids; length 1 for unattached users.
+  // Drives the "merged from N accounts" ×N pill in the contributor list.
+  attachedUserIds: number[];
+  bitbucketUuid: string | null;
+  displayName: string;
+  commits: number;
+  // Repo-scoped 30-day sparkline (this entity's commits in THIS repo).
+  last30Days: number[];
+  // 30-day adds/dels in this repo across the entity's aliases, merges excluded.
   additions30d: number;
   deletions30d: number;
 }
@@ -322,9 +359,16 @@ export interface ActivityPullRequest {
 
 export type ActivityEntry = ActivityCommit | ActivityPullRequest;
 
+// Phase 5 — the activity-feed actor filter. A `user` matches that one
+// `users.id`; a `person` expands to every alias attached to the person
+// (`author_user_id IN (SELECT id FROM users WHERE person_id = id)`), so
+// a merged contributor's commits + PRs across all their accounts show
+// up under one filter. Null actor = no actor filter (whole feed).
+export type ActivityActor = { kind: 'user' | 'person'; id: number };
+
 export interface ActivityFilters {
   // All filters are AND-combinable; null means "no filter on this axis".
-  actor: number | null;
+  actor: ActivityActor | null;
   repo: { workspace: string; slug: string } | null;
   project: string | null;
   // Cursor / range upper bound — only entries with occurredAt strictly less
@@ -410,6 +454,12 @@ export interface WorkspaceMember {
   // re-fetches; per-user-summary stores can use this list to drop
   // their cached entries too).
   attachedUserIds: number[];
+  // Search-only concatenation of EVERY attached alias's display name /
+  // username / email (the displayed identity only carries the primary
+  // alias's). Lets the Members table + ActorPicker find a merged person
+  // by any of its linked accounts' names while still showing the person.
+  // Not rendered anywhere.
+  aliasSearch: string;
   // Per-window commit + distinct-repo aggregates. The Members table
   // renders both windows side-by-side as `{commits} ({repos})` cells,
   // so we ship both in one round-trip rather than re-querying when
@@ -427,8 +477,8 @@ export interface WorkspaceMember {
   // typed to match the underlying source.
   lastActiveAt: string | null;
   // Length 30, oldest-first, zeros for days with no commits. Same shape as
-  // TopContributorWithSparkline.last30Days so the Sparkline component
-  // renders unchanged.
+  // TopContributorEntity.last30Days so the Sparkline component renders
+  // unchanged.
   last30Days: number[];
   // ShipShow Score columns (docs/scoring.md). LEFT-JOINed from user_score
   // so members whose first user_score row hasn't been written yet (between
@@ -484,7 +534,7 @@ export interface StatsStore {
   // unmatched-author commits are excluded — they have no user to attribute.
   // Each row also carries a 30-day commit-count series for the Dashboard
   // sparkline rendering.
-  getTopContributors(windowDays: number, limit?: number): Promise<TopContributorWithSparkline[]>;
+  getTopContributors(windowDays: number, limit?: number): Promise<TopContributorEntity[]>;
 
   // Returns null when the user id doesn't exist. An existing user with no
   // commits returns a populated summary with all-zero totals and empty arrays.
@@ -562,17 +612,23 @@ export interface RepoContributorBreakdown {
   // Total commits in the window across all included contributors.
   // Anonymous-author commits are excluded (commit_daily.author_user_id
   // IS NULL is filtered out), so this can be slightly smaller than
-  // `commits30d` in the dashboard repo summary.
+  // `commits30d` in the dashboard repo summary. NOT affected by the
+  // person grouping below — summing commits is invariant to how
+  // contributors are keyed.
   commits: number;
+  // Phase 5: contributor bands are keyed per ENTITY — a merged person's
+  // aliases that both touch a repo collapse into one band. The sunburst
+  // only renders displayName + commits, so it stays a pure relabel.
   contributors: Array<{
-    userId: number;
+    entityKind: 'user' | 'person';
+    entityId: number;
     displayName: string;
     commits: number;
   }>;
 }
 
 export interface ActivityDailyFilters {
-  actor: number | null;
+  actor: ActivityActor | null;
   repo: { workspace: string; slug: string } | null;
   project: string | null;
 }
@@ -589,14 +645,21 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       // aren't related to the rollup. totalCommits and commitsLast7Days
       // read from commit_daily so this endpoint stays cheap regardless
       // of how large `commits` grows. `contributors` is computed from
-      // commit_daily too — count of distinct attributed authors —
-      // because that's the population the Members page lists, and
-      // matching the two counts is the whole reason this field exists.
+      // commit_daily too — but counted per ENTITY (Phase 5): a merged
+      // person collapses its aliases into one, so the card matches the
+      // person-aware Members roster (the whole reason this field
+      // exists). Unattached users count as themselves.
       const [contributorsRows, reposRows, projectsRows, totalCommitsRows, recentCommitsRows] = await Promise.all([
         db.execute<{ contributors: number }>(sql`
-          SELECT count(DISTINCT author_user_id)::int AS contributors
-          FROM commit_daily
-          WHERE author_user_id IS NOT NULL
+          SELECT count(*)::int AS contributors FROM (
+            SELECT
+              CASE WHEN u.person_id IS NULL THEN 'u:' || u.id::text ELSE 'p:' || u.person_id::text END AS entity
+            FROM commit_daily cd
+            JOIN users u ON u.id = cd.author_user_id
+            WHERE cd.author_user_id IS NOT NULL
+            GROUP BY entity
+            HAVING sum(cd.commit_count) > 0
+          ) e
         `),
         db.select({ count: sql<number>`count(*)::int` }).from(repositories),
         db
@@ -650,25 +713,28 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getTopContributors(windowDays, limit = 10) {
-      // INNER JOIN to users naturally excludes anonymous-author rows
-      // (cd.author_user_id IS NULL won't match any users row), matching the
-      // pre-rollup behavior. Window is `windowDays` UTC day buckets ending
-      // today: e.g. windowDays=7 → day >= current_date - 6 covers 7 days.
+      // Phase 5: keyed on (entity_kind, entity_id) — attached aliases
+      // collapse into their person, unattached users keep their own row.
+      // The JOIN to users (then the entity CASE) excludes anonymous-author
+      // rows the same way the old INNER JOIN to users did. Window is
+      // `windowDays` UTC day buckets ending today.
       //
       // The ::int cast on the bound param is load-bearing: without it
       // Postgres can't infer the type of `current_date - $1` and falls back
       // to the `date - date` overload (which yields integer), then the
       // outer comparison `day >= integer` fails to resolve.
       //
-      // Phase 4 T24: the same query also derives a 30-day sparkline per
-      // contributor in one pass. The `top` CTE picks the leaderboard;
-      // `spark` cross-joins it with a 30-day generate_series window and
-      // LEFT JOINs the same commit_daily aggregated by user+day so missing
-      // days become zero. The result is array_agg'd in date order so the
-      // frontend can render the SVG line directly without backfilling.
+      // Identity + momentum (the sort key) come from leaderboard_entries,
+      // the same view the /members leaderboard reads — user_score for user
+      // rows, person_score for person rows. The `spark` CTE derives the
+      // 30-day sparkline per entity in one pass: cross-join the picked
+      // entities with a 30-day series and LEFT JOIN commit_daily
+      // re-aggregated to the entity key so missing days become zero.
       const rows = await db.execute<{
-        user_id: number;
-        bitbucket_uuid: string;
+        entity_kind: 'user' | 'person';
+        entity_id: number;
+        attached_user_ids: number[];
+        bitbucket_uuid: string | null;
         display_name: string;
         commits: number;
         additions_window: number;
@@ -678,42 +744,84 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         momentum: number | null;
         consistency_90d: number | null;
       }>(sql`
-        WITH top AS (
+        WITH entity_commits AS (
           SELECT
-            u.id AS user_id,
-            u.bitbucket_uuid,
-            u.display_name,
-            sum(cd.commit_count)::int AS commits,
-            sum(cd.additions)::int AS additions_window,
-            sum(cd.deletions)::int AS deletions_window,
-            count(DISTINCT cd.repository_id)::int AS repos_window
+            CASE WHEN u.person_id IS NULL THEN 'user'::text ELSE 'person'::text END AS entity_kind,
+            CASE WHEN u.person_id IS NULL THEN u.id ELSE u.person_id END AS entity_id,
+            cd.commit_count,
+            cd.additions,
+            cd.deletions,
+            cd.repository_id,
+            cd.day
           FROM commit_daily cd
           JOIN users u ON u.id = cd.author_user_id
-          LEFT JOIN user_score us ON us.user_id = u.id
-          WHERE cd.day >= current_date - ${windowDays - 1}::int
-          GROUP BY u.id, u.bitbucket_uuid, u.display_name, us.score_trending
-          ORDER BY us.score_trending DESC NULLS LAST, sum(cd.commit_count) DESC
+        ),
+        windowed AS (
+          SELECT
+            entity_kind,
+            entity_id,
+            sum(commit_count)::int AS commits,
+            sum(additions)::int AS additions_window,
+            sum(deletions)::int AS deletions_window,
+            count(DISTINCT repository_id)::int AS repos_window
+          FROM entity_commits
+          WHERE day >= current_date - ${windowDays - 1}::int
+          GROUP BY entity_kind, entity_id
+        ),
+        top AS (
+          SELECT
+            w.entity_kind,
+            w.entity_id,
+            w.commits,
+            w.additions_window,
+            w.deletions_window,
+            w.repos_window,
+            le.bitbucket_uuid,
+            le.display_name,
+            le.score_trending,
+            le.consistency_90d
+          FROM windowed w
+          JOIN leaderboard_entries le
+            ON le.entity_kind = w.entity_kind AND le.entity_id = w.entity_id
+          ORDER BY le.score_trending DESC NULLS LAST, w.commits DESC
           LIMIT ${limit}
         ),
         daily AS (
-          SELECT author_user_id, day, sum(commit_count)::int AS commits
-          FROM commit_daily
-          WHERE day >= current_date - 29
-            AND author_user_id IN (SELECT user_id FROM top)
-          GROUP BY author_user_id, day
+          SELECT
+            CASE WHEN u.person_id IS NULL THEN 'user'::text ELSE 'person'::text END AS entity_kind,
+            CASE WHEN u.person_id IS NULL THEN u.id ELSE u.person_id END AS entity_id,
+            cd.day,
+            sum(cd.commit_count)::int AS commits
+          FROM commit_daily cd
+          JOIN users u ON u.id = cd.author_user_id
+          WHERE cd.day >= current_date - 29
+          GROUP BY entity_kind, entity_id, cd.day
         ),
         spark AS (
           SELECT
-            t.user_id,
+            t.entity_kind,
+            t.entity_id,
             array_agg(COALESCE(daily.commits, 0) ORDER BY sd.day) AS last_30_days
           FROM top t
           CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval)
             AS sd(day)
-          LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
-          GROUP BY t.user_id
+          LEFT JOIN daily
+            ON daily.entity_kind = t.entity_kind
+           AND daily.entity_id = t.entity_id
+           AND daily.day = sd.day::date
+          GROUP BY t.entity_kind, t.entity_id
         )
         SELECT
-          t.user_id,
+          t.entity_kind,
+          t.entity_id,
+          CASE
+            WHEN t.entity_kind = 'person' THEN (
+              SELECT array_agg(u.id ORDER BY u.is_primary_for_person DESC, u.id)
+              FROM users u
+              WHERE u.person_id = t.entity_id
+            )
+            ELSE ARRAY[t.entity_id]
+          END AS attached_user_ids,
           t.bitbucket_uuid,
           t.display_name,
           t.commits,
@@ -721,15 +829,16 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           t.deletions_window,
           t.repos_window,
           spark.last_30_days,
-          us.score_trending AS momentum,
-          us.consistency_90d
+          t.score_trending AS momentum,
+          t.consistency_90d
         FROM top t
-        JOIN spark ON spark.user_id = t.user_id
-        LEFT JOIN user_score us ON us.user_id = t.user_id
-        ORDER BY us.score_trending DESC NULLS LAST, t.commits DESC
+        JOIN spark ON spark.entity_kind = t.entity_kind AND spark.entity_id = t.entity_id
+        ORDER BY t.score_trending DESC NULLS LAST, t.commits DESC
       `);
       return rows.rows.map((r) => ({
-        userId: r.user_id,
+        entityKind: r.entity_kind,
+        entityId: r.entity_id,
+        attachedUserIds: r.attached_user_ids,
         bitbucketUuid: r.bitbucket_uuid,
         displayName: r.display_name,
         commits: r.commits,
@@ -794,8 +903,44 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           userRow.person_id === null ? null : { id: userRow.person_id, displayName: userRow.person_display_name ?? '' },
       };
 
+      // Sibling aliases: the OTHER accounts merged into the same person
+      // (this user excluded). Empty for an unattached account — drives the
+      // "Linked accounts" table on /users/:id. Same shape + per-alias
+      // last-active as the Person page's attachedUsers. Skipped entirely
+      // (resolves empty) when this account isn't merged.
+      const linkedAccountsPromise =
+        userRow.person_id === null
+          ? Promise.resolve({
+              rows: [] as Array<{
+                id: number;
+                bitbucket_uuid: string;
+                display_name: string;
+                username: string | null;
+                email: string | null;
+                is_primary: boolean;
+                last_active_at: string | Date | null;
+              }>,
+            })
+          : db.execute<{
+              id: number;
+              bitbucket_uuid: string;
+              display_name: string;
+              username: string | null;
+              email: string | null;
+              is_primary: boolean;
+              last_active_at: string | Date | null;
+            }>(sql`
+              SELECT
+                u.id, u.bitbucket_uuid, u.display_name, u.username, u.email,
+                u.is_primary_for_person AS is_primary,
+                (SELECT max(c.authored_at) FROM commits c WHERE c.author_user_id = u.id) AS last_active_at
+              FROM users u
+              WHERE u.person_id = ${userRow.person_id} AND u.id <> ${userId}
+              ORDER BY u.is_primary_for_person DESC, u.id ASC
+            `);
+
       // Run aggregates in parallel — independent queries against commit_daily.
-      const [totalsRows, dailyRows, topRepoRows] = await Promise.all([
+      const [totalsRows, dailyRows, topRepoRows, linkedAccountsRows] = await Promise.all([
         db.execute<{
           commits_7d: number | null;
           commits_30d: number | null;
@@ -865,11 +1010,26 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           ORDER BY sum(cd.commit_count) DESC
           LIMIT 5
         `),
+        linkedAccountsPromise,
       ]);
 
       const t = totalsRows.rows[0];
       return {
         user,
+        linkedAccounts: linkedAccountsRows.rows.map((r) => ({
+          id: r.id,
+          bitbucketUuid: r.bitbucket_uuid,
+          displayName: r.display_name,
+          username: r.username,
+          email: r.email,
+          isPrimary: r.is_primary,
+          lastActiveAt:
+            r.last_active_at === null
+              ? null
+              : typeof r.last_active_at === 'string'
+                ? new Date(r.last_active_at).toISOString()
+                : r.last_active_at.toISOString(),
+        })),
         totals: {
           commits7d: t?.commits_7d ?? 0,
           commits30d: t?.commits_30d ?? 0,
@@ -949,11 +1109,15 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           username: string | null;
           email: string | null;
           is_primary: boolean;
+          last_active_at: string | Date | null;
         }>(sql`
-          SELECT id, bitbucket_uuid, display_name, username, email, is_primary_for_person AS is_primary
-          FROM users
-          WHERE person_id = ${personId}
-          ORDER BY is_primary_for_person DESC, id ASC
+          SELECT
+            u.id, u.bitbucket_uuid, u.display_name, u.username, u.email,
+            u.is_primary_for_person AS is_primary,
+            (SELECT max(c.authored_at) FROM commits c WHERE c.author_user_id = u.id) AS last_active_at
+          FROM users u
+          WHERE u.person_id = ${personId}
+          ORDER BY u.is_primary_for_person DESC, u.id ASC
         `),
         db.execute<{
           commits_7d: number | null;
@@ -1036,6 +1200,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           username: r.username,
           email: r.email,
           isPrimary: r.is_primary,
+          lastActiveAt:
+            r.last_active_at === null
+              ? null
+              : typeof r.last_active_at === 'string'
+                ? new Date(r.last_active_at).toISOString()
+                : r.last_active_at.toISOString(),
         })),
         totals: {
           commits7d: t?.commits_7d ?? 0,
@@ -1077,16 +1247,22 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         db.execute<{
           commits_7d: number | null;
           commits_30d: number | null;
-          contributor_count_7d: number | null;
+          contributor_count_30d: number | null;
         }>(sql`
           SELECT
             sum(cd.commit_count) FILTER (WHERE cd.day >= current_date - 6)::int AS commits_7d,
             sum(cd.commit_count) FILTER (WHERE cd.day >= current_date - 29)::int AS commits_30d,
-            count(DISTINCT cd.author_user_id)
-              FILTER (WHERE cd.day >= current_date - 6 AND cd.author_user_id IS NOT NULL)::int
-              AS contributor_count_7d
+            -- Phase 5: distinct contributors over 30d, keyed per entity
+            -- (merged person's aliases collapse). LEFT JOIN users keeps
+            -- anonymous-author rows in the commit sums above; the count's
+            -- inner CASE skips them via the author_user_id NOT NULL guard.
+            count(DISTINCT CASE
+              WHEN cd.day >= current_date - 29 AND cd.author_user_id IS NOT NULL
+              THEN CASE WHEN u.person_id IS NULL THEN 'u:' || u.id::text ELSE 'p:' || u.person_id::text END
+            END)::int AS contributor_count_30d
           FROM commit_daily cd
           JOIN repositories r ON r.id = cd.repository_id
+          LEFT JOIN users u ON u.id = cd.author_user_id
           WHERE r.project = ${projectKey}
         `),
         // 365-day daily aggregate. Mirrors the user/repo dailyCommits shape
@@ -1100,78 +1276,96 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY cd.day
           ORDER BY cd.day
         `),
-        // Top contributors — same enriched shape as getRepositoryActivity
-        // (30-day sparkline + non-merge diff stats per contributor) so
-        // the Project detail page can reuse the repo-page's row layout.
-        // Sparkline + diff stats are aggregated across every repo
-        // carrying this project's key.
+        // Top contributors — Phase 5 person-aware, same entity-keyed shape
+        // as getRepositoryActivity (30-day sparkline + non-merge diff stats)
+        // but scoped to every repo carrying this project's key. A person's
+        // aliases collapse into one row, identity resolved through
+        // leaderboard_entries.
         db.execute<{
-          user_id: number;
-          bitbucket_uuid: string;
+          entity_kind: 'user' | 'person';
+          entity_id: number;
+          attached_user_ids: number[];
+          bitbucket_uuid: string | null;
           display_name: string;
           commits: number;
           last_30_days: number[];
           additions_30d: number;
           deletions_30d: number;
-          repos_30d: number;
         }>(sql`
           WITH project_repos AS (
             SELECT id FROM repositories WHERE project = ${projectKey}
           ),
-          top AS (
+          entity_commits AS (
             SELECT
-              u.id AS user_id,
-              u.bitbucket_uuid,
-              u.display_name,
-              sum(cd.commit_count)::int AS commits,
-              count(DISTINCT cd.repository_id)::int AS repos_30d
+              CASE WHEN u.person_id IS NULL THEN 'user'::text ELSE 'person'::text END AS entity_kind,
+              CASE WHEN u.person_id IS NULL THEN u.id ELSE u.person_id END AS entity_id,
+              cd.commit_count,
+              cd.day
             FROM commit_daily cd
             JOIN users u ON u.id = cd.author_user_id
             WHERE cd.repository_id IN (SELECT id FROM project_repos)
               AND cd.day >= current_date - 29
-            GROUP BY u.id, u.bitbucket_uuid, u.display_name
+          ),
+          top AS (
+            SELECT entity_kind, entity_id, sum(commit_count)::int AS commits
+            FROM entity_commits
+            GROUP BY entity_kind, entity_id
           ),
           daily AS (
-            SELECT author_user_id, day, sum(commit_count)::int AS commits
-            FROM commit_daily
-            WHERE repository_id IN (SELECT id FROM project_repos)
-              AND day >= current_date - 29
-              AND author_user_id IN (SELECT user_id FROM top)
-            GROUP BY author_user_id, day
+            SELECT entity_kind, entity_id, day, sum(commit_count)::int AS commits
+            FROM entity_commits
+            GROUP BY entity_kind, entity_id, day
           ),
           spark AS (
             SELECT
-              t.user_id,
+              t.entity_kind,
+              t.entity_id,
               array_agg(COALESCE(daily.commits, 0) ORDER BY sd.day) AS last_30_days
             FROM top t
             CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval) AS sd(day)
-            LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
-            GROUP BY t.user_id
+            LEFT JOIN daily
+              ON daily.entity_kind = t.entity_kind
+             AND daily.entity_id = t.entity_id
+             AND daily.day = sd.day::date
+            GROUP BY t.entity_kind, t.entity_id
           ),
           diff_summary AS (
             SELECT
-              author_user_id,
-              sum(additions)::int AS additions_30d,
-              sum(deletions)::int AS deletions_30d
-            FROM commits
-            WHERE repository_id IN (SELECT id FROM project_repos)
-              AND authored_at >= (current_date - 29)::timestamp
-              AND NOT is_merge
-              AND author_user_id IN (SELECT user_id FROM top)
-            GROUP BY author_user_id
+              CASE WHEN u.person_id IS NULL THEN 'user'::text ELSE 'person'::text END AS entity_kind,
+              CASE WHEN u.person_id IS NULL THEN u.id ELSE u.person_id END AS entity_id,
+              sum(c.additions)::int AS additions_30d,
+              sum(c.deletions)::int AS deletions_30d
+            FROM commits c
+            JOIN users u ON u.id = c.author_user_id
+            WHERE c.repository_id IN (SELECT id FROM project_repos)
+              AND c.authored_at >= (current_date - 29)::timestamp
+              AND NOT c.is_merge
+            GROUP BY entity_kind, entity_id
           )
           SELECT
-            t.user_id,
-            t.bitbucket_uuid,
-            t.display_name,
+            t.entity_kind,
+            t.entity_id,
+            CASE
+              WHEN t.entity_kind = 'person' THEN (
+                SELECT array_agg(u.id ORDER BY u.is_primary_for_person DESC, u.id)
+                FROM users u
+                WHERE u.person_id = t.entity_id
+              )
+              ELSE ARRAY[t.entity_id]
+            END AS attached_user_ids,
+            le.bitbucket_uuid,
+            le.display_name,
             t.commits,
-            t.repos_30d,
             spark.last_30_days,
             COALESCE(diff_summary.additions_30d, 0) AS additions_30d,
             COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d
           FROM top t
-          JOIN spark ON spark.user_id = t.user_id
-          LEFT JOIN diff_summary ON diff_summary.author_user_id = t.user_id
+          JOIN leaderboard_entries le
+            ON le.entity_kind = t.entity_kind AND le.entity_id = t.entity_id
+          JOIN spark
+            ON spark.entity_kind = t.entity_kind AND spark.entity_id = t.entity_id
+          LEFT JOIN diff_summary
+            ON diff_summary.entity_kind = t.entity_kind AND diff_summary.entity_id = t.entity_id
           ORDER BY t.commits DESC
           LIMIT 10
         `),
@@ -1199,11 +1393,17 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
               SELECT sum(commit_count)::int FROM commit_daily
               WHERE repository_id = r.id AND day >= current_date - 29
             ), 0) AS commits_30d,
+            -- Phase 5: person-aware distinct count — a merged person's
+            -- aliases that both touched this repo collapse into one.
             COALESCE((
-              SELECT count(DISTINCT author_user_id)::int FROM commit_daily
-              WHERE repository_id = r.id
-                AND day >= current_date - 29
-                AND author_user_id IS NOT NULL
+              SELECT count(DISTINCT
+                CASE WHEN u.person_id IS NULL THEN 'u:' || u.id::text ELSE 'p:' || u.person_id::text END
+              )::int
+              FROM commit_daily cd
+              JOIN users u ON u.id = cd.author_user_id
+              WHERE cd.repository_id = r.id
+                AND cd.day >= current_date - 29
+                AND cd.author_user_id IS NOT NULL
             ), 0) AS contributors_30d,
             (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at,
             ss.last_sync_status,
@@ -1222,30 +1422,20 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         totals: {
           commits7d: t?.commits_7d ?? 0,
           commits30d: t?.commits_30d ?? 0,
-          contributorCount7d: t?.contributor_count_7d ?? 0,
+          contributorCount30d: t?.contributor_count_30d ?? 0,
           repositoryCount,
         },
         dailyCommits: dailyRows.rows.map((r) => ({ date: r.date, commits: r.commits })),
         topContributors: contributorRows.rows.map((r) => ({
-          userId: r.user_id,
+          entityKind: r.entity_kind,
+          entityId: r.entity_id,
+          attachedUserIds: r.attached_user_ids,
           bitbucketUuid: r.bitbucket_uuid,
           displayName: r.display_name,
           commits: r.commits,
           last30Days: r.last_30_days,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
-          // Window is always 30d in the project / repo context, so
-          // the parent TopContributorWithSparkline window fields just
-          // mirror the explicit 30d values.
-          additionsWindow: r.additions_30d,
-          deletionsWindow: r.deletions_30d,
-          reposWindow: r.repos_30d,
-          // Project / repo contributor lists don't surface scoring —
-          // momentum + consistency render on the org-wide Dashboard
-          // panel only. Null here keeps the shape uniform without
-          // doing an extra user_score join we'd never read.
-          momentum: null,
-          consistency90d: null,
         })),
         repositories: repoRows.rows.map((r) => ({
           workspace: r.workspace,
@@ -1283,11 +1473,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             SELECT sum(commit_count)::int FROM commit_daily
             WHERE repository_id = r.id AND day >= current_date - 29
           ), 0) AS commits_30d,
+          -- Person-aware (Phase 5): a merged person's aliases that both
+          -- committed to this repo collapse into one contributor. Keyed
+          -- on people.id for attached aliases, users.id otherwise.
           COALESCE((
-            SELECT count(DISTINCT author_user_id)::int FROM commit_daily
-            WHERE repository_id = r.id
-              AND day >= current_date - 29
-              AND author_user_id IS NOT NULL
+            SELECT count(DISTINCT
+              CASE WHEN u.person_id IS NULL THEN 'u:' || u.id::text ELSE 'p:' || u.person_id::text END
+            )::int
+            FROM commit_daily cd
+            JOIN users u ON u.id = cd.author_user_id
+            WHERE cd.repository_id = r.id
+              AND cd.day >= current_date - 29
+              AND cd.author_user_id IS NOT NULL
           ), 0) AS contributors_30d,
           -- Non-merge diff stats over the last 30 days. Reads from
           -- the commits table (not commit_daily) so the merge
@@ -1357,66 +1554,95 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY day
           ORDER BY day
         `),
-        // Top contributors for this repo plus a repo-scoped 30-day sparkline
-        // per contributor. Same shape as `getTopContributors` (Phase 4 T24)
-        // but the `daily` CTE is constrained to `repository_id = repo.id`, so
-        // each user's sparkline only reflects activity in this repo.
+        // Contributors for this repo plus a repo-scoped 30-day sparkline
+        // per contributor. Phase 5: keyed on the merged ENTITY
+        // (person/unattached user) the same way getTopContributors and
+        // listWorkspaceMembers are — a person's aliases that both touched
+        // this repo collapse into one row, identity resolved through
+        // leaderboard_entries (display_name COALESCEd via the primary
+        // alias). Every CTE is scoped to `repository_id = repo.id`, so the
+        // sparkline + adds/dels reflect activity in THIS repo only.
         db.execute<{
-          user_id: number;
-          bitbucket_uuid: string;
+          entity_kind: 'user' | 'person';
+          entity_id: number;
+          attached_user_ids: number[];
+          bitbucket_uuid: string | null;
           display_name: string;
           commits: number;
           last_30_days: number[];
           additions_30d: number;
           deletions_30d: number;
         }>(sql`
-          WITH top AS (
-            SELECT u.id AS user_id, u.bitbucket_uuid, u.display_name, sum(cd.commit_count)::int AS commits
+          WITH entity_commits AS (
+            SELECT
+              CASE WHEN u.person_id IS NULL THEN 'user'::text ELSE 'person'::text END AS entity_kind,
+              CASE WHEN u.person_id IS NULL THEN u.id ELSE u.person_id END AS entity_id,
+              cd.commit_count,
+              cd.day
             FROM commit_daily cd
             JOIN users u ON u.id = cd.author_user_id
             WHERE cd.repository_id = ${repo.id} AND cd.day >= current_date - 29
-            GROUP BY u.id, u.bitbucket_uuid, u.display_name
+          ),
+          top AS (
+            SELECT entity_kind, entity_id, sum(commit_count)::int AS commits
+            FROM entity_commits
+            GROUP BY entity_kind, entity_id
           ),
           daily AS (
-            SELECT author_user_id, day, sum(commit_count)::int AS commits
-            FROM commit_daily
-            WHERE repository_id = ${repo.id}
-              AND day >= current_date - 29
-              AND author_user_id IN (SELECT user_id FROM top)
-            GROUP BY author_user_id, day
+            SELECT entity_kind, entity_id, day, sum(commit_count)::int AS commits
+            FROM entity_commits
+            GROUP BY entity_kind, entity_id, day
           ),
           spark AS (
             SELECT
-              t.user_id,
+              t.entity_kind,
+              t.entity_id,
               array_agg(COALESCE(daily.commits, 0) ORDER BY sd.day) AS last_30_days
             FROM top t
             CROSS JOIN generate_series(current_date - 29, current_date, '1 day'::interval) AS sd(day)
-            LEFT JOIN daily ON daily.author_user_id = t.user_id AND daily.day = sd.day::date
-            GROUP BY t.user_id
+            LEFT JOIN daily
+              ON daily.entity_kind = t.entity_kind
+             AND daily.entity_id = t.entity_id
+             AND daily.day = sd.day::date
+            GROUP BY t.entity_kind, t.entity_id
           ),
           diff_summary AS (
             SELECT
-              author_user_id,
-              sum(additions)::int AS additions_30d,
-              sum(deletions)::int AS deletions_30d
-            FROM commits
-            WHERE repository_id = ${repo.id}
-              AND authored_at >= (current_date - 29)::timestamp
-              AND NOT is_merge
-              AND author_user_id IN (SELECT user_id FROM top)
-            GROUP BY author_user_id
+              CASE WHEN u.person_id IS NULL THEN 'user'::text ELSE 'person'::text END AS entity_kind,
+              CASE WHEN u.person_id IS NULL THEN u.id ELSE u.person_id END AS entity_id,
+              sum(c.additions)::int AS additions_30d,
+              sum(c.deletions)::int AS deletions_30d
+            FROM commits c
+            JOIN users u ON u.id = c.author_user_id
+            WHERE c.repository_id = ${repo.id}
+              AND c.authored_at >= (current_date - 29)::timestamp
+              AND NOT c.is_merge
+            GROUP BY entity_kind, entity_id
           )
           SELECT
-            t.user_id,
-            t.bitbucket_uuid,
-            t.display_name,
+            t.entity_kind,
+            t.entity_id,
+            CASE
+              WHEN t.entity_kind = 'person' THEN (
+                SELECT array_agg(u.id ORDER BY u.is_primary_for_person DESC, u.id)
+                FROM users u
+                WHERE u.person_id = t.entity_id
+              )
+              ELSE ARRAY[t.entity_id]
+            END AS attached_user_ids,
+            le.bitbucket_uuid,
+            le.display_name,
             t.commits,
             spark.last_30_days,
             COALESCE(diff_summary.additions_30d, 0) AS additions_30d,
             COALESCE(diff_summary.deletions_30d, 0) AS deletions_30d
           FROM top t
-          JOIN spark ON spark.user_id = t.user_id
-          LEFT JOIN diff_summary ON diff_summary.author_user_id = t.user_id
+          JOIN leaderboard_entries le
+            ON le.entity_kind = t.entity_kind AND le.entity_id = t.entity_id
+          JOIN spark
+            ON spark.entity_kind = t.entity_kind AND spark.entity_id = t.entity_id
+          LEFT JOIN diff_summary
+            ON diff_summary.entity_kind = t.entity_kind AND diff_summary.entity_id = t.entity_id
           ORDER BY t.commits DESC
         `),
         // Per-window code-change summary for the repo. Always returned —
@@ -1465,24 +1691,15 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         })),
         diffStats,
         contributors: contributorRows.rows.map((r) => ({
-          userId: r.user_id,
+          entityKind: r.entity_kind,
+          entityId: r.entity_id,
+          attachedUserIds: r.attached_user_ids,
           bitbucketUuid: r.bitbucket_uuid,
           displayName: r.display_name,
           commits: r.commits,
           last30Days: r.last_30_days,
           additions30d: r.additions_30d,
           deletions30d: r.deletions_30d,
-          // 30d-context mirror — see project topContributors for the
-          // same alias.
-          additionsWindow: r.additions_30d,
-          deletionsWindow: r.deletions_30d,
-          // Per-repo contributors are by definition working on this
-          // one repo, so the distinct-repo count is always 1.
-          reposWindow: 1,
-          // Per-repo contributor lists don't surface scoring. See
-          // the matching null assignment in getProjectStats.
-          momentum: null,
-          consistency90d: null,
         })),
       };
     },
@@ -1505,7 +1722,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       //                    only carries the date bucket).
       //   daily / spark  — last-30-day per-entity commit count series,
       //                    array_agg'd into a 30-element sparkline matching
-      //                    TopContributorWithSparkline.last30Days.
+      //                    TopContributorEntity.last30Days.
       //   identity       — display name / username / email / BB uuid /
       //                    workspace-member flag / attached_user_ids,
       //                    pulled straight from leaderboard_entries (the
@@ -1528,6 +1745,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         email: string | null;
         is_workspace_member: boolean;
         attached_user_ids: number[];
+        alias_search: string;
         commits_7d: number;
         repos_7d: number;
         commits_30d: number;
@@ -1618,6 +1836,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             )
             ELSE ARRAY[le.entity_id]
           END AS attached_user_ids,
+          -- Search-only blob: every attached alias's name / username /
+          -- email so a person row is findable by ANY linked account, not
+          -- just the primary the row displays. The UI never renders this;
+          -- it's a Fuse key on the Members table + the ActorPicker.
+          CASE
+            WHEN le.entity_kind = 'person' THEN COALESCE((
+              SELECT string_agg(concat_ws(' ', u.display_name, u.username, u.email), ' ')
+              FROM users u
+              WHERE u.person_id = le.entity_id
+            ), '')
+            ELSE concat_ws(' ', le.display_name, le.username, le.email)
+          END AS alias_search,
           b.commits_7d,
           b.repos_7d,
           b.commits_30d,
@@ -1649,6 +1879,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         email: r.email,
         isWorkspaceMember: r.is_workspace_member,
         attachedUserIds: r.attached_user_ids,
+        aliasSearch: r.alias_search,
         commits7d: r.commits_7d,
         repos7d: r.repos_7d,
         commits30d: r.commits_30d,
@@ -1675,6 +1906,12 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
       const beforeIso = before === null ? null : before.toISOString();
       const afterIso = after === null ? null : after.toISOString();
+      // Decompose the actor into two NULL-able int params so the predicate
+      // stays parameterized with plain ints (no array literals). When both
+      // are NULL the actor branch is a no-op (whole feed); a user matches
+      // directly; a person expands to its alias set via the subquery.
+      const actorUserId = actor?.kind === 'user' ? actor.id : null;
+      const actorPersonId = actor?.kind === 'person' ? actor.id : null;
 
       // Two-branch UNION ALL with filter predicates pushed into each subquery
       // (we don't want to pull rows that the outer ORDER BY + LIMIT will
@@ -1740,7 +1977,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           JOIN repositories r ON r.id = c.repository_id
           LEFT JOIN users u ON u.id = c.author_user_id
           WHERE
-            (${actor}::int IS NULL OR c.author_user_id = ${actor}::int)
+            (
+              (${actorUserId}::int IS NULL AND ${actorPersonId}::int IS NULL)
+              OR c.author_user_id = ${actorUserId}::int
+              OR c.author_user_id IN (SELECT u_a.id FROM users u_a WHERE u_a.person_id = ${actorPersonId}::int)
+            )
             AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
             AND (${project}::text IS NULL OR r.project = ${project}::text)
             AND (${beforeIso}::timestamptz IS NULL OR c.authored_at < ${beforeIso}::timestamptz)
@@ -1776,7 +2017,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           JOIN repositories r ON r.id = pr.repository_id
           LEFT JOIN users u ON u.id = pr.author_user_id
           WHERE
-            (${actor}::int IS NULL OR pr.author_user_id = ${actor}::int)
+            (
+              (${actorUserId}::int IS NULL AND ${actorPersonId}::int IS NULL)
+              OR pr.author_user_id = ${actorUserId}::int
+              OR pr.author_user_id IN (SELECT u_a.id FROM users u_a WHERE u_a.person_id = ${actorPersonId}::int)
+            )
             AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
             AND (${project}::text IS NULL OR r.project = ${project}::text)
             AND (${beforeIso}::timestamptz IS NULL OR pr.bitbucket_updated_at < ${beforeIso}::timestamptz)
@@ -1838,6 +2083,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
       const beforeIso = before === null ? null : before.toISOString();
       const afterIso = after === null ? null : after.toISOString();
+      const actorUserId = actor?.kind === 'user' ? actor.id : null;
+      const actorPersonId = actor?.kind === 'person' ? actor.id : null;
       // Two-branch sum — same WHERE predicates as getActivity. PR
       // branch is suppressed when hashPrefix is set (PRs don't carry
       // a SHA), matching the feed query exactly so the count never
@@ -1848,7 +2095,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             (SELECT count(*) FROM commits c
              JOIN repositories r ON r.id = c.repository_id
              WHERE
-               (${actor}::int IS NULL OR c.author_user_id = ${actor}::int)
+               (
+                 (${actorUserId}::int IS NULL AND ${actorPersonId}::int IS NULL)
+                 OR c.author_user_id = ${actorUserId}::int
+                 OR c.author_user_id IN (SELECT u_a.id FROM users u_a WHERE u_a.person_id = ${actorPersonId}::int)
+               )
                AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
                AND (${project}::text IS NULL OR r.project = ${project}::text)
                AND (${beforeIso}::timestamptz IS NULL OR c.authored_at < ${beforeIso}::timestamptz)
@@ -1859,7 +2110,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             (SELECT count(*) FROM pull_requests pr
              JOIN repositories r ON r.id = pr.repository_id
              WHERE
-               (${actor}::int IS NULL OR pr.author_user_id = ${actor}::int)
+               (
+                 (${actorUserId}::int IS NULL AND ${actorPersonId}::int IS NULL)
+                 OR pr.author_user_id = ${actorUserId}::int
+                 OR pr.author_user_id IN (SELECT u_a.id FROM users u_a WHERE u_a.person_id = ${actorPersonId}::int)
+               )
                AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
                AND (${project}::text IS NULL OR r.project = ${project}::text)
                AND (${beforeIso}::timestamptz IS NULL OR pr.bitbucket_updated_at < ${beforeIso}::timestamptz)
@@ -1875,6 +2130,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     async getActivityDaily(filters) {
       const { actor, project } = filters;
       const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
+      const actorUserId = actor?.kind === 'user' ? actor.id : null;
+      const actorPersonId = actor?.kind === 'person' ? actor.id : null;
       // Read directly from commit_daily — keeps the query cheap regardless
       // of how large `commits` grows. JOIN on repositories only when a
       // repo / project filter is set, but we always need it for the
@@ -1884,7 +2141,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         FROM commit_daily cd
         JOIN repositories r ON r.id = cd.repository_id
         WHERE cd.day >= current_date - 364
-          AND (${actor}::int IS NULL OR cd.author_user_id = ${actor}::int)
+          AND (
+            (${actorUserId}::int IS NULL AND ${actorPersonId}::int IS NULL)
+            OR cd.author_user_id = ${actorUserId}::int
+            OR cd.author_user_id IN (SELECT u_a.id FROM users u_a WHERE u_a.person_id = ${actorPersonId}::int)
+          )
           AND (${repoFullName}::text IS NULL OR r.full_name = ${repoFullName}::text)
           AND (${project}::text IS NULL OR r.project = ${project}::text)
         GROUP BY cd.day
@@ -1910,34 +2171,44 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         full_name: string;
         project: string | null;
         repo_commits: number;
-        user_id: number;
+        entity_kind: 'u' | 'p';
+        entity_id: number;
         display_name: string;
         user_commits: number;
       }>(sql`
-        WITH per_user_repo AS (
-          SELECT cd.repository_id, cd.author_user_id, sum(cd.commit_count)::int AS commits
+        WITH per_entity_repo AS (
+          SELECT
+            cd.repository_id,
+            CASE WHEN u.person_id IS NULL THEN 'u' ELSE 'p' END AS entity_kind,
+            COALESCE(u.person_id, u.id) AS entity_id,
+            sum(cd.commit_count)::int AS commits
           FROM commit_daily cd
           JOIN repositories r ON r.id = cd.repository_id
+          JOIN users u ON u.id = cd.author_user_id
           WHERE cd.day >= current_date - (${windowDays - 1}::int)
             AND cd.author_user_id IS NOT NULL
             AND (${project}::text IS NULL OR r.project = ${project}::text)
-          GROUP BY cd.repository_id, cd.author_user_id
+          GROUP BY cd.repository_id, entity_kind, entity_id
         ),
         top_repos AS (
           SELECT repository_id, sum(commits)::int AS total_commits
-          FROM per_user_repo
+          FROM per_entity_repo
           GROUP BY repository_id
           ORDER BY total_commits DESC
           LIMIT ${topRepos}
         ),
         ranked AS (
           SELECT
-            pur.repository_id,
-            pur.author_user_id,
-            pur.commits,
-            row_number() OVER (PARTITION BY pur.repository_id ORDER BY pur.commits DESC, pur.author_user_id) AS rn
-          FROM per_user_repo pur
-          JOIN top_repos tr ON tr.repository_id = pur.repository_id
+            per.repository_id,
+            per.entity_kind,
+            per.entity_id,
+            per.commits,
+            row_number() OVER (
+              PARTITION BY per.repository_id
+              ORDER BY per.commits DESC, per.entity_kind, per.entity_id
+            ) AS rn
+          FROM per_entity_repo per
+          JOIN top_repos tr ON tr.repository_id = per.repository_id
         )
         SELECT
           r.workspace,
@@ -1945,15 +2216,28 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           r.full_name,
           r.project,
           tr.total_commits AS repo_commits,
-          u.id AS user_id,
-          u.display_name,
+          ranked.entity_kind,
+          ranked.entity_id,
+          CASE
+            WHEN ranked.entity_kind = 'p' THEN COALESCE(
+              p.display_name,
+              (
+                SELECT pu.display_name FROM users pu
+                WHERE pu.person_id = ranked.entity_id
+                ORDER BY pu.is_primary_for_person DESC, pu.id
+                LIMIT 1
+              )
+            )
+            ELSE uu.display_name
+          END AS display_name,
           ranked.commits AS user_commits
         FROM ranked
         JOIN top_repos tr ON tr.repository_id = ranked.repository_id
         JOIN repositories r ON r.id = ranked.repository_id
-        JOIN users u ON u.id = ranked.author_user_id
+        LEFT JOIN people p ON ranked.entity_kind = 'p' AND p.id = ranked.entity_id
+        LEFT JOIN users uu ON ranked.entity_kind = 'u' AND uu.id = ranked.entity_id
         WHERE ranked.rn <= ${topPerRepo}
-        ORDER BY tr.total_commits DESC, ranked.commits DESC, u.id
+        ORDER BY tr.total_commits DESC, ranked.commits DESC, ranked.entity_kind, ranked.entity_id
       `);
 
       // Group flat rows into the repo-bucketed shape the chart expects.
@@ -1975,7 +2259,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           byRepo.set(row.full_name, bucket);
         }
         bucket.contributors.push({
-          userId: row.user_id,
+          entityKind: row.entity_kind === 'p' ? 'person' : 'user',
+          entityId: row.entity_id,
           displayName: row.display_name,
           commits: row.user_commits,
         });

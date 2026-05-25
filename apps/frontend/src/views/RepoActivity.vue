@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue';
-import { useRoute, useRouter, RouterLink } from 'vue-router';
+import { useRoute, RouterLink } from 'vue-router';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import Sparkline from '@/components/Sparkline.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useRepoActivityStore } from '@/stores/repoActivity';
+import { useActorFilter } from '@/composables/useActorFilter';
 
 const route = useRoute();
-const router = useRouter();
 const store = useRepoActivityStore();
 
 const workspace = computed(() => String(route.params.workspace));
@@ -26,10 +27,9 @@ onMounted(() => void store.fetch(workspace.value, slug.value));
 watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
 
 // Repo (and therefore its project) is pinned by the route — only the
-// user axis is meaningfully filterable here. Source the dropdown from
-// the repo's own contributors so we only list people who've actually
-// committed to this repo.
-const userOptions = computed(() => activity.value?.contributors ?? []);
+// contributor axis is meaningfully filterable here. The shared
+// ActorPicker offers the full person-aware roster; a selected person
+// filters this repo's feed across all their aliases.
 
 // 30-day cutoff as YYYY-MM-DD for the "See all activities →" link.
 // Matches the Activity page's range-preset detection so the title chip
@@ -42,15 +42,7 @@ function localDateString(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
-const filterActor = computed<number | undefined>({
-  get: () => (route.query.actor !== undefined ? Number(route.query.actor) : undefined),
-  set: (v) => {
-    const next = { ...route.query };
-    if (v === undefined) delete next.actor;
-    else next.actor = String(v);
-    void router.replace({ query: next });
-  },
-});
+const filterActor = useActorFilter();
 </script>
 
 <template>
@@ -121,18 +113,34 @@ const filterActor = computed<number | undefined>({
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Contributors — last 30 days</h2>
         <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
           <ul v-if="activity.contributors.length > 0" class="divide-y divide-slate-100">
-            <li v-for="(c, i) in activity.contributors" :key="c.bitbucketUuid">
+            <li v-for="(c, i) in activity.contributors" :key="`${c.entityKind}:${c.entityId}`">
+              <!-- Person rows link to /people/:id, user rows to /users/:id.
+                   Name follows the dashboard Top Contributors pattern:
+                   truncate + ×N merged pill when a person has >1 alias. -->
               <RouterLink
-                :to="{ name: 'user', params: { userId: c.userId } }"
+                :to="
+                  c.entityKind === 'person'
+                    ? { name: 'person', params: { personId: c.entityId } }
+                    : { name: 'user', params: { userId: c.entityId } }
+                "
                 class="group flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
               >
-                <div class="flex items-center gap-3">
+                <div class="flex min-w-0 items-center gap-3">
                   <span class="w-5 shrink-0 text-right text-sm font-mono text-slate-400">{{ i + 1 }}</span>
-                  <span class="text-sm font-medium text-slate-900">{{ c.displayName }}</span>
+                  <span class="flex min-w-0 items-center gap-1.5 text-sm font-medium text-slate-900">
+                    <span class="truncate" :title="c.displayName">{{ c.displayName }}</span>
+                    <span
+                      v-if="c.entityKind === 'person' && c.attachedUserIds.length > 1"
+                      class="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
+                      :title="`Merged from ${c.attachedUserIds.length} BitBucket accounts`"
+                    >
+                      ×{{ c.attachedUserIds.length }}
+                    </span>
+                  </span>
                 </div>
-                <div class="flex items-center gap-3">
+                <div class="flex shrink-0 items-center gap-3">
                   <!-- Sparkline scoped to this repo (last 30 days of commits
-                       this user landed here). Same hover treatment as the
+                       this entity landed here). Same hover treatment as the
                        dashboard's top-contributors list — slate-400 →
                        blue-600 on row hover. -->
                   <Sparkline
@@ -166,17 +174,8 @@ const filterActor = computed<number | undefined>({
                omitted as it would have a single fixed option. -->
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <label for="repo-filter-user" class="flex items-center gap-1">
-              <span class="text-slate-500">User:</span>
-              <select
-                id="repo-filter-user"
-                v-model.number="filterActor"
-                name="repo-filter-user"
-                class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
-                aria-label="Filter by user"
-              >
-                <option :value="undefined">All</option>
-                <option v-for="u in userOptions" :key="u.userId" :value="u.userId">{{ u.displayName }}</option>
-              </select>
+              <span class="text-slate-500">Contributor:</span>
+              <ActorPicker id="repo-filter-user" v-model="filterActor" />
             </label>
           </div>
         </div>

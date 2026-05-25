@@ -18,9 +18,12 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import ActorPicker from '@/components/ActorPicker.vue';
 import ActivityStatusDonut, { type ActivityBucket } from '@/components/ActivityStatusDonut.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
 import { useStatsStore } from '@/stores/stats';
+import { useActivityFilters } from '@/composables/useActivityFilters';
+import { useActorFilter } from '@/composables/useActorFilter';
 import type { RepoSyncStatus, TrackedRepositorySummary } from '@/api/client';
 
 const stats = useStatsStore();
@@ -81,6 +84,32 @@ function localDateString(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
+
+// Activity-feed filters (project / repo / contributor), mirroring the
+// Projects page. These are SEPARATE controls from the repositories
+// table filter above, so they use prefixed query keys (`aproject` /
+// `arepo`) to avoid colliding with the table's own `?project`. The
+// contributor axis is the shared person-aware ActorPicker on `?actor`.
+const filterActor = useActorFilter();
+const {
+  projectModel: activityProject,
+  repoModel: activityRepo,
+  repoOptions: activityRepoOptions,
+} = useActivityFilters({
+  repositories: computed(() => stats.repositories),
+  queryKeys: { project: 'aproject', repo: 'arepo' },
+});
+const activityFiltersActive = computed(
+  () => filterActor.value !== undefined || activityProject.value !== undefined || activityRepo.value !== undefined,
+);
+function clearActivityFilters(): void {
+  const next = { ...route.query };
+  delete next.aproject;
+  delete next.arepo;
+  delete next.actor;
+  delete next.actorKind;
+  void router.replace({ query: next });
+}
 
 // ---------------------------------------------------------------------------
 // Derived data
@@ -623,12 +652,55 @@ function clearFilters(): void {
       </div>
     </section>
 
-    <!-- Activity feed (workspace-wide, no filter dropdowns — the
-         table above is already the project / status filter UI for
-         this page). Footer link mirrors the per-detail-page footers. -->
+    <!-- Activity feed with project / repo / contributor filters,
+         mirroring the Projects page. These are independent of the
+         repositories table filter above (prefixed query keys), so
+         narrowing the feed doesn't disturb the table. -->
     <section class="mb-4">
-      <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity</h2>
-      <ActivityFeed height="24rem">
+      <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
+        <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <label for="repos-activity-filter-project" class="flex items-center gap-1">
+            <span class="text-slate-500">Project:</span>
+            <select
+              id="repos-activity-filter-project"
+              v-model="activityProject"
+              name="repos-activity-filter-project"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter activity by project"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="p in projectOptions" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </label>
+          <label for="repos-activity-filter-repo" class="flex items-center gap-1">
+            <span class="text-slate-500">Repository:</span>
+            <select
+              id="repos-activity-filter-repo"
+              v-model="activityRepo"
+              name="repos-activity-filter-repo"
+              class="rounded border border-slate-200 bg-white px-2 py-1 text-slate-900"
+              aria-label="Filter activity by repository"
+            >
+              <option :value="undefined">All</option>
+              <option v-for="r in activityRepoOptions" :key="r.fullName" :value="r.fullName">{{ r.slug }}</option>
+            </select>
+          </label>
+          <label for="repos-activity-filter-user" class="flex items-center gap-1">
+            <span class="text-slate-500">Contributor:</span>
+            <ActorPicker id="repos-activity-filter-user" v-model="filterActor" />
+          </label>
+          <button
+            v-if="activityFiltersActive"
+            type="button"
+            class="cursor-pointer text-slate-500 hover:text-slate-700"
+            @click="clearActivityFilters"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      <ActivityFeed :actor="filterActor" :project="activityProject" :repo="activityRepo" height="24rem">
         <template #footer>
           <RouterLink
             :to="{ name: 'activity', query: { after: activitySinceThirtyDays } }"
