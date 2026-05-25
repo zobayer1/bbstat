@@ -146,6 +146,10 @@ rebuild-rollups: ## Re-aggregate commit_daily from commits (drift repair)
 recompute-user-scores: ## Force a ShipShow Score rollup (user_score table)
 	$(PNPM) $(BACKEND) run recompute:user-scores
 
+.PHONY: find-duplicates
+find-duplicates: ## Find likely duplicate-account clusters for person-merge review (read-only)
+	$(PNPM) $(BACKEND) run find:duplicates
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------

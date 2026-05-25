@@ -89,14 +89,49 @@ has any attached aliases (e.g. after a detach that empties the person),
 so the rollup state always matches the current `users.person_id` graph.
 See [`docs/scoring.md`](scoring.md) "Person-aware rollup" for the math.
 
+## Finding merge candidates
+
+Discovery stays manual (no auto-merge), but a **read-only** helper speeds
+up spotting duplicates: `apps/backend/src/scripts/find-duplicate-candidates.ts`.
+It scans every `users` row, normalizes names (strips honorifics / `Md.`-style
+prefixes, sorts tokens) and emails (local-part, gmail dot/`+tag` folding),
+scores every pair on IDF-weighted, typo-tolerant name-token overlap plus
+shared/similar email local-part, and prints ranked clusters. IDF weighting
+is what keeps it useful — a shared **common surname** (Islam, Hossain, …)
+barely counts while a shared **distinctive given name** dominates, so it
+doesn't lump a whole org's "&lt;x&gt; Islam" rows into one blob. It never
+writes to the database.
+
+```bash
+# dev / any checkout with the Node toolchain, pointed at the target DB:
+DATABASE_URL='postgres://…' make find-duplicates       # default min score 0.55
+DATABASE_URL='postgres://…' make find-duplicates 0.7    # tighter (fewer, higher-confidence)
+
+# prod: compiled into the image at dist/scripts/, run via the distroless
+# node entrypoint (no `node` prefix; DATABASE_URL comes from the backend
+# service's compose env, so nothing extra to pass):
+docker compose -f compose.yaml run --rm backend dist/scripts/find-duplicate-candidates.js
+```
+
+Each cluster prints its members (`#id`, `[person#N | unattached]`, name,
+email) plus the pairwise score + signals. A `[person#N]` tag means that
+account is **already merged** — attach the others to person N rather than
+creating a new person. Then merge via the endpoints below.
+
 ## Admin endpoints
 
 All under `/api/admin/people` (open by design today — see
 [`docs/admin.md`](admin.md) for the auth-gating seam). Every mutation
-that changes commit attribution runs a `recomputeAllScores()` pass +
-DELs the affected aliases' `bbstat:user-summary:*` Redis keys, then emits
-an SSE event the frontend uses to re-fetch. `setPrimary` is a UI-only
-flag swap and skips the recompute / cache bust.
+DELs the `bbstat:user-summary:*` key for **every alias in the affected
+person's roster** — not just the one named in the request — because a
+single attach/detach shifts each sibling's `linkedAccounts`, a rename
+changes the embedded `person.displayName`, and a primary swap moves the
+`isPrimary` flag + display-name fallback, all of which are baked into
+each alias's cached summary. Mutations that change commit **attribution**
+(`create`-with-primary / `attach` / `detach` / `dissolve`) additionally
+run a `recomputeAllScores()` pass; `PATCH` (rename) and `primary` skip
+the recompute (no attribution change) but still bust the roster cache.
+Every mutation emits an SSE event the frontend uses to re-fetch.
 
 | Verb + path                | Body                               | Effect                                                                                                     |
 | -------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -269,7 +304,8 @@ activity feed and Top Contributors person-awareness — **landed in 1.2.0**
 | ------------------------- | ---------------------------------------------------------------------------------------- |
 | Schema (table + view)     | `apps/backend/src/db/schema.ts`, `apps/backend/schema/V1_4__people_layer.sql`            |
 | Store (CRUD + invariants) | `apps/backend/src/people/store.ts`, `errors.ts`                                          |
-| Admin routes              | `apps/backend/src/routes/admin.ts`                                                       |
+| Admin routes              | `apps/backend/src/routes/admin.ts` (`refreshAfterPersonMutation`, `rosterUserIds`)       |
+| Duplicate finder          | `apps/backend/src/scripts/find-duplicate-candidates.ts` (read-only candidate clusters)   |
 | Scoring rollup            | `apps/backend/src/scoring/rollup.ts` (`recomputePersonScores`, `recomputeAllScores`)     |
 | Read shapes               | `apps/backend/src/dashboard/stats-store.ts` (`listWorkspaceMembers`, `getPersonSummary`) |
 | SSE events                | `apps/backend/src/events/bus.ts` (`person.*` variants)                                   |

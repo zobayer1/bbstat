@@ -13,6 +13,7 @@
     "doctor": "tsx --env-file-if-exists=../../.env src/scripts/doctor.ts",
     "rebuild:rollups": "tsx --env-file-if-exists=../../.env src/scripts/rebuild-rollups.ts",
     "recompute:user-scores": "tsx --env-file-if-exists=../../.env src/scripts/recompute-user-scores.ts",
+    "find:duplicates": "tsx --env-file-if-exists=../../.env src/scripts/find-duplicate-candidates.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=../../.env dist/index.js",
     "start:sync": "node --env-file-if-exists=../../.env dist/sync/index.js",

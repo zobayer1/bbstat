@@ -2571,14 +2571,20 @@ describe('admin routes', () => {
     });
 
     describe('PATCH /api/admin/people/:id', () => {
-      it('200s, updates display name, emits person.updated', async () => {
+      it('200s, updates display name, emits person.updated, busts every alias cache (no recompute)', async () => {
         const setup = makePeopleSyncDeps();
+        // The new name is embedded in each attached alias's cached summary,
+        // so the whole roster is invalidated — but a rename doesn't touch
+        // attribution, so no score recompute.
         setup.peopleStore.updateDisplayName.mockResolvedValue({
           id: 1,
           displayName: 'Renamed',
           createdAt: new Date(),
           updatedAt: new Date(),
-          attachedUsers: [],
+          attachedUsers: [
+            { id: 4, displayName: 'a', username: null, email: null, bitbucketUuid: '{u4}', isPrimary: true },
+            { id: 5, displayName: 'b', username: null, email: null, bitbucketUuid: '{u5}', isPrimary: false },
+          ],
         });
         appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
 
@@ -2591,9 +2597,8 @@ describe('admin routes', () => {
         expect(res.statusCode).toBe(200);
         expect(setup.peopleStore.updateDisplayName).toHaveBeenCalledWith(1, 'Renamed');
         expect(setup.events.map((e) => e.event)).toEqual(['person.updated']);
-        // PATCH is a metadata edit only — no recompute / cache bust.
         expect(setup.recomputeAllScores).not.toHaveBeenCalled();
-        expect(setup.invalidates).toEqual([]);
+        expect([...setup.invalidates].sort((a, b) => a - b)).toEqual([4, 5]);
       });
 
       it('404s when the person does not exist', async () => {
@@ -2610,9 +2615,21 @@ describe('admin routes', () => {
     });
 
     describe('POST /api/admin/people/:id/attach', () => {
-      it('200s, recomputes, invalidates, emits attached event', async () => {
+      it('200s, recomputes, invalidates the whole post-attach roster, emits attached event', async () => {
         const setup = makePeopleSyncDeps();
         setup.peopleStore.attach.mockResolvedValue({ becamePrimary: false });
+        // Post-attach roster: the new alias (42) plus a pre-existing one (7)
+        // whose `linkedAccounts` just grew. Both must be busted.
+        setup.peopleStore.get.mockResolvedValue({
+          id: 3,
+          displayName: 'Jane',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [
+            { id: 7, displayName: 'jane.corp', username: null, email: null, bitbucketUuid: '{u7}', isPrimary: true },
+            { id: 42, displayName: 'jane.alt', username: null, email: null, bitbucketUuid: '{u42}', isPrimary: false },
+          ],
+        });
         appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
 
         const res = await appInstance.inject({
@@ -2624,7 +2641,7 @@ describe('admin routes', () => {
         expect(res.statusCode).toBe(200);
         expect(setup.peopleStore.attach).toHaveBeenCalledWith(3, 42, {});
         expect(setup.recomputeAllScores).toHaveBeenCalledOnce();
-        expect(setup.invalidates).toEqual([42]);
+        expect([...setup.invalidates].sort((a, b) => a - b)).toEqual([7, 42]);
         expect(setup.events[0]).toMatchObject({
           event: 'person.attached',
           payload: { personId: 3, userId: 42, becamePrimary: false },
@@ -2672,9 +2689,20 @@ describe('admin routes', () => {
     });
 
     describe('POST /api/admin/people/:id/detach', () => {
-      it('200s, recomputes, invalidates, emits detached with wasPrimary', async () => {
+      it('200s, recomputes, invalidates the detached user + remaining roster, emits detached with wasPrimary', async () => {
         const setup = makePeopleSyncDeps();
         setup.peopleStore.detach.mockResolvedValue({ wasPrimary: true });
+        // Post-detach the person still has alias 7; its `linkedAccounts`
+        // shrank, and the detached user 42 is now unattached — bust both.
+        setup.peopleStore.get.mockResolvedValue({
+          id: 3,
+          displayName: 'Jane',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [
+            { id: 7, displayName: 'jane.corp', username: null, email: null, bitbucketUuid: '{u7}', isPrimary: true },
+          ],
+        });
         appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
 
         const res = await appInstance.inject({
@@ -2685,7 +2713,7 @@ describe('admin routes', () => {
 
         expect(res.statusCode).toBe(200);
         expect(setup.recomputeAllScores).toHaveBeenCalledOnce();
-        expect(setup.invalidates).toEqual([42]);
+        expect([...setup.invalidates].sort((a, b) => a - b)).toEqual([7, 42]);
         expect(setup.events[0]).toMatchObject({
           event: 'person.detached',
           payload: { personId: 3, userId: 42, wasPrimary: true },
@@ -2712,9 +2740,22 @@ describe('admin routes', () => {
     });
 
     describe('POST /api/admin/people/:id/primary', () => {
-      it('200s, emits primary-changed, but skips recompute + cache bust', async () => {
+      it('200s, emits primary-changed, busts the roster cache but skips recompute', async () => {
         const setup = makePeopleSyncDeps();
         setup.peopleStore.setPrimary.mockResolvedValue({ previousPrimaryUserId: 5 });
+        // The moved `isPrimary` flag + display-name fallback live in each
+        // alias's cached summary, so the roster is busted — but attribution
+        // is unchanged, so no recompute.
+        setup.peopleStore.get.mockResolvedValue({
+          id: 3,
+          displayName: 'Jane',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          attachedUsers: [
+            { id: 5, displayName: 'a', username: null, email: null, bitbucketUuid: '{u5}', isPrimary: false },
+            { id: 42, displayName: 'b', username: null, email: null, bitbucketUuid: '{u42}', isPrimary: true },
+          ],
+        });
         appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
 
         const res = await appInstance.inject({
@@ -2725,7 +2766,7 @@ describe('admin routes', () => {
 
         expect(res.statusCode).toBe(200);
         expect(setup.recomputeAllScores).not.toHaveBeenCalled();
-        expect(setup.invalidates).toEqual([]);
+        expect([...setup.invalidates].sort((a, b) => a - b)).toEqual([5, 42]);
         expect(setup.events[0]).toMatchObject({
           event: 'person.primary-changed',
           payload: { personId: 3, previousPrimaryUserId: 5, newPrimaryUserId: 42 },

@@ -5,6 +5,33 @@ All notable changes to this project are documented here. Format roughly follows
 strictly SemVer-versioned but releases are tagged in git and each tagged
 release gets a section.
 
+## [Unreleased]
+
+Person-layer operator tooling + a cache-correctness fix, queued for the next
+release.
+
+### Added
+
+- **Duplicate-candidate finder** (`apps/backend/src/scripts/find-duplicate-candidates.ts`)
+  — read-only script that scans `users`, normalizes display names + emails, and
+  prints ranked clusters of likely-duplicate accounts to speed up person
+  merges. Matching is IDF-weighted and typo-tolerant: a shared common surname
+  barely counts while a shared distinctive given name dominates, so it doesn't
+  collapse a whole org's `<x> Islam` rows into one blob. Run via
+  `make find-duplicates` (dev) or, in prod, the compiled
+  `dist/scripts/find-duplicate-candidates.js` through the backend image. See
+  [`docs/people.md`](docs/people.md) "Finding merge candidates".
+
+### Fixed
+
+- **Person-layer cache invalidation now busts the whole alias roster.**
+  `attach` / `detach` previously DEL'd only the single named alias's
+  `bbstat:user-summary:*` key, and `PATCH` (rename) / `primary` busted nothing
+  — so a sibling alias's `/users/:id` page kept serving a stale person name or
+  an empty "Linked accounts" table until the 1h TTL. All four mutations now
+  invalidate every alias in the affected person's roster (rename / primary
+  still skip the score recompute, since they don't change attribution).
+
 ## [1.2.0] — 2026-05-25
 
 Completes the Phase 5 **person layer**: the alias-merge mechanics shipped in
@@ -298,6 +325,7 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.2.0...HEAD
 [1.2.0]: https://github.com/tigerit/bbstat/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tigerit/bbstat/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/tigerit/bbstat/releases/tag/v1.0.0

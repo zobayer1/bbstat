@@ -839,19 +839,38 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     userId: z.number().int().positive(),
   });
 
-  // Refresh path after mutations that change commit attribution. Runs
-  // both scoring passes (cheap — under 200ms on the live corpus) and
-  // DELs the per-user summary Redis keys for every affected alias.
-  // Errors are surfaced to the caller — the mutation already
-  // committed, so a recompute failure is informational; the next sync
-  // tick will redo it.
+  // Cache-only invalidation: DEL the `bbstat:user-summary:{id}` Redis key
+  // for each listed alias. Used directly when a mutation changes a cached
+  // summary's shape but NOT commit attribution (rename, primary swap), so
+  // no score recompute is warranted.
+  async function invalidateUserSummaries(userIds: ReadonlyArray<number>): Promise<void> {
+    if (opts.syncDeps.userSummaryCache === undefined) return;
+    await Promise.all(userIds.map((id) => opts.syncDeps.userSummaryCache!.invalidate(id)));
+  }
+
+  // Every alias currently attached to a person. A person-layer mutation
+  // shifts the cached summary of ALL of them — not just the one the
+  // operator named: attach/detach changes each sibling's `linkedAccounts`,
+  // a rename changes the embedded `person.displayName`, a primary swap
+  // moves the `isPrimary` flag + the display-name fallback. So the whole
+  // roster must be busted. Returns [] if the person is gone.
+  async function rosterUserIds(personId: number): Promise<number[]> {
+    if (opts.syncDeps.peopleStore === undefined) return [];
+    const person = await opts.syncDeps.peopleStore.get(personId);
+    return person?.attachedUsers.map((u) => u.id) ?? [];
+  }
+
+  // Refresh path after mutations that change commit attribution (create
+  // with primary / attach / detach / dissolve). Runs both scoring passes
+  // (cheap — under 200ms on the live corpus) and DELs the per-user summary
+  // Redis keys for every affected alias. Errors are surfaced to the caller
+  // — the mutation already committed, so a recompute failure is
+  // informational; the next sync tick will redo it.
   async function refreshAfterPersonMutation(affectedUserIds: ReadonlyArray<number>): Promise<void> {
     if (opts.syncDeps.recomputeAllScores !== undefined) {
       await opts.syncDeps.recomputeAllScores();
     }
-    if (opts.syncDeps.userSummaryCache !== undefined) {
-      await Promise.all(affectedUserIds.map((id) => opts.syncDeps.userSummaryCache!.invalidate(id)));
-    }
+    await invalidateUserSummaries(affectedUserIds);
   }
 
   app.post('/people', async (request, reply) => {
@@ -924,6 +943,11 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     const body = updatePersonBody.parse(request.body);
     try {
       const person = await opts.syncDeps.peopleStore.updateDisplayName(id, body.displayName);
+      // Rename doesn't touch attribution (no recompute), but the new name
+      // is embedded as `person.displayName` in every attached alias's
+      // cached summary — bust the whole roster so /users/:id stops serving
+      // the old name.
+      await invalidateUserSummaries(person.attachedUsers.map((u) => u.id));
       opts.syncDeps.bus?.publish({ event: 'person.updated', payload: { personId: id } });
       return person;
     } catch (err) {
@@ -947,7 +971,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       const result = await opts.syncDeps.peopleStore.attach(id, body.userId, {
         ...(body.makePrimary !== undefined ? { makePrimary: body.makePrimary } : {}),
       });
-      await refreshAfterPersonMutation([body.userId]);
+      // Bust the whole post-attach roster: the new alias gains a person +
+      // siblings, and every pre-existing alias's `linkedAccounts` grew.
+      await refreshAfterPersonMutation([...new Set([...(await rosterUserIds(id)), body.userId])]);
       opts.syncDeps.bus?.publish({
         event: 'person.attached',
         payload: { personId: id, userId: body.userId, becamePrimary: result.becamePrimary },
@@ -980,7 +1006,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     const body = detachBody.parse(request.body);
     try {
       const result = await opts.syncDeps.peopleStore.detach(id, body.userId);
-      await refreshAfterPersonMutation([body.userId]);
+      // The detached user is now unattached (person=null, no siblings), and
+      // every remaining alias's `linkedAccounts` shrank — bust both the
+      // detached user and the post-detach roster.
+      await refreshAfterPersonMutation([...new Set([...(await rosterUserIds(id)), body.userId])]);
       opts.syncDeps.bus?.publish({
         event: 'person.detached',
         payload: { personId: id, userId: body.userId, wasPrimary: result.wasPrimary },
@@ -1013,9 +1042,11 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     const body = setPrimaryBody.parse(request.body);
     try {
       const result = await opts.syncDeps.peopleStore.setPrimary(id, body.userId);
-      // setPrimary doesn't change commit attribution — skip the
-      // recompute + user-summary cache bust. Still emit SSE so any
-      // open browser sees the new primary on the next read.
+      // setPrimary doesn't change commit attribution — skip the recompute.
+      // It DOES move the `isPrimary` flag and (when the person has no
+      // explicit display_name) the display-name fallback, both of which
+      // live in every alias's cached summary — so bust the roster.
+      await invalidateUserSummaries(await rosterUserIds(id));
       opts.syncDeps.bus?.publish({
         event: 'person.primary-changed',
         payload: {
