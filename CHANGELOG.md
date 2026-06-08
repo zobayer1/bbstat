@@ -7,12 +7,31 @@ release gets a section.
 
 ## [Unreleased]
 
-Repository-health UI follow-ups to 1.3.0's benign-state work — extending the
-same clarity to the repo detail + project pages, and adding an Archived
-filter to the index. Not yet released; ships with the next tag.
+Nothing queued yet.
+
+## [1.4.0] — 2026-06-09
+
+Closes the manual repo-onboarding gap and finishes the repo-health UI pass.
+**Workspace-repo auto-discovery** walks the workspace by `updated_on` and
+auto-tracks the untracked backlog (then newly created repos), off by default
+behind `REPO_DISCOVERY_ENABLED`. The repo detail + project pages now match the
+index's benign-state clarity, and an Archived filter joins the index.
+**No schema change**; `CACHE_VERSION` 21 → 22 (auto-busts on load); one new
+opt-in env var. See the runbook below.
 
 ### Added
 
+- **Workspace-repo auto-discovery sweep** — closes the manual add-a-repo gap.
+  Walks `GET /repositories/{workspace}` ordered by `updated_on` (oldest first,
+  off a persisted Redis cursor `bbstat:repo-discovery-cursor`) and tracks every
+  untracked repo, then advances the cursor — so it backfills the inactive tail
+  first and afterward auto-discovers newly created / re-activated repos at the
+  cursor front. Forks of repos outside the workspace are skipped. Tracked repos
+  flow through the normal cold / deepen / backoff / diff-stats / empty-revival
+  path, so inactive ones self-throttle. Off by default behind
+  `REPO_DISCOVERY_ENABLED`; runs on the repos-cron when on. Preview anytime with
+  `POST /api/admin/sync/discover-repos` (dry-run by default). See
+  [`docs/admin.md`](docs/admin.md).
 - **Archived filter tab on the Repositories index** — lists archived repos,
   and the Active tab now excludes archived so a retired repo no longer reads
   as actively syncing.
@@ -34,6 +53,42 @@ filter to the index. Not yet released; ships with the next tag.
   the detail header shows an "Archived" badge and renders the sync icon
   neutral (gray, "Archived — sync paused") regardless of the frozen last-sync
   status, matching the index treatment.
+
+### Operator notes — deploy runbook (1.3.0 → 1.4.0)
+
+Same containerized stack as 1.3.0. **Light deploy: no schema migration, no
+Redis clear.** One new env var, opt-in.
+
+1. **Build + ship images** (build host):
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.4.0 FRONTEND_IMAGE=bbstat-frontend:v1.4.0 make build-images
+   docker save -o bbstat-v1.4.0.tar bbstat-backend:v1.4.0 bbstat-frontend:v1.4.0
+   scp bbstat-v1.4.0.tar compose.yaml prod:/opt/bbstat/
+   ```
+   The frontend image bakes `CACHE_VERSION=22`; the backend image carries the
+   discovery sweep + `POST /api/admin/sync/discover-repos`.
+2. **Load images** (prod):
+   ```bash
+   docker load -i bbstat-v1.4.0.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.4.0 FRONTEND_IMAGE=bbstat-frontend:v1.4.0
+   ```
+3. **(Optional) enable auto-discovery** — set `REPO_DISCOVERY_ENABLED=true` in
+   `.env.docker` to turn on the cron sweep. Left off (the default), the feature
+   ships dormant with no behaviour change; you can still preview or run it via
+   `POST /api/admin/sync/discover-repos` (dry-run by default).
+4. **Roll out:**
+   ```bash
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml logs migrate   # no new migration in 1.4.0 — the migrator is a no-op
+   ```
+5. **No data action required.** `CACHE_VERSION` 21 → 22 auto-busts stale
+   localStorage on each user's next load; the discovery cursor is a
+   runtime-created Redis key (`bbstat:repo-discovery-cursor`).
+
+> Enabling discovery on a large workspace tracks the untracked backlog at
+> ~100 repos per repos-cron tick; each new repo's history then ingests
+> gradually via the cold / deepen / backoff path, so the rollout spreads out
+> rather than spiking.
 
 ## [1.3.0] — 2026-06-09
 
@@ -436,7 +491,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.3.0...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/tigerit/bbstat/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tigerit/bbstat/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tigerit/bbstat/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tigerit/bbstat/compare/v1.0.0...v1.1.0
