@@ -115,6 +115,30 @@ Rollback is the same flow with the previous tag — both versions can sit on the
 
 **Variables that come from the shell env** (not `.env.docker`): `BACKEND_IMAGE`, `FRONTEND_IMAGE`, `DATABASE_URL`, `REDIS_URL`, `BITBUCKET_AUTH_EMAIL`, `BITBUCKET_AUTH_TOKEN`. The first two have `:-latest` defaults; the rest are either hard-required (`:?`) or empty-by-default (sync disables silently if BB creds are absent).
 
+## Backups
+
+A daily **data-only** Postgres backup script — [`bbstat-backup.sh`](bbstat-backup.sh) — ships alongside `compose.yaml`. It runs `pg_dump` **inside** the Postgres container (hitting Postgres directly, past any reverse proxy / pooler, with a version-matched dump), writes a compressed custom-format dump, verifies it (`pg_restore --list`), and keeps the newest 7 (`RETENTION`). **Data-only on purpose:** the schema is owned by the migrations (the `migrate` one-shot), never the dump — so a restore goes into a freshly-migrated, _empty_ database.
+
+Deploy + schedule on the host, as a user in the `docker` group (not root):
+
+```bash
+scp bbstat-backup.sh prod:/opt/bbstat/ && ssh prod 'chmod +x /opt/bbstat/bbstat-backup.sh'
+# daily 05:00 — point BACKUP_DIR + the log at paths the cron user can write:
+crontab -e
+0 5 * * * BACKUP_DIR=/home/deploy/bbstat-backups /opt/bbstat/bbstat-backup.sh >> /home/deploy/bbstat-backup.log 2>&1
+```
+
+Config via env (script defaults shown): `BACKUP_DIR` (`/var/backups/bbstat`), `RETENTION` (`7`), `PG_CONTAINER` (`bbstat-pg`). **Permissions caveat:** a non-root cron user can't write to `/var/log` or `/var/backups`, so either override `BACKUP_DIR` and the log to paths it owns (as above), or pre-create those dirs/files `chown`ed to that user — otherwise the cron redirect fails before the script even runs. The script writes atomically (verifies a `.partial`, then renames), refuses to write into its own directory, and skips overlapping runs (`flock`). Failures go to stderr (set `MAILTO` in cron to be alerted); it's quiet on success.
+
+Restore (also in the script header) — into a migrated, empty target DB:
+
+```bash
+docker exec -i bbstat-pg pg_restore -U bbstat -d <db> \
+  --data-only --no-owner --no-privileges --disable-triggers < bbstat-data-<ts>.dump
+```
+
+(`--disable-triggers` needs superuser; drop it and rely on `pg_restore`'s dependency ordering if the `bbstat` role isn't a superuser.)
+
 ## Common commands
 
 The root `Makefile` is the canonical entry point for everyday workflows. `make help` lists every target. Most common:
