@@ -168,6 +168,84 @@ Rationale: a brand-new dev with 3 commits has no consistency signal —
 setting it to 1.0 would rank them above veterans on noise; setting it to
 0 punishes them. "Not enough data" is the honest answer.
 
+## Time-constant design review (2026-06-08)
+
+A review of the two time constants — momentum's 30-day half-life and
+consistency's 90-day window. Verdict: **acceptable as designed**; the
+asymmetry between them is principled, not an oversight. Recorded here so a
+future tuning pass doesn't "fix" it by accident.
+
+### The asymmetry is correct — don't match the constants
+
+The natural reflex is "shouldn't both use the same horizon?" — no. They
+measure different things that live on different natural timescales:
+
+- **Momentum (30d half-life)** answers "shipping _right now_." Its center
+  of mass is ~43 days (`half_life / ln 2 ≈ 1.44 × 30`), so it effectively
+  reflects the last ~6 weeks, most weight in the last month. Responsive
+  without thrashing. A 7–14d half-life would make the leaderboard jump on
+  single sprints; a 90d half-life would keep a dev who stopped two months
+  ago ranked high. 30d aligns with monthly/sprint human rhythm.
+- **Consistency (90d window)** answers "working _style_." Cadence is a slow
+  trait you _estimate_ from a sample of inter-active-day gaps. A 30d window
+  gives an every-10-days committer only ~2–3 gaps — too noisy to compute a
+  meaningful CV. 90d gives a stable sample.
+
+Forcing them equal breaks one or the other: 30d consistency is
+statistically underpowered; 90d momentum is sluggish for a "right now"
+headline. Keep both values as-is.
+
+### Known limitation: consistency is a trailing-window trait, not liveness
+
+By construction `consistency_90d` has **no recency weighting and is blind to
+trailing silence** — two consequences worth stating plainly:
+
+1. A dev metronomic in months 1–2 who went quiet in month 3 scores the same
+   as one evenly active across all three. This is the same property that
+   pushed Steady Eddie tiering onto momentum rather than consistency (see
+   "Within-persona tiers" below).
+2. Sharper form: gaps are measured only _between_ active days, so the
+   stretch from the last active day to `now` is never counted as a gap. A
+   dev active on days 1–30 then silent for 60 days posts _perfect_
+   regularity (all gaps = 1); only the gentle `pace_factor` (~0.76 at
+   30/90 active days) pulls them down, landing consistency ~0.76 despite
+   two months dark.
+
+So the column honestly answers "_how regular were they across the window_,"
+**not** "how regular are they _lately_." That is an acceptable division of
+labour **because momentum is the liveness signal** — and the dormancy flag
+(`active_days_90d = 0`) catches the fully-dark case. The trap is "fixing"
+this by baking decay into the consistency formula: that reintroduces exactly
+the decay/window blending the design deliberately refuses (see "Aggregation:
+trending vs windows"). **Do not add decay to consistency.** If staleness
+ever draws a real complaint, the cheap, non-blending fix is a "last active
+N days ago" annotation beside the column — not a change to the math.
+
+### Recommended first tuning knob: BETA
+
+`BETA = 0.25` makes the `pace_factor` nearly cosmetic. Across the full
+activity spectrum it spans only ~0.43 → 1.0:
+
+```
+pace_factor = (active_days / 90) ^ 0.25
+  3 active days  → (3/90)^0.25  ≈ 0.43
+ 45 active days  → (45/90)^0.25 ≈ 0.84
+ 90 active days  → 1.00
+```
+
+A 15× difference in activity (3 vs 45 active days) yields only a ~2×
+difference in pace, so `consistency` is dominated almost entirely by
+`regularity` and pace barely participates. That is intentional ("keep it
+gentle"), but it means **`BETA` is the first dial to turn** if a
+low-activity burster ever ranks too close to a genuinely steady
+contributor — bump it toward **0.4–0.5** to give the activity-rate penalty
+more teeth, _before_ reaching for any structural change. It lives in
+`apps/backend/src/scoring/constants.ts`; a change is policy, so update this
+doc alongside it.
+
+Nothing in this review rises to "needs fixing" — momentum's 30d half-life
+and consistency's 90d window stay as calibrated on 2026-05-21.
+
 ## Badge cascade
 
 First match wins. Computed nightly from the same per-dev signals.
