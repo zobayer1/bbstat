@@ -7,11 +7,44 @@ release gets a section.
 
 ## [Unreleased]
 
-Person-layer operator tooling + a cache-correctness fix, queued for the next
-release.
+Nothing queued yet.
+
+## [1.3.0] — 2026-06-09
+
+Operator-facing reliability + clarity: surgical recovery for broken repo
+syncs, self-healing for empty repos, and a Repositories page that stops
+crying wolf on benign states — plus the person-layer merge tooling queued
+since 1.2.0 and a scoring-methodology write-up. **No schema change**;
+`CACHE_VERSION` 20 → 21 (auto-busts on each user's next load). The deploy
+needs no data migration, no Redis clear, and no new env vars — see the
+runbook below.
 
 ### Added
 
+- **Surgical history-rewrite recovery** (`POST /api/admin/repositories/:workspace/:slug/reconcile`)
+  — when a force-push rewrites the commit a repo's sync cursor points at, the
+  sync auto-excludes it (`history-rewritten`). Reconcile diffs BitBucket's head
+  against our stored commits, deletes only the orphaned (rewritten-away) shas,
+  re-anchors the cursor to the common ancestor, and delta-syncs just the new
+  commits — no full re-walk, no diff-stat re-fetch. Dry-run by default (returns
+  the plan: ancestor, orphan shas, new-commit count); `?dryRun=false` applies.
+  Scoped to the `history-rewritten` state (`409` otherwise); `422` when the
+  rewrite is deeper than the search window. See [`docs/admin.md`](docs/admin.md).
+- **Empty-repo revival sweep** — a repo auto-excluded as `empty-on-bitbucket`
+  is never re-polled, so a later first push went unnoticed until an operator
+  manually re-included it. A new sweep (a gated step in every commit-sync tick,
+  plus on-demand `POST /api/admin/sync/revive-empty`) re-probes empty-excluded,
+  non-archived repos with one cheap BB call each and clears the exclusion the
+  moment one has commits, so the repo self-heals back into the rotation.
+  Archived repos are skipped — archiving is a deliberate retire. Reuses
+  `DEEPEN_BUDGET_THRESHOLD`; no new env vars.
+- **Repository-health clarity on the index** — the Repositories page now
+  distinguishes benign states from problems. Archived repos carry an
+  "Archived" badge (new `TrackedRepositorySummary.archived`), and
+  `empty-on-bitbucket` exclusions render as a benign gray "Empty" (new
+  `RepoSyncStatus` value) that drops out of the Issues tab instead of a red
+  "needs attention" mark. Genuinely-broken exclusions (`repo-404`,
+  `history-rewritten`) stay red.
 - **Duplicate-candidate finder** (`apps/backend/src/scripts/find-duplicate-candidates.ts`)
   — read-only script that scans `users`, normalizes display names + emails, and
   prints ranked clusters of likely-duplicate accounts to speed up person
@@ -22,6 +55,13 @@ release.
   `dist/scripts/find-duplicate-candidates.js` through the backend image. See
   [`docs/people.md`](docs/people.md) "Finding merge candidates".
 
+### Changed
+
+- **`CACHE_VERSION` 20 → 21** — `TrackedRepositorySummary` gained `archived`,
+  and `RepoSyncStatus` gained the `empty` value (both for the Repositories-page
+  benign-state distinctions above). The boot-time bust wipes stale `bbstat-*`
+  localStorage on each user's next load.
+
 ### Fixed
 
 - **Person-layer cache invalidation now busts the whole alias roster.**
@@ -31,6 +71,51 @@ release.
   an empty "Linked accounts" table until the 1h TTL. All four mutations now
   invalidate every alias in the affected person's roster (rename / primary
   still skip the score recompute, since they don't change attribution).
+
+### Documentation
+
+- **ShipShow Score time-constant design review** ([`docs/scoring.md`](docs/scoring.md))
+  — recorded the rationale for momentum's 30-day half-life vs consistency's
+  90-day window (the asymmetry is principled, not an oversight), the known
+  limitation that consistency is a trailing-window trait with no recency
+  weighting, and `BETA` (0.25) as the first tuning knob if the pace factor ever
+  needs more teeth.
+
+### Operator notes — deploy runbook (1.2.0 → 1.3.0)
+
+Same containerized stack as 1.2.0: `compose.yaml`, externally-managed Postgres
+and Redis, and a distroless backend image with a `node` ENTRYPOINT (pass
+`dist/<script>.js` directly, never prefix with `node`). **1.3.0 is a light
+deploy: no schema migration, no Redis clear, no new env vars.**
+
+1. **Build + ship images** (build host):
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.3.0 FRONTEND_IMAGE=bbstat-frontend:v1.3.0 make build-images
+   docker save -o bbstat-v1.3.0.tar bbstat-backend:v1.3.0 bbstat-frontend:v1.3.0
+   scp bbstat-v1.3.0.tar compose.yaml prod:/opt/bbstat/
+   ```
+   The frontend image bakes `CACHE_VERSION=21`; the backend image carries
+   `/reconcile`, `/sync/revive-empty`, and the empty-revival sweep step.
+2. **Load images** (prod):
+   ```bash
+   docker load -i bbstat-v1.3.0.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.3.0 FRONTEND_IMAGE=bbstat-frontend:v1.3.0
+   ```
+3. **Roll out:**
+   ```bash
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml logs migrate   # no new migration in 1.3.0 — V1_4 is the latest; the migrator is a no-op
+   ```
+4. **No data action required.** 1.3.0 adds no columns and changes no
+   Redis-cached (`bbstat:*`) shape, so there is nothing to rebuild or clear; the
+   frontend `CACHE_VERSION` 20 → 21 bust runs automatically on each user's next
+   load.
+
+> **Carry-forward caveat:** if the **1.2.0** deploy's required rollup rebuild
+> (`rebuild-rollups.js` — step 4 of the 1.2.0 runbook, for the 1.1.0
+> merge-exclusion fix) was skipped on this database, run it now. 1.3.0 itself
+> doesn't need it, but the merge-inflated `commit_daily` counts persist until
+> it's done.
 
 ## [1.2.0] — 2026-05-25
 
@@ -325,7 +410,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.2.0...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/tigerit/bbstat/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tigerit/bbstat/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tigerit/bbstat/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/tigerit/bbstat/releases/tag/v1.0.0
