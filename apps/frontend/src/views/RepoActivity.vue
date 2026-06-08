@@ -52,7 +52,17 @@ const filterActor = useActorFilter();
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="flex items-center gap-2 text-3xl font-bold tracking-tight text-slate-900">
           <span>{{ slug }}</span>
-          <SyncStateIcon v-if="activity" :status="activity.repository.syncStatus" />
+          <SyncStateIcon
+            v-if="activity"
+            :status="activity.repository.syncStatus"
+            :archived="activity.repository.archived"
+          />
+          <span
+            v-if="activity?.repository.archived"
+            class="rounded bg-slate-200 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide text-slate-500"
+            title="Soft-retired — excluded from sync; status shown is its last known state."
+            >Archived</span
+          >
         </h1>
         <!-- Thin external link to the canonical BB repo page. Sits
              flush right on the title row so it stays out of the way

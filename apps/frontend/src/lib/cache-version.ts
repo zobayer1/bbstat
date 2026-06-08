@@ -49,7 +49,10 @@
 // `empty` (empty-on-bitbucket exclusions now read as benign "Empty" instead
 // of a red "excluded" issue). Bust so the new syncStatus value lands
 // immediately instead of stale 'excluded' rendering on empty repos.
-export const CACHE_VERSION = 21;
+//
+// 22: RepoActivity.repository gained `archived` — the repo detail page now
+// shows an "Archived" badge and neutralizes the sync icon for retired repos.
+export const CACHE_VERSION = 22;
 
 // localStorage key holding the integer above as a string. Lives outside
 // the `bbstat-` prefix so the bust function doesn't wipe its own sentinel

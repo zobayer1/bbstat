@@ -1392,6 +1392,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
           last_synced_at: string | Date | null;
           sync_excluded: boolean;
+          sync_exclude_reason: string | null;
         }>(sql`
           SELECT
             r.workspace,
@@ -1416,7 +1417,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at,
             ss.last_sync_status,
             ss.last_synced_at,
-            r.sync_excluded
+            r.sync_excluded,
+            r.sync_exclude_reason
           FROM repositories r
           LEFT JOIN sync_state ss ON ss.repository_id = r.id
           WHERE r.project = ${projectKey}
@@ -1452,7 +1454,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           commits30d: r.commits_30d,
           contributors30d: r.contributors_30d,
           lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
-          syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
+          syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded, r.sync_exclude_reason),
         })),
       };
     },
@@ -1546,6 +1548,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           fullName: repositories.fullName,
           project: repositories.project,
           syncExcluded: repositories.syncExcluded,
+          syncExcludeReason: repositories.syncExcludeReason,
+          archived: repositories.archived,
           lastSyncStatus: syncState.lastSyncStatus,
           lastSyncedAt: syncState.lastSyncedAt,
         })
@@ -1694,7 +1698,13 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           slug: repo.slug,
           fullName: repo.fullName,
           project: repo.project,
-          syncStatus: deriveSyncStatus(repo.lastSyncStatus ?? null, repo.lastSyncedAt ?? null, repo.syncExcluded),
+          archived: repo.archived,
+          syncStatus: deriveSyncStatus(
+            repo.lastSyncStatus ?? null,
+            repo.lastSyncedAt ?? null,
+            repo.syncExcluded,
+            repo.syncExcludeReason,
+          ),
         },
         dailyCommits: dailyRows.rows.map((r) => ({
           date: r.date,

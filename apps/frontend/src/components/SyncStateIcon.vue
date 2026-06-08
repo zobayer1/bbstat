@@ -7,6 +7,10 @@ const props = defineProps<{
   // carry the field; treating undefined as 'never' lets stale Pinia state
   // render without crashing. The next backend fetch refreshes it.
   status: RepoSyncStatus | undefined;
+  // When true (the repo is archived/retired), the icon renders neutral
+  // regardless of `status` — a retired repo never reads as "needs
+  // attention", even if its frozen last-sync status was error/excluded.
+  archived?: boolean;
 }>();
 
 type Shape = 'check' | 'warn' | 'dash';
@@ -24,7 +28,15 @@ const META: Record<RepoSyncStatus, { label: string; tone: string; shape: Shape }
   empty: { label: 'Empty on BitBucket — nothing to sync', tone: 'text-slate-400', shape: 'dash' },
 };
 
-const meta = computed(() => META[props.status ?? 'never']);
+// Archived repos are paused, not broken — show a neutral dash, never a
+// warning triangle, whatever the frozen sync status underneath is.
+const ARCHIVED_META: { label: string; tone: string; shape: Shape } = {
+  label: 'Archived — sync paused',
+  tone: 'text-slate-400',
+  shape: 'dash',
+};
+
+const meta = computed(() => (props.archived ? ARCHIVED_META : META[props.status ?? 'never']));
 </script>
 
 <template>

@@ -172,6 +172,7 @@ export interface RepoActivity {
     fullName: string;
     project: string | null;
     syncStatus: RepoSyncStatus;
+    archived: boolean;
   };
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
   // Per-window code-change summary, excluding merge commits. Always
