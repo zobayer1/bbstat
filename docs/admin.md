@@ -24,11 +24,12 @@ per-repo backoff** ([docs/sync.md "Layer 5"](sync.md)) — every tracked
 repo is considered regardless of how recently it was synced. The hourly
 BB-call budget still applies.
 
-| Method | Path                           | Role                                                                                                                       |
-| ------ | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `POST` | `/api/admin/sync/discover`     | Run members + tracked-repo bootstrap sequentially. Inserts new repos from `tracked-repos.yaml`; upserts workspace members. |
-| `POST` | `/api/admin/sync/commits`      | Run a full commit-sync cycle: commits tick → deepen-backfill tick → diff-stats backfill tick.                              |
-| `POST` | `/api/admin/sync/pullrequests` | Run a full PR-sync cycle: iterates tracked repos, delta-pulls PRs.                                                         |
+| Method | Path                           | Role                                                                                                                                                                                                                                                                                 |
+| ------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST` | `/api/admin/sync/discover`     | Run members + tracked-repo bootstrap sequentially. Inserts new repos from `tracked-repos.yaml`; upserts workspace members.                                                                                                                                                           |
+| `POST` | `/api/admin/sync/commits`      | Run a full commit-sync cycle: commits tick → deepen-backfill → diff-stats backfill → empty-revival sweep.                                                                                                                                                                            |
+| `POST` | `/api/admin/sync/pullrequests` | Run a full PR-sync cycle: iterates tracked repos, delta-pulls PRs.                                                                                                                                                                                                                   |
+| `POST` | `/api/admin/sync/revive-empty` | Run only the empty-revival sweep on demand: re-probe `empty-on-bitbucket` excluded (non-archived) repos and clear the exclusion for any that now have commits. Returns `{ checked, revived, stoppedReason }`. The commit cron runs this every tick anyway — use it to skip the wait. |
 
 ```bash
 curl -k -X POST https://bbstat.localhost:8443/api/admin/sync/commits | jq
@@ -139,13 +140,24 @@ nothing to ingest and the deepen tick confirmed BB has no history.
 The exclusion stops the round-robin from cycling through the empty
 row forever.
 
-**Fix:** wait for commits to land on BB, then re-include. The cursor
-reset from `/include` lets the next sync cold-walk the new history.
+**Self-healing (default):** the **empty-revival sweep** runs on every
+commit-sync tick. It re-probes empty-on-bitbucket excluded
+(non-archived) repos with one cheap BB call each and — the moment one
+has commits — clears the exclusion and resets the cursor, so the next
+tick cold-walks the new history. A repo that gets its first push
+recovers on its own; no operator action needed.
+
+**To skip the wait**, trigger the sweep on demand (or `/include` a
+single repo directly — same effect for one repo):
 
 ```bash
-curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/include
+curl -k -X POST https://bbstat.localhost:8443/api/admin/sync/revive-empty | jq
 ```
+
+> **Archived repos are NOT auto-revived.** The sweep skips
+> `archived = true` rows on purpose — archiving is a deliberate retire.
+> To bring an archived empty repo back, `/unarchive` it first; the sweep
+> (or `/include`) then picks it up.
 
 If the repo is _expected_ to stay empty (placeholder, deprecated,
 imported-but-never-used), archive it instead so it stops appearing in

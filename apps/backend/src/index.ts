@@ -14,6 +14,7 @@ import {
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
   diffStatsBackfillOptionsFromConfig,
+  emptyRevivalOptionsFromConfig,
   isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
 } from './sync/runner.js';
@@ -147,6 +148,7 @@ async function main(): Promise<void> {
       deepenOptions: deepenOptionsFromConfig(config),
       isMergeBackfillOptions: isMergeBackfillOptionsFromConfig(config),
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
+      emptyRevivalOptions: emptyRevivalOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
       bus,
       recomputeAllScores: () => recomputeAllScores({ db, logger }),

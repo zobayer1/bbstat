@@ -73,6 +73,11 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
     async listTrackedRepositories() {
       return Array.from(state.repositories.values()).filter((r) => !r.archived && !r.syncExcluded);
     },
+    async listEmptyExcludedRepos() {
+      return Array.from(state.repositories.values()).filter(
+        (r) => !r.archived && r.syncExcluded && r.syncExcludeReason === 'empty-on-bitbucket',
+      );
+    },
     async updateRepositorySyncExcluded(repositoryId, excluded, reason) {
       for (const row of state.repositories.values()) {
         if (row.id === repositoryId) {

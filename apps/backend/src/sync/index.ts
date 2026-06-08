@@ -13,6 +13,7 @@ import {
   commitTickOptionsFromConfig,
   deepenOptionsFromConfig,
   diffStatsBackfillOptionsFromConfig,
+  emptyRevivalOptionsFromConfig,
   isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
   runCommitsSync,
@@ -124,6 +125,7 @@ async function main(): Promise<void> {
   const deepenOptions = deepenOptionsFromConfig(config);
   const isMergeBackfillOptions = isMergeBackfillOptionsFromConfig(config);
   const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
+  const emptyRevivalOptions = emptyRevivalOptionsFromConfig(config);
   const backoffOptions = backoffOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
@@ -141,6 +143,7 @@ async function main(): Promise<void> {
     deepenOptions,
     isMergeBackfillOptions,
     diffStatsBackfillOptions,
+    emptyRevivalOptions,
     backoffOptions,
     bus,
     recomputeAllScores: () => recomputeAllScores({ db, logger }),

@@ -141,6 +141,11 @@ export interface DiscoveryStore {
   // aggregates over the commit/PR tables — cheap at curated-set scale.
   // Archived repos are filtered out, same as listTrackedRepositories.
   listRepositoriesForSync(): Promise<RepositoryForSyncRow[]>;
+
+  // Candidate set for the empty-revival sweep (src/sync/empty-revival.ts):
+  // repos auto-excluded with reason 'empty-on-bitbucket' that are NOT
+  // archived. Archived repos are a deliberate retire and must not auto-revive.
+  listEmptyExcludedRepos(): Promise<RepositoryRow[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +288,30 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
     async deleteRepository(repositoryId) {
       const result = await db.delete(repositories).where(eq(repositories.id, repositoryId));
       return result.rowCount ?? 0;
+    },
+
+    async listEmptyExcludedRepos() {
+      return await db
+        .select({
+          id: repositories.id,
+          bitbucketUuid: repositories.bitbucketUuid,
+          workspace: repositories.workspace,
+          project: repositories.project,
+          slug: repositories.slug,
+          fullName: repositories.fullName,
+          archived: repositories.archived,
+          syncExcluded: repositories.syncExcluded,
+          syncExcludeReason: repositories.syncExcludeReason,
+          diffStatsExcludePatterns: repositories.diffStatsExcludePatterns,
+        })
+        .from(repositories)
+        .where(
+          and(
+            eq(repositories.archived, false),
+            eq(repositories.syncExcluded, true),
+            eq(repositories.syncExcludeReason, 'empty-on-bitbucket'),
+          ),
+        );
     },
 
     async listRepositoriesForSync() {

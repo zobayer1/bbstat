@@ -21,6 +21,7 @@ import { syncRepositoryCommits } from './commits.js';
 import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
 import type { EventBus } from '../events/bus.js';
 import { runDiffStatsBackfillTick, type DiffStatsBackfillTickResult } from './diff-stats-tick.js';
+import { runEmptyRevivalTick, type EmptyRevivalOptions, type EmptyRevivalResult } from './empty-revival.js';
 import {
   runIsMergeBackfillTick,
   type IsMergeBackfillOptions,
@@ -86,6 +87,11 @@ export interface SyncRunnerDeps {
   // commit sync still runs, but pending commits from past ticks won't
   // be picked up.
   diffStatsBackfillOptions?: DiffStatsBackfillTickOptions;
+  // Empty-repo revival sweep — re-probes empty-on-bitbucket excluded
+  // (non-archived) repos and clears the exclusion when BB shows commits, so
+  // a repo that got its first push self-heals back into the rotation. When
+  // omitted the step is skipped (tests, or to disable the sweep).
+  emptyRevivalOptions?: EmptyRevivalOptions;
   // Adaptive per-repo backoff for the commit + PR cron ticks. When
   // omitted, every non-archived repo is checked every tick (legacy
   // behavior). When wired (default in all runtime entrypoints), quiet
@@ -164,6 +170,9 @@ export interface CommitsSyncResult extends BaseResult {
   // newest-first pickup across every non-archived non-excluded repo —
   // see src/sync/diff-stats-tick.ts. Null when the step is disabled.
   diffStatsBackfill: DiffStatsBackfillTickResult | null;
+  // Empty-repo revival sweep outcome. Null when the step is disabled
+  // (emptyRevivalOptions not wired).
+  emptyRevival: EmptyRevivalResult | null;
 }
 
 export interface PrsSyncSummary {
@@ -372,6 +381,32 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
+  // Empty-repo revival sweep — re-probes empty-on-bitbucket excluded
+  // (non-archived) repos with one cheap BB call each and clears the exclusion
+  // the moment one has commits, so a repo that got its first push self-heals
+  // back into the rotation (it'll be ingested next tick). Errors never abort
+  // the commit-sync result.
+  let emptyRevival: EmptyRevivalResult | null = null;
+  if (deps.emptyRevivalOptions !== undefined) {
+    try {
+      emptyRevival = await runEmptyRevivalTick(
+        {
+          client: deps.client,
+          discoveryStore: deps.store,
+          commitStore: deps.commitStore,
+          logger: deps.logger,
+          ...(deps.bus ? { bus: deps.bus } : {}),
+        },
+        deps.emptyRevivalOptions,
+      );
+    } catch (err) {
+      deps.logger.warn?.(
+        { err: err instanceof Error ? err.message : String(err) },
+        'empty-revival: sweep failed — commit sync still successful',
+      );
+    }
+  }
+
   // Score rollup runs last, after every commit-side ingest path has had
   // its turn. Runs both passes (user_score + person_score) under one
   // orchestrator. Wrapped in try/catch — a stale leaderboard for one
@@ -390,7 +425,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
 
   const finishedAt = new Date().toISOString();
   deps.logger.info?.(
-    { trigger, ...summary, deepen, isMergeBackfill, diffStatsBackfill, startedAt, finishedAt },
+    { trigger, ...summary, deepen, isMergeBackfill, diffStatsBackfill, emptyRevival, startedAt, finishedAt },
     'commit sync complete',
   );
 
@@ -401,6 +436,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     deepen,
     isMergeBackfill,
     diffStatsBackfill,
+    emptyRevival,
     commits: summary,
     repoResults: tick.attempted,
     errors: tick.errors,
@@ -553,6 +589,17 @@ export function diffStatsBackfillOptionsFromConfig(config: AppConfig): DiffStats
   return {
     maxCommitsPerTick: config.DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK,
     budgetThreshold: config.DIFF_STATS_BACKFILL_BUDGET_THRESHOLD,
+  };
+}
+
+export function emptyRevivalOptionsFromConfig(config: AppConfig): EmptyRevivalOptions {
+  return {
+    // The empty-excluded set is normally near-empty (newly-tracked repos that
+    // turned out empty), so a modest cap is plenty — it only bounds the
+    // pathological case. Budget gate reuses the deepen threshold; both do BB
+    // history walks.
+    maxReposPerTick: 25,
+    budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
   };
 }
 

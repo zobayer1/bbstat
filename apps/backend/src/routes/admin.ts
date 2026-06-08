@@ -17,6 +17,7 @@ import { BitbucketApiError } from '../bitbucket/errors.js';
 import { validatePatterns } from '../bitbucket/diff-stats-filter.js';
 import { syncRepositoryCommits } from '../sync/commits.js';
 import { reconcileHistoryRewrite } from '../sync/reconcile.js';
+import { runEmptyRevivalTick } from '../sync/empty-revival.js';
 import { deepenOneRepo } from '../sync/deepen-backfill.js';
 import { addTrackedRepository } from '../sync/discovery.js';
 import { syncRepositoryPullRequests } from '../sync/pull-requests.js';
@@ -64,6 +65,24 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
 
   app.post('/sync/commits', async () => {
     return runCommitsSync(opts.syncDeps, 'manual');
+  });
+
+  // Manual trigger for the empty-repo revival sweep — the same step the
+  // commit-sync tick runs, on demand. Re-probes empty-on-bitbucket excluded
+  // (non-archived) repos and clears the exclusion for any that now have
+  // commits, so an operator who knows a repo just got its first push doesn't
+  // have to wait for the cron. Returns { checked, revived, stoppedReason }.
+  app.post('/sync/revive-empty', async () => {
+    return runEmptyRevivalTick(
+      {
+        client: opts.syncDeps.client,
+        discoveryStore: opts.syncDeps.store,
+        commitStore: opts.syncDeps.commitStore,
+        logger: opts.syncDeps.logger,
+        ...(opts.syncDeps.bus ? { bus: opts.syncDeps.bus } : {}),
+      },
+      opts.syncDeps.emptyRevivalOptions ?? { maxReposPerTick: 25, budgetThreshold: 100 },
+    );
   });
 
   app.post('/sync/pullrequests', async () => {
