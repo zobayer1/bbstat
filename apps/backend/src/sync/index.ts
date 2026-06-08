@@ -16,6 +16,7 @@ import {
   emptyRevivalOptionsFromConfig,
   isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
+  repoDiscoveryOptionsFromConfig,
   runCommitsSync,
   runMembersSync,
   runPullRequestsSync,
@@ -126,6 +127,7 @@ async function main(): Promise<void> {
   const isMergeBackfillOptions = isMergeBackfillOptionsFromConfig(config);
   const diffStatsBackfillOptions = diffStatsBackfillOptionsFromConfig(config);
   const emptyRevivalOptions = emptyRevivalOptionsFromConfig(config);
+  const repoDiscoveryOptions = repoDiscoveryOptionsFromConfig(config);
   const backoffOptions = backoffOptionsFromConfig(config);
 
   const deps: SyncRunnerDeps = {
@@ -145,6 +147,8 @@ async function main(): Promise<void> {
     diffStatsBackfillOptions,
     emptyRevivalOptions,
     backoffOptions,
+    cache: redis,
+    repoDiscoveryOptions,
     bus,
     recomputeAllScores: () => recomputeAllScores({ db, logger }),
     peopleStore: createDrizzlePeopleStore(db),
@@ -181,6 +185,7 @@ async function main(): Promise<void> {
       commitsCron: config.SYNC_COMMITS_CRON,
       prsEnabled: config.SYNC_PRS_ENABLED,
       prsCron: config.SYNC_PRS_CRON,
+      repoDiscoveryEnabled: config.REPO_DISCOVERY_ENABLED,
       hourlyCallBudget: config.BITBUCKET_HOURLY_CALL_BUDGET,
       minCallIntervalMs: config.BITBUCKET_MIN_CALL_INTERVAL_MS,
       maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,

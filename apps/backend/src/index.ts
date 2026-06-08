@@ -17,6 +17,7 @@ import {
   emptyRevivalOptionsFromConfig,
   isMergeBackfillOptionsFromConfig,
   prTickOptionsFromConfig,
+  repoDiscoveryOptionsFromConfig,
 } from './sync/runner.js';
 import { bitbucketAuthStateCache, createCache } from './cache/redis.js';
 import { createDrizzleRollupStore } from './dashboard/rollup-store.js';
@@ -150,6 +151,8 @@ async function main(): Promise<void> {
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
       emptyRevivalOptions: emptyRevivalOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
+      cache: redis,
+      repoDiscoveryOptions: repoDiscoveryOptionsFromConfig(config),
       bus,
       recomputeAllScores: () => recomputeAllScores({ db, logger }),
       peopleStore: createDrizzlePeopleStore(db),

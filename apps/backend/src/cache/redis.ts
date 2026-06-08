@@ -18,6 +18,7 @@ export const KEY_PREFIX = 'bbstat:';
 
 const USER_SUMMARY_PREFIX = `${KEY_PREFIX}user-summary:`;
 const BITBUCKET_AUTH_STATE_KEY = `${KEY_PREFIX}bitbucket-auth-state`;
+const REPO_DISCOVERY_CURSOR_KEY = `${KEY_PREFIX}repo-discovery-cursor`;
 
 // Subtle dashboard signal: when BitBucket returns 401/403 (token expired,
 // scopes revoked, or repo access pulled), the `BitbucketClient` fires its
@@ -40,6 +41,27 @@ export const bitbucketAuthStateCache = {
   },
   async clear(cache: CacheClient): Promise<void> {
     await cache.del(BITBUCKET_AUTH_STATE_KEY);
+  },
+};
+
+// Workspace-repo discovery cursor: the `updated_on` of the newest repo the
+// discovery sweep (src/sync/repo-discovery.ts) has processed. The sweep walks
+// GET /repositories/{ws} ordered by updated_on ASC with `updated_on > <this>`,
+// so it advances monotonically — backfilling the inactive tail first, then
+// following newly updated / created repos. No TTL: the cursor must survive
+// restarts (losing it just re-walks from the seed, which is idempotent but
+// wasteful). Stored as the raw ISO string so an operator can inspect it via
+// `redis-cli GET bbstat:repo-discovery-cursor`.
+export const repoDiscoveryCursorCache = {
+  key: REPO_DISCOVERY_CURSOR_KEY,
+  async get(cache: CacheClient): Promise<string | null> {
+    return await cache.get(REPO_DISCOVERY_CURSOR_KEY);
+  },
+  async set(cache: CacheClient, updatedOn: string): Promise<void> {
+    await cache.set(REPO_DISCOVERY_CURSOR_KEY, updatedOn);
+  },
+  async clear(cache: CacheClient): Promise<void> {
+    await cache.del(REPO_DISCOVERY_CURSOR_KEY);
   },
 };
 

@@ -139,6 +139,17 @@ const envSchema = z.object({
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
   SYNC_PRS_CRON: z.string().default('0 * * * *'),
+  // Auto-track workspace repos via the discovery sweep
+  // (src/sync/repo-discovery.ts). Default `false`: enabling walks
+  // GET /repositories/{workspace} by updated_on (oldest first, Redis cursor)
+  // and tracks every untracked repo (forks of external repos excluded), which
+  // then ingest through the normal cold / deepen / backoff path. The admin
+  // dry-run preview (`POST /api/admin/sync/discover-repos`) works regardless
+  // of this flag; the flag only gates the cron sweep.
+  REPO_DISCOVERY_ENABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true' || v === '1'),
   PR_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   PR_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
   PR_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),

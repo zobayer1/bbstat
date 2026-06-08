@@ -18,6 +18,7 @@ import { validatePatterns } from '../bitbucket/diff-stats-filter.js';
 import { syncRepositoryCommits } from '../sync/commits.js';
 import { reconcileHistoryRewrite } from '../sync/reconcile.js';
 import { runEmptyRevivalTick } from '../sync/empty-revival.js';
+import { runRepoDiscoverySweep } from '../sync/repo-discovery.js';
 import { deepenOneRepo } from '../sync/deepen-backfill.js';
 import { addTrackedRepository } from '../sync/discovery.js';
 import { syncRepositoryPullRequests } from '../sync/pull-requests.js';
@@ -82,6 +83,30 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         ...(opts.syncDeps.bus ? { bus: opts.syncDeps.bus } : {}),
       },
       opts.syncDeps.emptyRevivalOptions ?? { maxReposPerTick: 25, budgetThreshold: 100 },
+    );
+  });
+
+  // Workspace-repo discovery sweep — preview or apply on demand. Walks
+  // GET /repositories/{workspace} by updated_on and tracks untracked repos
+  // (forks of external repos excluded). DRY-RUN by default (lists what it
+  // WOULD add, without inserting or advancing the Redis cursor); pass
+  // `?dryRun=false` to apply. Works regardless of REPO_DISCOVERY_ENABLED, so
+  // an operator can preview before turning on the cron sweep.
+  app.post<{ Querystring: { dryRun?: string } }>('/sync/discover-repos', async (request, reply) => {
+    if (opts.syncDeps.cache === undefined) {
+      return reply.code(503).send({ error: 'cache_not_wired' });
+    }
+    const dryRun = request.query.dryRun !== 'false' && request.query.dryRun !== '0';
+    const base = opts.syncDeps.repoDiscoveryOptions ?? { maxReposPerSweep: 100, budgetThreshold: 100 };
+    return runRepoDiscoverySweep(
+      {
+        client: opts.syncDeps.client,
+        cache: opts.syncDeps.cache,
+        store: opts.syncDeps.store,
+        workspace: opts.syncDeps.workspace,
+        logger: opts.syncDeps.logger,
+      },
+      { ...base, dryRun },
     );
   });
 

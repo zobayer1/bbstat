@@ -22,6 +22,8 @@ import { runDeepenTick, type DeepenTickResult } from './deepen-backfill.js';
 import type { EventBus } from '../events/bus.js';
 import { runDiffStatsBackfillTick, type DiffStatsBackfillTickResult } from './diff-stats-tick.js';
 import { runEmptyRevivalTick, type EmptyRevivalOptions, type EmptyRevivalResult } from './empty-revival.js';
+import { runRepoDiscoverySweep, type RepoDiscoveryOptions, type RepoDiscoveryResult } from './repo-discovery.js';
+import type { CacheClient } from '../cache/redis.js';
 import {
   runIsMergeBackfillTick,
   type IsMergeBackfillOptions,
@@ -104,6 +106,13 @@ export interface SyncRunnerDeps {
   // deepen-backfill.ts) also publish `repository.sync-excluded`
   // through this bus. Optional — omit in tests that don't care.
   bus?: EventBus;
+  // Raw Redis client — backs the repo-discovery cursor
+  // (`bbstat:repo-discovery-cursor`). Omit to disable the discovery sweep.
+  cache?: CacheClient;
+  // Workspace-repo auto-discovery sweep. When wired (REPO_DISCOVERY_ENABLED),
+  // runReposSync / runDiscoverySync walk the workspace and track untracked
+  // repos. Omitted → the step is skipped.
+  repoDiscoveryOptions?: RepoDiscoveryOptions;
   // ShipShow Score rollup (docs/scoring.md phase 3 + Phase 5). When
   // wired, runs at the end of every successful runCommitsSync — after
   // all commit-side ingest (delta + deepen + is-merge + diff-stats
@@ -135,11 +144,15 @@ export interface MembersSyncResult extends BaseResult {
 
 export interface ReposSyncResult extends BaseResult {
   repos: BootstrapReposResult;
+  // Workspace-repo discovery sweep outcome. Null when disabled
+  // (REPO_DISCOVERY_ENABLED=false, or cache not wired).
+  repoDiscovery: RepoDiscoveryResult | null;
 }
 
 export interface DiscoverySyncResult extends BaseResult {
   members: SyncMembersResult;
   repos: BootstrapReposResult;
+  repoDiscovery: RepoDiscoveryResult | null;
 }
 
 export interface CommitsSyncSummary {
@@ -201,14 +214,35 @@ export async function runMembersSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   return { trigger, startedAt, finishedAt, members };
 }
 
+// Shared repo-discovery step for the repos / discovery sync entrypoints. A
+// no-op (returns null) unless both the Redis cache and discovery options are
+// wired (REPO_DISCOVERY_ENABLED). Failure-isolated — a discovery error never
+// fails the repos sync.
+async function maybeRunRepoDiscovery(deps: SyncRunnerDeps): Promise<RepoDiscoveryResult | null> {
+  if (deps.cache === undefined || deps.repoDiscoveryOptions === undefined) return null;
+  try {
+    return await runRepoDiscoverySweep(
+      { client: deps.client, cache: deps.cache, store: deps.store, workspace: deps.workspace, logger: deps.logger },
+      deps.repoDiscoveryOptions,
+    );
+  } catch (err) {
+    deps.logger.warn?.(
+      { err: err instanceof Error ? err.message : String(err) },
+      'repo-discovery sweep failed — repos sync still successful',
+    );
+    return null;
+  }
+}
+
 export async function runReposSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<ReposSyncResult> {
   const startedAt = new Date().toISOString();
   const seeds = deps.seeds();
   deps.logger.info?.({ trigger, workspace: deps.workspace, seedCount: seeds.length }, 'repos sync start');
   const repos = await bootstrapTrackedRepositories(deps, seeds);
+  const repoDiscovery = await maybeRunRepoDiscovery(deps);
   const finishedAt = new Date().toISOString();
-  deps.logger.info?.({ trigger, repos, startedAt, finishedAt }, 'repos sync complete');
-  return { trigger, startedAt, finishedAt, repos };
+  deps.logger.info?.({ trigger, repos, repoDiscovery, startedAt, finishedAt }, 'repos sync complete');
+  return { trigger, startedAt, finishedAt, repos, repoDiscovery };
 }
 
 export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<DiscoverySyncResult> {
@@ -216,9 +250,10 @@ export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigge
   deps.logger.info?.({ trigger, workspace: deps.workspace }, 'discovery sync start');
   const members = await syncWorkspaceMembers(deps, deps.workspace);
   const repos = await bootstrapTrackedRepositories(deps, deps.seeds());
+  const repoDiscovery = await maybeRunRepoDiscovery(deps);
   const finishedAt = new Date().toISOString();
-  deps.logger.info?.({ trigger, members, repos, startedAt, finishedAt }, 'discovery sync complete');
-  return { trigger, startedAt, finishedAt, members, repos };
+  deps.logger.info?.({ trigger, members, repos, repoDiscovery, startedAt, finishedAt }, 'discovery sync complete');
+  return { trigger, startedAt, finishedAt, members, repos, repoDiscovery };
 }
 
 export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<CommitsSyncResult> {
@@ -599,6 +634,18 @@ export function emptyRevivalOptionsFromConfig(config: AppConfig): EmptyRevivalOp
     // pathological case. Budget gate reuses the deepen threshold; both do BB
     // history walks.
     maxReposPerTick: 25,
+    budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
+  };
+}
+
+// Returns the discovery options only when REPO_DISCOVERY_ENABLED — undefined
+// (sweep skipped) otherwise. One BB page per sweep; a large workspace's
+// backfill spreads over several repos-cron ticks. Budget gate reuses the
+// deepen threshold.
+export function repoDiscoveryOptionsFromConfig(config: AppConfig): RepoDiscoveryOptions | undefined {
+  if (!config.REPO_DISCOVERY_ENABLED) return undefined;
+  return {
+    maxReposPerSweep: 100,
     budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
   };
 }
