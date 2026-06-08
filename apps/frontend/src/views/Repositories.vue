@@ -64,11 +64,11 @@ const projectFilter = computed<string | undefined>({
   get: () => (typeof route.query.project === 'string' ? route.query.project : undefined),
   set: (v) => setQueryParam('project', v),
 });
-type StatusFilter = 'all' | 'active' | 'issues';
+type StatusFilter = 'all' | 'active' | 'issues' | 'archived';
 const statusFilter = computed<StatusFilter>({
   get: () => {
     const v = route.query.status;
-    if (v === 'active' || v === 'issues') return v;
+    if (v === 'active' || v === 'issues' || v === 'archived') return v;
     return 'all';
   },
   set: (v) => setQueryParam('status', v === 'all' ? undefined : v),
@@ -215,8 +215,9 @@ const filtered = computed<TrackedRepositorySummary[]>(() => {
   const statusScope = statusFilter.value;
   return stats.repositories.filter((r) => {
     if (projectScope !== undefined && r.project !== projectScope) return false;
-    if (statusScope === 'active' && r.syncStatus !== 'ok') return false;
+    if (statusScope === 'active' && (r.syncStatus !== 'ok' || r.archived)) return false;
     if (statusScope === 'issues' && r.syncStatus !== 'error' && r.syncStatus !== 'excluded') return false;
+    if (statusScope === 'archived' && !r.archived) return false;
     if (q !== '') {
       const haystack = `${r.slug} ${r.project ?? ''} ${r.workspace}`.toLowerCase();
       if (!haystack.includes(q)) return false;
@@ -477,6 +478,16 @@ function clearFilters(): void {
             @click="statusFilter = 'issues'"
           >
             Issues
+          </button>
+          <button
+            type="button"
+            class="cursor-pointer px-3 py-2 transition"
+            :class="
+              statusFilter === 'archived' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+            "
+            @click="statusFilter = 'archived'"
+          >
+            Archived
           </button>
         </div>
         <button
