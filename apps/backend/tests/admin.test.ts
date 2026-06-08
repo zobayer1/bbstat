@@ -102,6 +102,9 @@ function noopCommitStore(): CommitStore {
     // throwing would false-positive those tests that don't exercise
     // commit-sync proper.
     async resetSyncCursors() {},
+    listRecentCommitShas: fail,
+    deleteCommitsByShas: fail,
+    setLastSeenSha: fail,
     async resetDiffStatsForRepo() {
       return { resetCount: 0 };
     },
@@ -397,6 +400,13 @@ function createFakeCommitStore(): { store: CommitStore; state: FakeCommitStoreSt
     async resetDiffStatsForRepo() {
       return { resetCount: 0 };
     },
+    async listRecentCommitShas() {
+      return [];
+    },
+    async deleteCommitsByShas() {
+      return 0;
+    },
+    async setLastSeenSha() {},
   };
   return { store, state };
 }
@@ -894,6 +904,66 @@ describe('admin routes', () => {
       });
 
       expect(res.statusCode).toBe(404);
+    });
+  });
+
+  describe('POST /api/admin/repositories/:workspace/:slug/reconcile', () => {
+    it('returns 404 when the repo is not tracked', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/ghost/reconcile',
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/ghost' });
+    });
+
+    it('returns 409 when the repo is not excluded (wrong state)', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+
+        archived: false,
+      });
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/reconcile',
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'not_history_rewritten', syncExcluded: false });
+    });
+
+    it('returns 409 when excluded for a reason other than history-rewritten', async () => {
+      const { deps } = makeSyncDeps(fetchMock);
+      const { row } = await deps.store.insertRepositoryWithSyncState({
+        bitbucketUuid: '{r1}',
+        workspace: 'tigerit',
+        project: 'BOING',
+        slug: 'boing-server',
+        fullName: 'tigerit/boing-server',
+
+        archived: false,
+      });
+      await deps.store.updateRepositorySyncExcluded(row.id, true, 'repo-404');
+      appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+
+      const res = await appInstance.inject({
+        method: 'POST',
+        url: '/api/admin/repositories/tigerit/boing-server/reconcile',
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ error: 'not_history_rewritten', syncExcludeReason: 'repo-404' });
     });
   });
 

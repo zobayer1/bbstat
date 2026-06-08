@@ -59,18 +59,19 @@ rows on first insert; per-repo flag changes happen via these endpoints.
 See [`tracked-repos.yaml.example`](../tracked-repos.yaml.example) for the
 seed-only semantics.
 
-| Method   | Path                                                             | Role                                                                                                                                                                                                                                                                                                                                                                   |
-| -------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST`   | `/api/admin/repositories`                                        | Add a new tracked repo. Body: `{ workspace: string, slug: string }`. Validates via BB `/repositories/{ws}/{slug}` before insert. Returns `201` on insert, `200` on already-tracked (idempotent), `404` if BB doesn't recognize the repo, `400` on malformed body.                                                                                                      |
-| `POST`   | `/api/admin/repositories/:workspace/:slug/archive`               | Soft-retire a tracked repo (operator-initiated). Excludes it from `listTrackedRepositories()` so commit / deepen / diff-stats ticks skip it; historical data (`commits`, `sync_state`, `pull_requests`, `branches`) is preserved. Idempotent.                                                                                                                          |
-| `POST`   | `/api/admin/repositories/:workspace/:slug/unarchive`             | Reverse archive. Idempotent.                                                                                                                                                                                                                                                                                                                                           |
-| `POST`   | `/api/admin/repositories/:workspace/:slug/include`               | Recover from an auto-trip exclusion (`sync_excluded` set by the sync layer on 404 / empty / history-rewritten). Clears `sync_excluded` + `sync_exclude_reason` AND resets the commit-sync cursors (`last_seen_sha` → NULL, `deepen_complete` → false, `is_merge_backfill_complete` → false). Idempotent on non-excluded repos.                                         |
-| `POST`   | `/api/admin/repositories/:workspace/:slug/rename`                | Operator-initiated rename. Body: `{ workspace: string, slug: string }` — the new BB identity. Verifies UUID match (the same repo, just renamed) and updates ws/slug/full_name/project. Clears any exclusion + resets cursors so the next tick re-syncs cleanly. Returns `409 uuid_mismatch` if BB resolves to a different repo.                                        |
-| `DELETE` | `/api/admin/repositories/:workspace/:slug`                       | Hard delete. Cascades via FKs to commits, sync_state, branches, pull_requests. Use when archive is insufficient. Returns `200` with `{ deleted: 1 }` on success, `404` if not tracked.                                                                                                                                                                                 |
-| `POST`   | `/api/admin/repositories/:workspace/:slug/backfill/is_merge`     | One-shot retroactive backfill of the `is_merge` column on already-ingested commits. Walks BB `/commits` for the repo and bulk-UPDATEs `is_merge` by sha. The cron-paced is-merge backfill tick handles steady-state coverage; this endpoint forces a full walk for one repo without waiting for the rotation. Idempotent.                                              |
-| `GET`    | `/api/admin/repositories/:workspace/:slug/diff-stats/exclusions` | Read the per-repo diff-stat file-path blacklist. Returns `{ patterns: string[] }` (empty by default).                                                                                                                                                                                                                                                                  |
-| `PUT`    | `/api/admin/repositories/:workspace/:slug/diff-stats/exclusions` | Replace the blacklist. Body: `{ patterns: string[] }` — picomatch globs (`*.png`, `**/pnpm-lock.yaml`, `dist/**`). Slashless patterns match at any depth (gitignore-style). Each pattern is validated; invalid ones return `400 invalid_pattern`. Cheap (DB-only). Does NOT touch commit data — pair with `POST .../reset` to apply the new filter retroactively.      |
-| `POST`   | `/api/admin/repositories/:workspace/:slug/diff-stats/reset`      | Re-arm diff-stat backfill for the repo. Zeros `commits.additions/deletions/files_changed`, clears `diff_stats_synced_at`, AND zeros `commit_daily.additions/deletions` (so the dashboard shows clearly-wrong rather than subtly-wrong during the drain). The existing backfill ticks re-fetch /diffstat using the current exclusion list. Returns `{ resetCount: N }`. |
+| Method   | Path                                                             | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/api/admin/repositories`                                        | Add a new tracked repo. Body: `{ workspace: string, slug: string }`. Validates via BB `/repositories/{ws}/{slug}` before insert. Returns `201` on insert, `200` on already-tracked (idempotent), `404` if BB doesn't recognize the repo, `400` on malformed body.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/archive`               | Soft-retire a tracked repo (operator-initiated). Excludes it from `listTrackedRepositories()` so commit / deepen / diff-stats ticks skip it; historical data (`commits`, `sync_state`, `pull_requests`, `branches`) is preserved. Idempotent.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/unarchive`             | Reverse archive. Idempotent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/include`               | Recover from an auto-trip exclusion (`sync_excluded` set by the sync layer on 404 / empty / history-rewritten). Clears `sync_excluded` + `sync_exclude_reason` AND resets the commit-sync cursors (`last_seen_sha` → NULL, `deepen_complete` → false, `is_merge_backfill_complete` → false). Idempotent on non-excluded repos.                                                                                                                                                                                                                                                                                                                                            |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/rename`                | Operator-initiated rename. Body: `{ workspace: string, slug: string }` — the new BB identity. Verifies UUID match (the same repo, just renamed) and updates ws/slug/full_name/project. Clears any exclusion + resets cursors so the next tick re-syncs cleanly. Returns `409 uuid_mismatch` if BB resolves to a different repo.                                                                                                                                                                                                                                                                                                                                           |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/reconcile`             | Surgical recovery for a repo auto-excluded with reason `history-rewritten` (a force-push rewrote the cursor commit). Diffs BB's head against our recent history, deletes only the orphaned (rewritten-away) shas, re-anchors `last_seen_sha` to the common ancestor, and delta-syncs just the new commits — no full re-walk, no diff-stat re-fetch. **Defaults to dry-run** (returns the plan: ancestor, orphan shas, new-commit count); pass `?dryRun=false` to apply. Scoped to `history-rewritten` only (`409 not_history_rewritten` otherwise); `422 no_common_ancestor` when the rewrite is deeper than the search window. Run it **before** `/include` (see below). |
+| `DELETE` | `/api/admin/repositories/:workspace/:slug`                       | Hard delete. Cascades via FKs to commits, sync_state, branches, pull_requests. Use when archive is insufficient. Returns `200` with `{ deleted: 1 }` on success, `404` if not tracked.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/backfill/is_merge`     | One-shot retroactive backfill of the `is_merge` column on already-ingested commits. Walks BB `/commits` for the repo and bulk-UPDATEs `is_merge` by sha. The cron-paced is-merge backfill tick handles steady-state coverage; this endpoint forces a full walk for one repo without waiting for the rotation. Idempotent.                                                                                                                                                                                                                                                                                                                                                 |
+| `GET`    | `/api/admin/repositories/:workspace/:slug/diff-stats/exclusions` | Read the per-repo diff-stat file-path blacklist. Returns `{ patterns: string[] }` (empty by default).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `PUT`    | `/api/admin/repositories/:workspace/:slug/diff-stats/exclusions` | Replace the blacklist. Body: `{ patterns: string[] }` — picomatch globs (`*.png`, `**/pnpm-lock.yaml`, `dist/**`). Slashless patterns match at any depth (gitignore-style). Each pattern is validated; invalid ones return `400 invalid_pattern`. Cheap (DB-only). Does NOT touch commit data — pair with `POST .../reset` to apply the new filter retroactively.                                                                                                                                                                                                                                                                                                         |
+| `POST`   | `/api/admin/repositories/:workspace/:slug/diff-stats/reset`      | Re-arm diff-stat backfill for the repo. Zeros `commits.additions/deletions/files_changed`, clears `diff_stats_synced_at`, AND zeros `commit_daily.additions/deletions` (so the dashboard shows clearly-wrong rather than subtly-wrong during the drain). The existing backfill ticks re-fetch /diffstat using the current exclusion list. Returns `{ resetCount: N }`.                                                                                                                                                                                                                                                                                                    |
 
 ```bash
 # Add a new repo to the curated set
@@ -89,6 +90,13 @@ curl -k -X POST \
 # Recover a repo the sync auto-excluded (any reason)
 curl -k -X POST \
   https://bbstat.localhost:8443/api/admin/repositories/tigerit/some-repo/include
+
+# Surgically recover a history-rewritten repo — preview, then apply.
+# Run this BEFORE /include (see "Reason: history-rewritten" below).
+curl -k -X POST \
+  https://bbstat.localhost:8443/api/admin/repositories/tigerit/some-repo/reconcile   # dry-run plan
+curl -k -X POST \
+  'https://bbstat.localhost:8443/api/admin/repositories/tigerit/some-repo/reconcile?dryRun=false'  # apply
 
 # Rename a repo that's been renamed on BB (UUID must match)
 curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories/tigerit/old-name/rename \
@@ -189,10 +197,46 @@ sha is no longer reachable. The auto-trip **does not insert the new
 commits** — under the same `repository_id` they would land alongside
 the orphaned old shas and silently double-count in every aggregate.
 
-**Preferred fix: wipe and re-track.** The orphan-row problem is real
-and cumulative (each subsequent force-push compounds it), and there's
-no honest way to reconcile two disjoint sha sets after the fact. The
-DELETE + re-add gives you a clean, single-history row going forward.
+**Preferred fix: `/reconcile` (surgical, API-frugal).** A force-push
+almost always rewrites only the tip, so the bulk of history is
+unchanged and already stored. `/reconcile` exploits that: it walks BB's
+head only as far as the common ancestor, deletes just the orphaned
+shas, re-anchors the cursor to that ancestor, and delta-syncs the
+handful of new commits — no full re-walk, no re-fetch of existing
+diff-stats. It defaults to dry-run so you can eyeball the orphan list
+before the irreversible delete.
+
+```bash
+# 1. Dry-run FIRST — returns the plan without mutating: the common
+#    ancestor sha, the exact orphan shas to delete, and the count of
+#    new commits the apply step will ingest.
+curl -k -X POST \
+  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/reconcile
+
+# 2. Eyeball the orphan list, then apply.
+curl -k -X POST \
+  'https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/reconcile?dryRun=false'
+```
+
+Applying recomputes the affected `commit_daily` day range and re-runs
+the score rollup, so deleted orphans and inserted commits both land in
+the dashboard immediately.
+
+> **Run `/reconcile` BEFORE `/include`.** `/reconcile` operates on the
+> still-excluded repo, where the orphan sits at _our_ tip (above the
+> ancestor) and is cleanly detectable. `/include` clears the exclusion
+> and nulls the cursor, so the very next cron tick cold-re-walks the
+> whole repo — which both spends the API calls `/reconcile` was built to
+> save **and** moves the orphan _below_ the new head, where `/reconcile`
+> can no longer see it. If you've already `/include`d and a tick has run,
+> fall back to a manual orphan delete (diff BB's shas against `commits`,
+> then `DELETE … WHERE repository_id = $1 AND sha IN (…)`).
+
+**Fallback: wipe and re-track (deep rewrites).** If the rewrite is
+deeper than the search window — `/reconcile` returns
+`422 no_common_ancestor`, meaning BB's head shares no commit with our
+recent history — there's no surgical anchor. DELETE + re-add rebuilds a
+clean single-history row:
 
 ```bash
 # 1. Drop the tracked row and all its history (cascades to commits,
@@ -207,30 +251,17 @@ curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories \
   -d '{"workspace":"tigerit","slug":"<slug>"}'
 ```
 
-The next commit-sync tick cold-walks recent history; deepen +
-is-merge backfill catch up the rest over subsequent ticks. Dashboards
-will show a drop in this repo's historical contribution counts until
-the deepen tick has filled coverage — that's the cost of the clean
-slate.
+The next commit-sync tick cold-walks recent history; deepen + is-merge
+backfill catch up the rest over subsequent ticks. Dashboards show a drop
+in this repo's historical counts until deepen fills coverage — the cost
+of the clean slate.
 
-**Alternative (faster but dirty): `/include` and accept the orphans.**
-Only choose this when the force-push touched a small recent slice
-(e.g., a squash-merge or signed-commit rewrite of the last few
-commits), so the resulting orphan rows are a minor fraction of total
-history.
-
-```bash
-curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/include
-```
-
-`/include` clears `sync_excluded` and resets cursors (`last_seen_sha
-= NULL`, `deepen_complete = false`, `is_merge_backfill_complete =
-false`); cold-mode then inserts the new shas alongside the old ones.
-The old rows remain in the DB indefinitely — they don't collide on
-`(repository_id, sha)`, so insertion just adds the new history beside
-them. Dashboard aggregates over `commits` / `commit_daily` will
-include both sets.
+**Not recommended: `/include` and accept the orphans.** `/include`
+clears `sync_excluded` and nulls the cursor; cold-mode then inserts the
+new shas _alongside_ the old orphaned ones (they don't collide on
+`(repository_id, sha)`), so aggregates over `commits` / `commit_daily`
+double-count the rewritten range indefinitely. `/reconcile` exists
+specifically to avoid this — prefer it.
 
 ## Error shapes
 
@@ -239,7 +270,8 @@ follow:
 
 - `400` — `{ error: "invalid_body", issues: [...] }` — Zod parse failure on the request body. `/diff-stats/exclusions` PUT also returns `{ error: "invalid_pattern", pattern: "…", message: "…" }` if a glob fails to parse.
 - `404` — `{ error: "not_tracked", fullName: "ws/slug" }` — Repo not in the curated set (for per-repo endpoints), or `{ status: "not-found" }` on the add endpoint when BB rejects the lookup. `/rename` also returns `{ error: "bitbucket_not_found" }` when BB itself 404s the new ws/slug.
-- `409` — `{ error: "uuid_mismatch", stored: {...}, target: {...} }` — `/rename` only. The target ws/slug resolves to a different BB repo than the tracked row. Merging would silently corrupt the history; use `POST /repositories` to track the target separately instead.
+- `409` — `{ error: "uuid_mismatch", stored: {...}, target: {...} }` (`/rename`) — the target ws/slug resolves to a different BB repo than the tracked row. Merging would silently corrupt the history; use `POST /repositories` to track the target separately instead. Also `{ error: "not_history_rewritten", syncExcluded, syncExcludeReason }` (`/reconcile`) — the repo isn't in the `history-rewritten` excluded state the endpoint is scoped to.
+- `422` — `{ error: "no_common_ancestor", walked: N }` — `/reconcile` only. BB's head shares no commit with our recent history within the search window; the rewrite is too deep for surgical reconcile. Fall back to DELETE + re-add.
 - `503` — `{ error: "budget_below_threshold", ... }` — Used only by `/deepen` when the BB call budget is too low to start.
 - `500` — unhandled exception. Check the backend logs.
 

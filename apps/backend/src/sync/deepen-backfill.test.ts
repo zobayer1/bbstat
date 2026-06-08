@@ -141,6 +141,9 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     markIsMergeBackfillComplete: unreachable as () => Promise<void>,
     resetSyncCursors: unreachable as () => Promise<void>,
     resetDiffStatsForRepo: unreachable as () => Promise<{ resetCount: number }>,
+    listRecentCommitShas: unreachable as () => Promise<Array<{ sha: string; authoredAt: Date }>>,
+    deleteCommitsByShas: unreachable as () => Promise<number>,
+    setLastSeenSha: unreachable as () => Promise<void>,
   };
   return { store, state };
 }

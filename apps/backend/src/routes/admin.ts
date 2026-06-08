@@ -16,6 +16,7 @@ import { parseAuthorEmail } from '../sync/author-email.js';
 import { BitbucketApiError } from '../bitbucket/errors.js';
 import { validatePatterns } from '../bitbucket/diff-stats-filter.js';
 import { syncRepositoryCommits } from '../sync/commits.js';
+import { reconcileHistoryRewrite } from '../sync/reconcile.js';
 import { deepenOneRepo } from '../sync/deepen-backfill.js';
 import { addTrackedRepository } from '../sync/discovery.js';
 import { syncRepositoryPullRequests } from '../sync/pull-requests.js';
@@ -343,6 +344,71 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         syncExcluded: false,
         cursorsReset: true,
       });
+    },
+  );
+
+  // History-rewrite reconcile. Surgical recovery for a repo auto-excluded
+  // with reason 'history-rewritten' (a force-push rewrote the commit our
+  // cursor pointed at). Unlike `include` — which nulls the cursor and lets
+  // the next tick cold-re-walk the WHOLE repo — this diffs BB's head against
+  // our recent history, deletes only the orphaned (rewritten-away) commits,
+  // re-anchors the cursor to the common ancestor, and re-runs a delta sync
+  // that ingests just the new commits. Minimizes BB API calls; mechanics
+  // and the orphan-diff algorithm live in src/sync/reconcile.ts.
+  //
+  // Defaults to DRY-RUN (returns the plan without mutating); pass
+  // `?dryRun=false` to apply the deletion + re-sync. Scoped to the
+  // history-rewritten state only — 409 otherwise.
+  app.post<{ Params: { workspace: string; slug: string }; Querystring: { dryRun?: string } }>(
+    '/repositories/:workspace/:slug/reconcile',
+    async (request, reply) => {
+      const { workspace, slug } = request.params;
+      const fullName = `${workspace}/${slug}`;
+      const row = await opts.syncDeps.store.findRepositoryByFullName(fullName);
+      if (row === null) return reply.code(404).send({ error: 'not_tracked', fullName });
+      if (!row.syncExcluded || row.syncExcludeReason !== 'history-rewritten') {
+        return reply.code(409).send({
+          error: 'not_history_rewritten',
+          message: 'Reconcile only applies to repos auto-excluded with reason "history-rewritten".',
+          syncExcluded: row.syncExcluded,
+          syncExcludeReason: row.syncExcludeReason,
+        });
+      }
+      // Mutate only on an explicit opt-out of dry-run, so an accidental
+      // call previews rather than deletes.
+      const dryRun = request.query.dryRun !== 'false' && request.query.dryRun !== '0';
+      const handle: RepositoryHandle = {
+        repositoryId: row.id,
+        workspace: row.workspace,
+        slug: row.slug,
+        fullName: row.fullName,
+        diffStatsExcludePatterns: row.diffStatsExcludePatterns,
+      };
+      const outcome = await reconcileHistoryRewrite(
+        {
+          client: opts.syncDeps.client,
+          commitStore: opts.syncDeps.commitStore,
+          discoveryStore: opts.syncDeps.store,
+          logger: opts.syncDeps.logger,
+          ...(opts.syncDeps.rollupStore ? { rollupStore: opts.syncDeps.rollupStore } : {}),
+          ...(opts.syncDeps.recomputeAllScores ? { recomputeAllScores: opts.syncDeps.recomputeAllScores } : {}),
+          ...(opts.syncDeps.bus ? { bus: opts.syncDeps.bus } : {}),
+        },
+        handle,
+        {
+          dryRun,
+          ...(opts.syncDeps.commitTickOptions ? { commitSyncOptions: opts.syncDeps.commitTickOptions } : {}),
+        },
+      );
+      if (outcome.kind === 'no-common-ancestor') {
+        return reply.code(422).send({
+          error: 'no_common_ancestor',
+          walked: outcome.walked,
+          message:
+            'BitBucket head shares no commit with our recent history within the search window; the rewrite is too deep for surgical reconcile. Use DELETE + re-add to rebuild from scratch.',
+        });
+      }
+      return reply.code(200).send(outcome);
     },
   );
 

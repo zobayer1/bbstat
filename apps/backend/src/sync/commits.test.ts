@@ -231,6 +231,13 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
     async resetDiffStatsForRepo() {
       return { resetCount: 0 };
     },
+    async listRecentCommitShas() {
+      return [];
+    },
+    async deleteCommitsByShas() {
+      return 0;
+    },
+    async setLastSeenSha() {},
   };
 
   return { store, state };

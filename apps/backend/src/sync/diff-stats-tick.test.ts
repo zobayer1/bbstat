@@ -74,6 +74,9 @@ function makeStore(queue: PendingDiffStatCommitWithRepo[]): { store: CommitStore
     markIsMergeBackfillComplete: unreachable,
     resetSyncCursors: unreachable,
     resetDiffStatsForRepo: unreachable,
+    listRecentCommitShas: unreachable,
+    deleteCommitsByShas: unreachable,
+    setLastSeenSha: unreachable,
   };
   return { store, state };
 }

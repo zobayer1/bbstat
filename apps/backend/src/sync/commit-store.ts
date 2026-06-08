@@ -242,6 +242,22 @@ export interface CommitStore {
   markSyncSuccess(repositoryId: number, update: SyncSuccessUpdate): Promise<void>;
   markSyncFailed(repositoryId: number, error: string): Promise<void>;
 
+  // History-rewrite reconciliation support (see src/sync/reconcile.ts).
+  //
+  // Newest-authored-first window of `{ sha, authoredAt }` for a repo,
+  // capped at `limit`. The reconcile path diffs this against BitBucket's
+  // current head window to locate the common ancestor and the orphaned
+  // (rewritten-away) shas — bounded so a force-push deep in a large
+  // repo's history doesn't pull the whole table.
+  listRecentCommitShas(repositoryId: number, limit: number): Promise<Array<{ sha: string; authoredAt: Date }>>;
+  // Hard-delete the named shas for this repo; returns the row count.
+  // Used only by reconcile to prune orphans no longer reachable on BB.
+  deleteCommitsByShas(repositoryId: number, shas: string[]): Promise<number>;
+  // Re-anchor `last_seen_sha` to a known-good ancestor WITHOUT marking a
+  // sync success — reconcile sets the delta cursor here, then re-runs the
+  // normal commit sync to ingest only the commits above the ancestor.
+  setLastSeenSha(repositoryId: number, sha: string): Promise<void>;
+
   // Per-repo pickup. Returns commits in this repo whose
   // `diff_stats_synced_at IS NULL`, ordered newest-authored first,
   // capped at `limit`. Used only by the inline-eager forward path
@@ -805,6 +821,37 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
           lastSyncError: error,
           updatedAt: now,
         })
+        .where(eq(syncState.repositoryId, repositoryId));
+    },
+
+    async listRecentCommitShas(repositoryId, limit) {
+      const rows = await db
+        .select({ sha: commits.sha, authoredAt: commits.authoredAt })
+        .from(commits)
+        .where(eq(commits.repositoryId, repositoryId))
+        .orderBy(desc(commits.authoredAt))
+        .limit(limit);
+      return rows.map((r) => ({
+        sha: r.sha,
+        authoredAt: r.authoredAt instanceof Date ? r.authoredAt : new Date(r.authoredAt),
+      }));
+    },
+
+    async deleteCommitsByShas(repositoryId, shas) {
+      if (shas.length === 0) return 0;
+      // RETURNING the shas (rather than relying on the driver's rowCount)
+      // keeps the count portable across pg client versions.
+      const deleted = await db
+        .delete(commits)
+        .where(and(eq(commits.repositoryId, repositoryId), inArray(commits.sha, shas)))
+        .returning({ sha: commits.sha });
+      return deleted.length;
+    },
+
+    async setLastSeenSha(repositoryId, sha) {
+      await db
+        .update(syncState)
+        .set({ lastSeenSha: sha, updatedAt: new Date() })
         .where(eq(syncState.repositoryId, repositoryId));
     },
 

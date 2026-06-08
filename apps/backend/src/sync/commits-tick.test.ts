@@ -57,6 +57,9 @@ function fakeStore(): CommitStore {
     markIsMergeBackfillComplete: fail,
     resetSyncCursors: fail,
     resetDiffStatsForRepo: fail,
+    listRecentCommitShas: fail,
+    deleteCommitsByShas: fail,
+    setLastSeenSha: fail,
   };
 }
 

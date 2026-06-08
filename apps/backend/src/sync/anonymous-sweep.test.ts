@@ -202,6 +202,9 @@ function createSweepFakeStore(): { store: CommitStore; state: SweepFakeState } {
     markIsMergeBackfillComplete: unreachable('markIsMergeBackfillComplete'),
     resetSyncCursors: unreachable('resetSyncCursors'),
     resetDiffStatsForRepo: unreachable('resetDiffStatsForRepo'),
+    listRecentCommitShas: unreachable('listRecentCommitShas'),
+    deleteCommitsByShas: unreachable('deleteCommitsByShas'),
+    setLastSeenSha: unreachable('setLastSeenSha'),
   };
   return { store, state };
 }

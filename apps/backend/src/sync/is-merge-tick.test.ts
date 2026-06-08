@@ -74,6 +74,9 @@ function makeStore(seed: Partial<FakeState> = {}): { store: CommitStore; state: 
     },
     resetSyncCursors: fail,
     resetDiffStatsForRepo: fail,
+    listRecentCommitShas: fail,
+    deleteCommitsByShas: fail,
+    setLastSeenSha: fail,
   };
   return { store, state };
 }

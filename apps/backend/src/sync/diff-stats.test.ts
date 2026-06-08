@@ -74,6 +74,9 @@ function makeStore(): { store: CommitStore; state: FakeState } {
     markIsMergeBackfillComplete: unreachable,
     resetSyncCursors: unreachable,
     resetDiffStatsForRepo: unreachable,
+    listRecentCommitShas: unreachable,
+    deleteCommitsByShas: unreachable,
+    setLastSeenSha: unreachable,
   };
   return { store, state };
 }
