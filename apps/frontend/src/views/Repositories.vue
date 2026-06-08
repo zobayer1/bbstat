@@ -129,16 +129,18 @@ const SYNC_COLORS: Record<RepoSyncStatus, string> = {
   error: '#f59e0b', // amber-500
   excluded: '#f43f5e', // rose-500
   never: '#94a3b8', // slate-400
+  empty: '#cbd5e1', // slate-300 — benign (empty on BitBucket)
 };
 
 const syncBuckets = computed<ActivityBucket[]>(() => {
-  const counts: Record<RepoSyncStatus, number> = { ok: 0, error: 0, excluded: 0, never: 0 };
+  const counts: Record<RepoSyncStatus, number> = { ok: 0, error: 0, excluded: 0, never: 0, empty: 0 };
   for (const r of stats.repositories) counts[r.syncStatus] += 1;
   return [
     { label: 'Active', count: counts.ok, color: SYNC_COLORS.ok },
     { label: 'Errored', count: counts.error, color: SYNC_COLORS.error },
     { label: 'Excluded', count: counts.excluded, color: SYNC_COLORS.excluded },
     { label: 'Pending', count: counts.never, color: SYNC_COLORS.never },
+    { label: 'Empty', count: counts.empty, color: SYNC_COLORS.empty },
   ];
 });
 
@@ -548,6 +550,12 @@ function clearFilters(): void {
               >
                 {{ r.slug }}
               </RouterLink>
+              <span
+                v-if="r.archived"
+                class="ml-1.5 inline-block rounded bg-slate-200 px-1.5 py-0.5 align-middle text-[9px] font-semibold uppercase tracking-wide text-slate-500"
+                title="Soft-retired — excluded from sync; status shown is its last known state."
+                >Archived</span
+              >
               <div class="text-[10px] text-slate-400">{{ r.workspace }}</div>
             </td>
             <td class="px-4 py-2">

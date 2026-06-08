@@ -62,6 +62,7 @@ const sampleRepositories = [
     deletions30d: 0,
     lastCommitAt: '2026-05-12T00:00:00.000Z',
     syncStatus: 'ok' as const,
+    archived: false,
   },
 ];
 

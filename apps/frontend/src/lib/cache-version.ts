@@ -43,7 +43,13 @@
 // 20: ProjectStats — totals.contributorCount7d → contributorCount30d, and
 // topContributors switched to the person-aware RepoContributorEntity. Repo
 // table contributors30d is now an entity-distinct count (no shape change).
-export const CACHE_VERSION = 20;
+//
+// 21: Repositories page benign-state distinctions — TrackedRepositorySummary
+// gained `archived` (badged as "Archived"), and RepoSyncStatus gained
+// `empty` (empty-on-bitbucket exclusions now read as benign "Empty" instead
+// of a red "excluded" issue). Bust so the new syncStatus value lands
+// immediately instead of stale 'excluded' rendering on empty repos.
+export const CACHE_VERSION = 21;
 
 // localStorage key holding the integer above as a string. Lives outside
 // the `bbstat-` prefix so the bust function doesn't wipe its own sentinel

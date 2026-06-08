@@ -666,6 +666,7 @@ describe('GET /api/stats/repositories', () => {
         deletions30d: 432,
         lastCommitAt: '2026-05-12T00:00:00.000Z',
         syncStatus: 'ok' as const,
+        archived: false,
       },
       {
         workspace: 'tigerit',
@@ -678,6 +679,7 @@ describe('GET /api/stats/repositories', () => {
         deletions30d: 0,
         lastCommitAt: null,
         syncStatus: 'never' as const,
+        archived: true,
       },
     ];
     const listTrackedRepositoriesWithStats = vi.fn().mockResolvedValue(repos);

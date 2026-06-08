@@ -15,10 +15,13 @@ const META: Record<RepoSyncStatus, { label: string; tone: string; shape: Shape }
   ok: { label: 'Synced', tone: 'text-emerald-600', shape: 'check' },
   error: { label: 'Sync error', tone: 'text-amber-600', shape: 'warn' },
   // Same triangle shape as 'error' but red — the underlying cause is
-  // durable (rename / empty / force-push) and the recovery is a
-  // specific admin action, not a wait-and-retry.
+  // durable (rename / force-push) and the recovery is a specific admin
+  // action, not a wait-and-retry.
   excluded: { label: 'Excluded from sync — needs attention', tone: 'text-red-600', shape: 'warn' },
   never: { label: 'Not synced yet', tone: 'text-slate-400', shape: 'dash' },
+  // Benign: empty on BitBucket, nothing to sync. Neutral dash (not a
+  // warning) so it doesn't read as a problem needing attention.
+  empty: { label: 'Empty on BitBucket — nothing to sync', tone: 'text-slate-400', shape: 'dash' },
 };
 
 const meta = computed(() => META[props.status ?? 'never']);

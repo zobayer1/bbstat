@@ -160,7 +160,10 @@ export interface ProjectStats {
 // tracked repo no sync has touched yet; 'excluded' is an auto-trip
 // (404 / empty-on-BB / history-rewritten) needing an admin recovery
 // action via /include, /rename, or DELETE.
-export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded';
+// 'empty' = benign exclusion (empty on BitBucket, nothing to sync); distinct
+// from 'excluded' (rename / force-push — needs an admin fix) so the
+// Repositories page doesn't flag empty repos as problems.
+export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded' | 'empty';
 
 export interface RepoActivity {
   repository: {
@@ -327,6 +330,10 @@ export interface TrackedRepositorySummary {
   deletions30d: number;
   lastCommitAt: string | null;
   syncStatus: RepoSyncStatus;
+  // True when the repo is soft-retired (archived). The Repositories page
+  // badges it so a retired repo's stale sync mark reads as "retired",
+  // not as a live error.
+  archived: boolean;
 }
 
 // Phase 4 T23 — unified activity feed payload. Discriminated by `kind`.

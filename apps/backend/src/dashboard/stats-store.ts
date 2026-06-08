@@ -404,7 +404,11 @@ export interface ActivityFilters {
 // considered healthy here. `excluded` outranks `error` because the
 // underlying cause is durable (rename / empty / force-push) and the
 // recovery is a specific admin action, not a wait-and-retry.
-export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded';
+// 'empty' is a BENIGN exclusion (the repo is empty on BitBucket — nothing
+// to sync, no operator action needed). Kept distinct from 'excluded'
+// (rename / force-push — needs a specific admin fix) so the UI doesn't
+// flag empty repos as problems in the Repositories Issues tab.
+export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded' | 'empty';
 
 // One row on the /members leaderboard. Each row is either an unattached
 // user (entityKind = 'user', entityId = users.id) or a merged person
@@ -523,6 +527,10 @@ export interface TrackedRepositorySummary {
   deletions30d: number;
   lastCommitAt: string | null;
   syncStatus: RepoSyncStatus;
+  // True when the repo is soft-retired (repositories.archived). Surfaced so
+  // the UI can badge it — an archived repo's stale/inert sync status then
+  // reads as "retired", not as a live error needing attention.
+  archived: boolean;
 }
 
 export interface StatsStore {
@@ -1463,6 +1471,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         last_sync_status: 'idle' | 'running' | 'success' | 'failed' | null;
         last_synced_at: string | Date | null;
         sync_excluded: boolean;
+        sync_exclude_reason: string | null;
+        archived: boolean;
       }>(sql`
         SELECT
           r.workspace,
@@ -1505,7 +1515,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           (SELECT max(authored_at) FROM commits WHERE repository_id = r.id) AS last_commit_at,
           ss.last_sync_status,
           ss.last_synced_at,
-          r.sync_excluded
+          r.sync_excluded,
+          r.sync_exclude_reason,
+          r.archived
         FROM repositories r
         LEFT JOIN sync_state ss ON ss.repository_id = r.id
         ORDER BY last_commit_at DESC NULLS LAST
@@ -1520,7 +1532,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         additions30d: r.additions_30d,
         deletions30d: r.deletions_30d,
         lastCommitAt: r.last_commit_at === null ? null : new Date(r.last_commit_at).toISOString(),
-        syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded),
+        syncStatus: deriveSyncStatus(r.last_sync_status, r.last_synced_at, r.sync_excluded, r.sync_exclude_reason),
+        archived: r.archived,
       }));
     },
 
@@ -2281,8 +2294,12 @@ function deriveSyncStatus(
   lastSyncStatus: 'idle' | 'running' | 'success' | 'failed' | null,
   lastSyncedAt: string | Date | null,
   syncExcluded: boolean = false,
+  syncExcludeReason: string | null = null,
 ): RepoSyncStatus {
-  if (syncExcluded) return 'excluded';
+  // 'empty-on-bitbucket' is benign (nothing to sync) — surface it as 'empty'
+  // so it doesn't read as a problem. Every other exclusion reason
+  // (repo-404, history-rewritten) needs an operator and stays 'excluded'.
+  if (syncExcluded) return syncExcludeReason === 'empty-on-bitbucket' ? 'empty' : 'excluded';
   if (lastSyncStatus === 'failed') return 'error';
   if (lastSyncedAt === null && (lastSyncStatus === null || lastSyncStatus === 'idle')) return 'never';
   return 'ok';
