@@ -7,7 +7,33 @@ release gets a section.
 
 ## [Unreleased]
 
-Nothing queued yet.
+Repository-health UI follow-ups to 1.3.0's benign-state work — extending the
+same clarity to the repo detail + project pages, and adding an Archived
+filter to the index. Not yet released; ships with the next tag.
+
+### Added
+
+- **Archived filter tab on the Repositories index** — lists archived repos,
+  and the Active tab now excludes archived so a retired repo no longer reads
+  as actively syncing.
+
+### Changed
+
+- **`CACHE_VERSION` 21 → 22** — `RepoActivity.repository` gained `archived`
+  (the repo detail page badges archived repos + neutralizes their sync icon).
+  Boot-time bust on each user's next load.
+
+### Fixed
+
+- **Repo detail + project pages now show the benign "Empty" status** for
+  `empty-on-bitbucket` repos. Those `deriveSyncStatus` callers
+  (`getRepositoryActivity`, `getProjectStats`) weren't passing the exclude
+  reason, so empty repos rendered the red "excluded — needs attention"
+  triangle instead of the gray "Empty" the index already showed (1.3.0).
+- **Archived repos no longer read as a live problem on the repo detail page** —
+  the detail header shows an "Archived" badge and renders the sync icon
+  neutral (gray, "Archived — sync paused") regardless of the frozen last-sync
+  status, matching the index treatment.
 
 ## [1.3.0] — 2026-06-09
 
