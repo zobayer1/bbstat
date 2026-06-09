@@ -8,26 +8,27 @@ A dashboard-style web application for reviewing developer contributions across a
 
 ## Tech stack
 
-| Layer                  | Choice                                                                                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------------------ |
-| Frontend               | Vue 3, Vite 6, Pinia (offline-first cache), vue-router, Tailwind 4                                     |
-| Backend                | Node.js 22, Fastify 5, TypeScript (strict)                                                             |
-| Database               | PostgreSQL 17 (system of record), Drizzle ORM                                                          |
-| Server-side cache      | Redis 7 — _scoped to user-summary rollups only_                                                        |
-| Background sync        | node-cron + shared `runSync()` for manual / cron / webhook triggers (see [docs/sync.md](docs/sync.md)) |
-| Admin endpoints        | `/api/admin/*` for sync triggers + curated-repo management (see [docs/admin.md](docs/admin.md))        |
-| Leaderboard / scoring  | Per-developer ShipShow Score, badges, persona tiers — see [docs/scoring.md](docs/scoring.md)           |
-| Reverse proxy / TLS    | Traefik 3 in dev (`compose.override.yaml`), deployer's proxy in prod; self-signed CA for local dev     |
-| Container runtime      | Docker CE — full stack via `compose.yaml` + `compose.override.yaml` (multi-stage, distroless backend)  |
-| Tests / lint / format  | Vitest, ESLint flat config, Prettier                                                                   |
-| Package mgr / monorepo | pnpm workspaces                                                                                        |
+| Layer                  | Choice                                                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Frontend               | Vue 3, Vite 6, Pinia (offline-first cache), vue-router, Tailwind 4                                                |
+| Backend                | Node.js 22, Fastify 5, TypeScript (strict)                                                                        |
+| Database               | PostgreSQL 17 (system of record), Drizzle ORM                                                                     |
+| Server-side cache      | Redis 7 — _scoped to user-summary rollups only_                                                                   |
+| Background sync        | node-cron + shared `runSync()` for manual / cron / webhook triggers (see [docs/sync.md](docs/sync.md))            |
+| Admin endpoints        | `/api/admin/*` for sync triggers + curated-repo management (see [docs/admin.md](docs/admin.md))                   |
+| MCP server             | Read-only `@modelcontextprotocol/sdk` server for LLM agents over streamable-HTTP (see [docs/mcp.md](docs/mcp.md)) |
+| Leaderboard / scoring  | Per-developer ShipShow Score, badges, persona tiers — see [docs/scoring.md](docs/scoring.md)                      |
+| Reverse proxy / TLS    | Traefik 3 in dev (`compose.override.yaml`), deployer's proxy in prod; self-signed CA for local dev                |
+| Container runtime      | Docker CE — full stack via `compose.yaml` + `compose.override.yaml` (multi-stage, distroless backend)             |
+| Tests / lint / format  | Vitest, ESLint flat config, Prettier                                                                              |
+| Package mgr / monorepo | pnpm workspaces                                                                                                   |
 
 ## Repository layout
 
 ```
 bbstat/
 ├── apps/
-│   ├── backend/                # Fastify HTTPS API + sync runner + Dockerfile (distroless)
+│   ├── backend/                # Fastify API + sync runner + MCP server + Dockerfile (distroless)
 │   └── frontend/               # Vue 3 SPA + Dockerfile (nginx) + nginx.conf
 ├── etc/
 │   ├── tls/                    # Local self-signed CA + server cert (gitignored)
