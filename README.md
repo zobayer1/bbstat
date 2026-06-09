@@ -84,22 +84,22 @@ Five ways to run the stack — local without containers (HTTP or HTTPS), full lo
 
 ```bash
 # 1. Build + tag with a real version (on the build machine, with the repo)
-BACKEND_IMAGE=bbstat-backend:v1.4.0 FRONTEND_IMAGE=bbstat-frontend:v1.4.0 make build-images
+BACKEND_IMAGE=bbstat-backend:v1.4.1 FRONTEND_IMAGE=bbstat-frontend:v1.4.1 make build-images
 
 # 2. Save to portable tarballs
-docker save -o bbstat-v1.4.0.tar bbstat-backend:v1.4.0 bbstat-frontend:v1.4.0
+docker save -o bbstat-v1.4.1.tar bbstat-backend:v1.4.1 bbstat-frontend:v1.4.1
 
 # 3. Transfer images + compose.yaml + .env.docker (no secrets in it) to prod.
 #    compose.override.yaml is deliberately NOT shipped.
-scp bbstat-v1.4.0.tar compose.yaml .env.docker prod:/opt/bbstat/
+scp bbstat-v1.4.1.tar compose.yaml .env.docker prod:/opt/bbstat/
 
 # 4. On the production host: load images
-docker load -i bbstat-v1.4.0.tar
+docker load -i bbstat-v1.4.1.tar
 
 # 5. Write a one-shot deploy.env with the secrets, source it, delete it.
 cat > deploy.env <<'EOF'
-export BACKEND_IMAGE=bbstat-backend:v1.4.0
-export FRONTEND_IMAGE=bbstat-frontend:v1.4.0
+export BACKEND_IMAGE=bbstat-backend:v1.4.1
+export FRONTEND_IMAGE=bbstat-frontend:v1.4.1
 export DATABASE_URL=postgres://user:PASS@db-host:5432/bbstat
 export REDIS_URL=redis://redis-host:6379
 export BITBUCKET_AUTH_EMAIL=you@example.com
@@ -273,13 +273,14 @@ The [`docs/`](docs/README.md) folder is the canonical home for narrative documen
 
 Full notes in [`CHANGELOG.md`](CHANGELOG.md). Untagged work-in-progress lives on `main` between releases.
 
-| Version | Date       | Headline                                                                                                                                                                                     |
-| ------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1.4.0   | 2026-06-09 | Workspace-repo auto-discovery (track the workspace by `updated_on`, off by default); repo detail + project pages get the benign Empty / Archived treatment; Archived filter tab on the index |
-| 1.3.0   | 2026-06-09 | Sync-recovery tooling — surgical `/reconcile` for history-rewritten repos, empty-repo revival sweep; Repositories page distinguishes benign Archived / Empty states from real issues         |
-| 1.2.0   | 2026-05-25 | Person layer goes end-to-end — Top Contributors, repo / project / activity surfaces all person-aware; multi-actor activity; Linked accounts                                                  |
-| 1.1.0   | 2026-05-24 | ShipShow Score leaderboard, member persona tiers (active / dormant / ex-member), BB token-expiry surface, merge-exclusion rollup fix                                                         |
-| 1.0.0   | 2026-05-21 | First tagged release — BitBucket ingest pipeline, rollups + dashboard, Projects / Repositories / Members / Activity pages, containerized deploy                                              |
+| Version | Date       | Headline                                                                                                                                                                                        |
+| ------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.4.1   | 2026-06-09 | Hotfix — cold (never-synced) repos from a discovery sweep no longer starve the active sync rotation; warm repos served first, cold first-syncs capped per tick (`SYNC_MAX_COLD_REPOS_PER_TICK`) |
+| 1.4.0   | 2026-06-09 | Workspace-repo auto-discovery (track the workspace by `updated_on`, off by default); repo detail + project pages get the benign Empty / Archived treatment; Archived filter tab on the index    |
+| 1.3.0   | 2026-06-09 | Sync-recovery tooling — surgical `/reconcile` for history-rewritten repos, empty-repo revival sweep; Repositories page distinguishes benign Archived / Empty states from real issues            |
+| 1.2.0   | 2026-05-25 | Person layer goes end-to-end — Top Contributors, repo / project / activity surfaces all person-aware; multi-actor activity; Linked accounts                                                     |
+| 1.1.0   | 2026-05-24 | ShipShow Score leaderboard, member persona tiers (active / dormant / ex-member), BB token-expiry surface, merge-exclusion rollup fix                                                            |
+| 1.0.0   | 2026-05-21 | First tagged release — BitBucket ingest pipeline, rollups + dashboard, Projects / Repositories / Members / Activity pages, containerized deploy                                                 |
 
 ## Agents
 

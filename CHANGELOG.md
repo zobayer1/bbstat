@@ -7,6 +7,16 @@ release gets a section.
 
 ## [Unreleased]
 
+Nothing queued yet.
+
+## [1.4.1] — 2026-06-09
+
+Hotfix for the 1.4.0 auto-discovery rollout. Enabling `REPO_DISCOVERY_ENABLED`
+on a large workspace tracked the whole inactive backlog at once, and those
+never-synced repos starved the active rotation — the opposite of the 1.4.0
+runbook's "ingests gradually, spreads out rather than spiking" promise.
+**Backend-only; no schema, no `CACHE_VERSION` change, no frontend rebuild.**
+
 ### Fixed
 
 - **Cold-repo backlog no longer starves the active sync rotation.** A bulk
@@ -15,14 +25,46 @@ release gets a section.
   commit/PR queue (`ORDER BY last_synced_at ASC NULLS FIRST`) and are
   unconditionally "due" (backoff has no activity signal to throttle on), so they
   monopolized the queue head and the BB-call budget every tick — warm, active
-  repos got deferred and their new commits went unsynced for many ticks. The
-  sync runner now services warm (already-synced) repos first and in full, and
-  admits at most `SYNC_MAX_COLD_REPOS_PER_TICK` (default 5) cold repos per tick,
-  so a discovery backlog backfills gradually in the leftover budget. Applies to
-  both the commit and PR ticks. Corrects the 1.4.0 claim that discovered
-  inactive repos "self-throttle" — they couldn't, until they'd been synced once.
-  New env var `SYNC_MAX_COLD_REPOS_PER_TICK` (0 pauses cold first-syncs; raise to
-  drain a backlog faster). No schema change.
+  repos got deferred and their new commits went unsynced for many ticks
+  (observed in prod at 836 repos / 154 never-synced). The sync runner now
+  services warm (already-synced) repos first and in full, and admits at most
+  `SYNC_MAX_COLD_REPOS_PER_TICK` (default 5) cold repos per tick, so a discovery
+  backlog backfills gradually in the leftover budget. Applies to both the commit
+  and PR ticks. Corrects the 1.4.0 claim that discovered inactive repos
+  "self-throttle" — they couldn't, until they'd been synced once. New env var
+  `SYNC_MAX_COLD_REPOS_PER_TICK` (0 pauses cold first-syncs; raise to drain a
+  backlog faster). See `docs/sync.md` → "Layer 6 — Cold-repo admission cap".
+
+### Operator notes — deploy runbook (1.4.0 → 1.4.1)
+
+Backend-only hotfix. **No schema migration, no Redis clear, no frontend
+rebuild** (`CACHE_VERSION` unchanged at 22 — the existing frontend image is
+fine to keep).
+
+1. **Build + ship the backend image** (build host) — backend-only, no frontend
+   rebuild:
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.4.1 docker compose build backend
+   docker save -o bbstat-backend-v1.4.1.tar bbstat-backend:v1.4.1
+   scp bbstat-backend-v1.4.1.tar compose.yaml prod:/opt/bbstat/
+   ```
+2. **Load + pin** (prod) — backend + sync + migrate share the one image:
+   ```bash
+   docker load -i bbstat-backend-v1.4.1.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.4.1
+   export FRONTEND_IMAGE=bbstat-frontend:v1.4.0   # unchanged — keep the 1.4.0 SPA
+   ```
+3. **(Optional) tune the cap** — `SYNC_MAX_COLD_REPOS_PER_TICK` defaults to 5.
+   To clear the existing 154-repo backlog faster, set it higher (e.g. 20) in
+   `.env.docker` for a few hours, then drop it back once `coldDeferred` reaches
+   0 in the `commit sync start` log lines.
+4. **Roll out:**
+   ```bash
+   docker compose -f compose.yaml up -d backend sync
+   ```
+5. **Verify** — on the next `commit sync start` line, `warmCount` should cover
+   the active set every tick and `coldAdmitted` should be ≤ the cap; watch
+   `coldDeferred` tick down as the backlog drains.
 
 ## [1.4.0] — 2026-06-09
 
@@ -506,7 +548,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.4.0...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/tigerit/bbstat/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/tigerit/bbstat/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tigerit/bbstat/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tigerit/bbstat/compare/v1.1.0...v1.2.0
