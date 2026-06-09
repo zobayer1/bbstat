@@ -73,6 +73,10 @@ logs-frontend: ## Tail logs for the frontend (nginx) container
 logs-sync: ## Tail logs for the sync runner container
 	$(COMPOSE) logs -f --tail=100 sync
 
+.PHONY: logs-mcp
+logs-mcp: ## Tail logs for the MCP server container
+	$(COMPOSE) logs -f --tail=100 mcp
+
 .PHONY: logs-traefik
 logs-traefik: ## Tail logs for the dev Traefik container
 	$(COMPOSE) logs -f --tail=100 traefik
@@ -129,6 +133,10 @@ dev-frontend: env-init ## Run frontend dev server only
 .PHONY: dev-sync
 dev-sync: env-init ## Run the background sync runner (cron-mode stub)
 	$(PNPM) $(BACKEND) run dev:sync
+
+.PHONY: dev-mcp
+dev-mcp: env-init ## Run the read-only MCP server (host, hot-reload)
+	$(PNPM) $(BACKEND) run dev:mcp
 
 .PHONY: dev-resync
 dev-resync: env-init ## One-shot anonymous-commit sweep — drains the author_user_id=NULL backlog; exits when done

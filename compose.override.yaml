@@ -149,6 +149,26 @@ services:
     volumes:
       - ./tracked-repos.yaml:/app/tracked-repos.yaml:ro
 
+  mcp:
+    <<: *backend-build
+    environment:
+      DATABASE_URL: postgres://bbstat:bbstat@postgres:5432/bbstat
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      # Dev parity: terminate TLS at Traefik and forward plain HTTP to the mcp
+      # container (mirrors how the prod reverse proxy fronts it). Reachable at
+      # https://mcp.localhost:${TRAEFIK_HTTPS_HOST_PORT}/mcp. *.localhost maps
+      # to 127.0.0.1 on most resolvers; pin it in /etc/hosts if yours doesn't.
+      - 'traefik.enable=true'
+      - 'traefik.docker.network=bbstat_default'
+      - 'traefik.http.services.bbstat-mcp.loadbalancer.server.port=8090'
+      - 'traefik.http.routers.bbstat-mcp-secure.rule=Host(`mcp.localhost`)'
+      - 'traefik.http.routers.bbstat-mcp-secure.entrypoints=websecure'
+      - 'traefik.http.routers.bbstat-mcp-secure.tls=true'
+      - 'traefik.http.routers.bbstat-mcp-secure.service=bbstat-mcp'
+
   frontend:
     build:
       context: .

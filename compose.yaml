@@ -1,6 +1,6 @@
 # ShipShow! / bbstat — production base.
 #
-# This file describes the four containerized services that ship in production:
+# This file describes the five containerized services that ship in production:
 #
 #   migrate   — one-shot Drizzle migrator; gates backend + sync via
 #               `service_completed_successfully`. Exits 0 on success, 1 on
@@ -9,9 +9,13 @@
 #               terminates TLS). Same-origin /api/* served on the public host.
 #   sync      — Cron-driven sync runner. Same image as backend, different
 #               command. Hits BitBucket on schedules from env.
+#   mcp       — Read-only MCP server for LLM agents. Same image as backend,
+#               different command (dist/mcp/index.js). Streamable-HTTP behind
+#               your reverse proxy; bearer-gated by MCP_TOKEN_SECRET. Publishes
+#               a host port. Reads the same Postgres store as the API.
 #   frontend  — nginx serving the Vite-built SPA. Proxies /api/* internally
-#               to the backend service. The only service that publishes a
-#               host port — your reverse proxy upstreams to it.
+#               to the backend service. Publishes a host port — your reverse
+#               proxy upstreams to it.
 #
 # Intentionally absent from this file:
 #   * postgres / redis — production uses externally managed services. The
@@ -108,6 +112,42 @@ services:
     # No healthcheck: the sync runner is a long-lived process with no HTTP
     # surface. If it crashes, the restart policy takes over; we'd rather
     # avoid surfacing false-positive "unhealthy" between cron ticks.
+
+  mcp:
+    # Read-only MCP server — 4th role of the backend image. Reuses the image
+    # anchor but NOT *backend-env: it needs only DATABASE_URL (read store) and
+    # MCP_TOKEN_SECRET (bearer signing key), not Redis / BB creds / the seed
+    # file. NODE_ENV + other non-sensitive config still come from .env.docker.
+    <<: *backend-image
+    command: ['dist/mcp/index.js']
+    env_file:
+      - .env.docker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set in the deploy environment}
+      # Credential-weight: from the shell env, never .env.docker (same policy
+      # as DB / BB secrets). Without it the mcp entrypoint refuses to start.
+      MCP_TOKEN_SECRET: ${MCP_TOKEN_SECRET:?MCP_TOKEN_SECRET must be set for the mcp service}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8090
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Your reverse proxy upstreams to this host port. Override via
+      # MCP_HOST_PORT if 8090 collides. Container always listens on 8090.
+      - '${MCP_HOST_PORT:-8090}:8090'
+    restart: unless-stopped
+    healthcheck:
+      # Distroless: only /nodejs/bin/node. /healthz is unauthenticated.
+      test:
+        - CMD
+        - /nodejs/bin/node
+        - -e
+        - "fetch('http://127.0.0.1:8090/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   frontend:
     image: ${FRONTEND_IMAGE:-bbstat-frontend:latest}
