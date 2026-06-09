@@ -183,11 +183,20 @@ const envSchema = z.object({
 
   // Read-only MCP server (apps/backend/src/mcp) — a separate compose service
   // on the same backend image (command: dist/mcp/index.js), exposing the
-  // dashboard read surface to LLM agents over streamable-HTTP. All three vars
-  // are consumed ONLY by the mcp role; backend / sync / migrate ignore them.
-  // Kept optional so the shared config schema parses for every role — the mcp
+  // dashboard read surface to LLM agents over streamable-HTTP. These vars are
+  // consumed ONLY by the mcp role; backend / sync / migrate ignore them. Kept
+  // optional so the shared config schema parses for every role — the mcp
   // entrypoint fail-louds on a missing MCP_TOKEN_SECRET, the others never look.
-  MCP_HOST: z.string().default('0.0.0.0'),
+  //
+  // TLS follows the SAME toggle as the API: BACKEND_TLS=on (host dev default)
+  // makes the mcp process terminate HTTPS itself using TLS_KEY_PATH /
+  // TLS_CERT_PATH (the shared bbstat.localhost cert), so it's reachable at
+  // https://bbstat.localhost:<MCP_PORT>/mcp — parity with the backend. In the
+  // container the image pins BACKEND_TLS=off, so mcp serves plain HTTP and the
+  // reverse proxy (Traefik in dev, the deployer's proxy in prod) terminates
+  // TLS. MCP_HOST mirrors BACKEND_HOST: defaults to bbstat.localhost for dev
+  // (loopback), and the compose service overrides it to 0.0.0.0 in-container.
+  MCP_HOST: z.string().default('bbstat.localhost'),
   MCP_PORT: z.coerce.number().int().positive().default(8090),
   // HMAC key that signs + verifies consumer access tokens (see src/mcp/auth.ts
   // and the mint-mcp-token CLI). No default: the server refuses to start

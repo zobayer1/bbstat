@@ -14,7 +14,7 @@
 // hijack the reply to let the transport own the raw socket.
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { Logger } from 'pino';
 import type { StatsStore } from '../dashboard/stats-store.js';
 import { extractBearer, verifyToken } from './auth.js';
@@ -41,7 +41,15 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (app, opts)
 
   app.get('/healthz', async () => ({ status: 'ok', uptime: process.uptime() }));
 
-  app.post(path, async (request, reply) => {
+  // Shared handler for every method on the MCP endpoint. Streamable-HTTP
+  // clients hit this with POST (JSON-RPC requests), GET (open the server→client
+  // SSE stream), and DELETE (terminate a session). All three must reach the
+  // SDK transport so it returns the protocol-correct response — routing only
+  // POST would make Fastify answer GET/DELETE with a 404, which clients read as
+  // a broken endpoint and refuse to connect. In stateless mode the transport
+  // answers GET/DELETE with 405, which is the right "no standalone stream"
+  // signal.
+  const handle = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const token = extractBearer(request.headers.authorization);
     if (token === null) {
       await reply.code(401).header('WWW-Authenticate', 'Bearer').send(unauthorized('Missing bearer token.'));
@@ -54,17 +62,19 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (app, opts)
       await reply.code(401).header('WWW-Authenticate', 'Bearer').send(unauthorized('Invalid or expired bearer token.'));
       return;
     }
-    opts.logger.debug({ consumer: verdict.payload.consumer }, 'mcp: authorized request');
+    opts.logger.debug({ consumer: verdict.payload.consumer, method: request.method }, 'mcp: authorized request');
 
     const server = buildMcpServer(opts.store, opts.logger);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
-    // Free both when the client disconnects / the response finishes.
+    // Free both when the client disconnects / the response finishes. Swallow
+    // rejections so a teardown error on an abrupt disconnect never surfaces as
+    // an unhandled rejection (which would crash the process).
     reply.raw.on('close', () => {
-      void transport.close();
-      void server.close();
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
     });
 
     // Fastify must not also try to send — the transport writes to the raw res.
@@ -81,5 +91,9 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (app, opts)
         );
       }
     }
-  });
+  };
+
+  app.post(path, handle);
+  app.get(path, handle);
+  app.delete(path, handle);
 };
