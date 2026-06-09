@@ -180,6 +180,21 @@ const envSchema = z.object({
   // makes steady progress without crowding the budget.
   DEEPEN_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   DEEPEN_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(100),
+
+  // Read-only MCP server (apps/backend/src/mcp) — a separate compose service
+  // on the same backend image (command: dist/mcp/index.js), exposing the
+  // dashboard read surface to LLM agents over streamable-HTTP. All three vars
+  // are consumed ONLY by the mcp role; backend / sync / migrate ignore them.
+  // Kept optional so the shared config schema parses for every role — the mcp
+  // entrypoint fail-louds on a missing MCP_TOKEN_SECRET, the others never look.
+  MCP_HOST: z.string().default('0.0.0.0'),
+  MCP_PORT: z.coerce.number().int().positive().default(8090),
+  // HMAC key that signs + verifies consumer access tokens (see src/mcp/auth.ts
+  // and the mint-mcp-token CLI). No default: the server refuses to start
+  // without it, since the endpoint is meant to be exposed publicly. Rotating
+  // this value invalidates every previously minted token (the only revocation
+  // mechanism for now — tokens are stateless, no DB).
+  MCP_TOKEN_SECRET: z.string().optional(),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;
