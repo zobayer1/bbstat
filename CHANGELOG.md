@@ -12,10 +12,11 @@ release gets a section.
 - **Read-only MCP server for LLM agents.** A new
   [Model Context Protocol](https://modelcontextprotocol.io) server exposes the
   dashboard read surface to agents (Claude Code / Desktop, the Agent SDK, any
-  MCP host) as 9 typed tools — `get_overview`, `top_contributors`,
+  MCP host) as 11 typed tools — `get_overview`, `top_contributors`,
   `list_members`, `get_contributor_summary`, `list_repositories`,
-  `get_repository_activity`, `get_project_stats`, `search_activity`,
-  `activity_daily`. It reads the same `StatsStore` as the dashboard (Postgres
+  `get_repository_activity`, `repo_contributor_breakdown`, `get_project_stats`,
+  `search_activity`, `count_activity`, `activity_daily` — full parity with the
+  dashboard read API. It reads the same `StatsStore` as the dashboard (Postgres
   only, never a live BitBucket call) and is strictly read-only — every tool is
   `readOnlyHint`, no admin/write surface. Ships as a fourth role of the backend
   image (`command: dist/mcp/index.js`) and a separate `mcp` compose service —

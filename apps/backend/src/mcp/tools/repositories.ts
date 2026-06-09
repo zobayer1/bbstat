@@ -34,3 +34,27 @@ export const repositoryActivityTool = defineTool({
     return activity;
   },
 });
+
+// The Projects "sunburst": top repos by commits in a window, each with its top
+// contributors. A distinct cross-repo aggregation — answers "which repos drove
+// activity and who in each", optionally scoped to one project.
+export const repoContributorBreakdownTool = defineTool({
+  name: 'repo_contributor_breakdown',
+  title: 'Repo × contributor breakdown',
+  description:
+    'Top repositories by commit count over a trailing window, each with its own top contributors (the Projects sunburst). Answers "which repos drove activity, and who within each repo". Optionally scope the pool to one project with project_key (keys are on list_repositories rows). Anonymous commits are excluded; contributor bands are keyed per entity (merged people collapse their aliases).',
+  inputShape: {
+    window_days: z.number().int().min(1).max(365).default(30).describe('Trailing window in days.'),
+    top_repos: z.number().int().min(1).max(50).default(15).describe('Max repositories to include.'),
+    top_per_repo: z.number().int().min(1).max(20).default(5).describe('Max contributors listed per repository.'),
+    project: z.string().min(1).optional().describe('Optional project key to scope the repo pool to one project.'),
+  },
+  async handler(store, args) {
+    return store.getRepoContributorBreakdown({
+      windowDays: args.window_days,
+      topRepos: args.top_repos,
+      topPerRepo: args.top_per_repo,
+      project: args.project ?? null,
+    });
+  },
+});

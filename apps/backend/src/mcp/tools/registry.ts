@@ -5,11 +5,11 @@
 // the orienting tools (overview, leaderboard, directories) before the
 // drill-in / query tools.
 
-import { activityDailyTool, searchActivityTool } from './activity.js';
+import { activityDailyTool, countActivityTool, searchActivityTool } from './activity.js';
 import { contributorSummaryTool, listMembersTool, topContributorsTool } from './contributors.js';
 import { getOverviewTool } from './overview.js';
 import { projectStatsTool } from './projects.js';
-import { listRepositoriesTool, repositoryActivityTool } from './repositories.js';
+import { listRepositoriesTool, repoContributorBreakdownTool, repositoryActivityTool } from './repositories.js';
 import type { AnyToolDef } from './types.js';
 
 export const tools: AnyToolDef[] = [
@@ -19,7 +19,9 @@ export const tools: AnyToolDef[] = [
   contributorSummaryTool,
   listRepositoriesTool,
   repositoryActivityTool,
+  repoContributorBreakdownTool,
   projectStatsTool,
   searchActivityTool,
+  countActivityTool,
   activityDailyTool,
 ];

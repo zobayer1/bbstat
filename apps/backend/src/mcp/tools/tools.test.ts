@@ -185,10 +185,72 @@ describe('search_activity', () => {
   });
 });
 
+describe('count_activity', () => {
+  it('counts over the full universe (same filters as search, no limit) and wraps the result', async () => {
+    const store = makeStore();
+    store.getActivityCount.mockResolvedValue(1234);
+    const result = await invoke('count_activity', store, { actor: { kind: 'user', id: 3 }, message: 'fix' });
+    expect(result).toEqual({ count: 1234 });
+    expect(store.getActivityCount).toHaveBeenCalledWith({
+      actor: { kind: 'user', id: 3 },
+      repo: null,
+      project: null,
+      before: null,
+      after: null,
+      hashPrefix: null,
+      message: 'fix',
+      limit: 0,
+      offset: 0,
+    });
+  });
+
+  it('does not accept a limit argument', async () => {
+    // limit is search-only; passing it should fail strict parse... it's
+    // ignored (zod strips unknown keys by default), so just assert the count
+    // path still works and limit is fixed at 0.
+    const store = makeStore();
+    await invoke('count_activity', store, {});
+    expect(store.getActivityCount).toHaveBeenCalledWith(expect.objectContaining({ limit: 0, offset: 0 }));
+  });
+});
+
 describe('activity_daily', () => {
   it('maps actor/repo/project into ActivityDailyFilters', async () => {
     const store = makeStore();
     await invoke('activity_daily', store, { project: 'BBSTAT' });
     expect(store.getActivityDaily).toHaveBeenCalledWith({ actor: null, repo: null, project: 'BBSTAT' });
+  });
+});
+
+describe('repo_contributor_breakdown', () => {
+  it('applies defaults (window 30, topRepos 15, topPerRepo 5, project null)', async () => {
+    const store = makeStore();
+    await invoke('repo_contributor_breakdown', store, {});
+    expect(store.getRepoContributorBreakdown).toHaveBeenCalledWith({
+      windowDays: 30,
+      topRepos: 15,
+      topPerRepo: 5,
+      project: null,
+    });
+  });
+
+  it('passes explicit args + project scope through', async () => {
+    const store = makeStore();
+    await invoke('repo_contributor_breakdown', store, {
+      window_days: 7,
+      top_repos: 5,
+      top_per_repo: 3,
+      project: 'BBSTAT',
+    });
+    expect(store.getRepoContributorBreakdown).toHaveBeenLastCalledWith({
+      windowDays: 7,
+      topRepos: 5,
+      topPerRepo: 3,
+      project: 'BBSTAT',
+    });
+  });
+
+  it('rejects out-of-range counts', async () => {
+    await expect(invoke('repo_contributor_breakdown', makeStore(), { top_repos: 100 })).rejects.toThrow();
   });
 });

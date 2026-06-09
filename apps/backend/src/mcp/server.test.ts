@@ -56,12 +56,14 @@ describe('buildMcpServer', () => {
     expect(names).toEqual(
       [
         'activity_daily',
+        'count_activity',
         'get_contributor_summary',
         'get_overview',
         'get_project_stats',
         'get_repository_activity',
         'list_members',
         'list_repositories',
+        'repo_contributor_breakdown',
         'search_activity',
         'top_contributors',
       ].sort(),
