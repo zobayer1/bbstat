@@ -100,6 +100,16 @@ export interface SyncRunnerDeps {
   // repos are skipped per the formula in backoff.ts. Diff-stats
   // backfill and deepen are NOT affected by this filter.
   backoffOptions?: BackoffOptions;
+  // Cold-repo admission cap for the commit + PR ticks. A "cold" repo has
+  // never been synced (NULL last_synced_at / pr_last_synced_at): backoff
+  // can't apply and it sorts to the head of the NULLS-FIRST queue. After a
+  // bulk discovery sweep, hundreds of cold (old, inactive) repos would
+  // otherwise monopolize the queue head and the budget every tick, starving
+  // the warm active rotation. When wired, warm repos are serviced first and
+  // in full; at most this many cold repos are appended per tick so a
+  // discovery backlog backfills gradually. Omitted (tests) → no cap, legacy
+  // NULLS-FIRST ordering. All runtime entrypoints wire it from config.
+  maxColdReposPerTick?: number;
   // In-process pub/sub for live updates. When wired, the runner
   // publishes a `tick.commits.complete` / `tick.prs.complete` event at
   // the end of each sync entry-point. Auto-trip sites (commits.ts,
@@ -205,6 +215,43 @@ export interface PrsSyncResult extends BaseResult {
   deferred: RepositoryHandle[];
 }
 
+export interface PrioritizedDue<T> {
+  // Warm rows first (in their incoming order), then at most `maxCold` cold
+  // rows. Fed to the tick as the scheduling queue.
+  ordered: T[];
+  warmCount: number;
+  coldAdmitted: number;
+  coldDeferred: number;
+}
+
+// Keep the warm active rotation from being starved by a cold (never-synced)
+// backlog. `due` arrives in `last_synced_at ASC NULLS FIRST` order, so cold
+// rows lead the list — exactly the rows a bulk discovery sweep dumps in bulk.
+// We split warm from cold, keep warm first (preserving their oldest-synced-
+// first order), and admit at most `maxCold` cold rows per tick. The rest of
+// the cold backlog rolls to later ticks, draining in the budget left over
+// after the warm set is serviced. `maxCold === undefined` (tests) → no cap;
+// the list is returned untouched (legacy NULLS-FIRST ordering).
+export function prioritizeDue<T>(
+  due: T[],
+  isCold: (row: T) => boolean,
+  maxCold: number | undefined,
+): PrioritizedDue<T> {
+  const warm: T[] = [];
+  const cold: T[] = [];
+  for (const row of due) (isCold(row) ? cold : warm).push(row);
+  if (maxCold === undefined) {
+    return { ordered: due, warmCount: warm.length, coldAdmitted: cold.length, coldDeferred: 0 };
+  }
+  const admitted = cold.slice(0, maxCold);
+  return {
+    ordered: [...warm, ...admitted],
+    warmCount: warm.length,
+    coldAdmitted: admitted.length,
+    coldDeferred: cold.length - admitted.length,
+  };
+}
+
 export async function runMembersSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<MembersSyncResult> {
   const startedAt = new Date().toISOString();
   deps.logger.info?.({ trigger, workspace: deps.workspace }, 'members sync start');
@@ -259,41 +306,47 @@ export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigge
 export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<CommitsSyncResult> {
   const startedAt = new Date().toISOString();
   const rows = await deps.store.listRepositoriesForSync();
-  // `handles` is the full curated set, used only for the start-of-tick
-  // log line that reports total vs due counts. The diff-stats backfill
-  // tick no longer consumes a handles list — it does its own global
-  // pickup. `dueHandles` is the subset whose commit-list interval has
-  // elapsed under the backoff formula and is the only list passed to
-  // the commit tick. When backoffOptions is unset, dueHandles == handles.
-  const handles: RepositoryHandle[] = rows.map((r) => ({
+  // `dueHandles` is the subset whose commit-list interval has elapsed under
+  // the backoff formula, then reordered (warm active repos first, cold repos
+  // capped) and is the only list passed to the commit tick. `rows.length` is
+  // logged as the full-set total. The diff-stats backfill tick does its own
+  // global pickup and consumes no handles list.
+  const toHandle = (r: (typeof rows)[number]): RepositoryHandle => ({
     repositoryId: r.id,
     workspace: r.workspace,
     slug: r.slug,
     fullName: r.fullName,
     diffStatsExcludePatterns: r.diffStatsExcludePatterns,
-  }));
+  });
   const now = new Date();
-  const dueHandles: RepositoryHandle[] =
+  // Backoff filter (when wired) drops quiet warm repos; cold (never-synced)
+  // repos are always "due" — backoff can't apply without an activity signal.
+  const dueRows =
     deps.backoffOptions === undefined
-      ? handles
-      : rows
-          .filter((r) =>
-            isDueForSync(deps.backoffOptions!, {
-              lastSyncedAt: r.lastSyncedAt,
-              latestActivityAt: r.latestCommitAt,
-              createdAt: r.createdAt,
-              now,
-            }),
-          )
-          .map((r) => ({
-            repositoryId: r.id,
-            workspace: r.workspace,
-            slug: r.slug,
-            fullName: r.fullName,
-            diffStatsExcludePatterns: r.diffStatsExcludePatterns,
-          }));
+      ? rows
+      : rows.filter((r) =>
+          isDueForSync(deps.backoffOptions!, {
+            lastSyncedAt: r.lastSyncedAt,
+            latestActivityAt: r.latestCommitAt,
+            createdAt: r.createdAt,
+            now,
+          }),
+        );
+  // Warm rotation is serviced first and in full; cold repos are admitted at
+  // most `maxColdReposPerTick` per tick so a discovery backlog can't starve
+  // the active set (see prioritizeDue / config SYNC_MAX_COLD_REPOS_PER_TICK).
+  const prioritized = prioritizeDue(dueRows, (r) => r.lastSyncedAt === null, deps.maxColdReposPerTick);
+  const dueHandles: RepositoryHandle[] = prioritized.ordered.map(toHandle);
   deps.logger.info?.(
-    { trigger, workspace: deps.workspace, repoCount: handles.length, dueCount: dueHandles.length },
+    {
+      trigger,
+      workspace: deps.workspace,
+      repoCount: rows.length,
+      dueCount: dueHandles.length,
+      warmCount: prioritized.warmCount,
+      coldAdmitted: prioritized.coldAdmitted,
+      coldDeferred: prioritized.coldDeferred,
+    },
     'commit sync start',
   );
 
@@ -509,35 +562,41 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
   const rows = await deps.store.listRepositoriesForSync();
   // PR sync has no analog of the diff-stats backfill — there's just one
   // list (the due-for-PR-sync set under the backoff formula). When
-  // backoffOptions is absent we fall back to the full list.
+  // backoffOptions is absent we fall back to the full list. Cold here keys
+  // on `pr_last_synced_at` (a repo can be warm for commits but never have
+  // had its PRs synced), so the same admission cap protects the warm PR
+  // rotation from a discovery backlog.
+  const toHandle = (r: (typeof rows)[number]): RepositoryHandle => ({
+    repositoryId: r.id,
+    workspace: r.workspace,
+    slug: r.slug,
+    fullName: r.fullName,
+    diffStatsExcludePatterns: r.diffStatsExcludePatterns,
+  });
   const now = new Date();
-  const dueHandles: RepositoryHandle[] =
+  const dueRows =
     deps.backoffOptions === undefined
-      ? rows.map((r) => ({
-          repositoryId: r.id,
-          workspace: r.workspace,
-          slug: r.slug,
-          fullName: r.fullName,
-          diffStatsExcludePatterns: r.diffStatsExcludePatterns,
-        }))
-      : rows
-          .filter((r) =>
-            isDueForSync(deps.backoffOptions!, {
-              lastSyncedAt: r.prLastSyncedAt,
-              latestActivityAt: r.latestPrAt,
-              createdAt: r.createdAt,
-              now,
-            }),
-          )
-          .map((r) => ({
-            repositoryId: r.id,
-            workspace: r.workspace,
-            slug: r.slug,
-            fullName: r.fullName,
-            diffStatsExcludePatterns: r.diffStatsExcludePatterns,
-          }));
+      ? rows
+      : rows.filter((r) =>
+          isDueForSync(deps.backoffOptions!, {
+            lastSyncedAt: r.prLastSyncedAt,
+            latestActivityAt: r.latestPrAt,
+            createdAt: r.createdAt,
+            now,
+          }),
+        );
+  const prioritized = prioritizeDue(dueRows, (r) => r.prLastSyncedAt === null, deps.maxColdReposPerTick);
+  const dueHandles: RepositoryHandle[] = prioritized.ordered.map(toHandle);
   deps.logger.info?.(
-    { trigger, workspace: deps.workspace, repoCount: rows.length, dueCount: dueHandles.length },
+    {
+      trigger,
+      workspace: deps.workspace,
+      repoCount: rows.length,
+      dueCount: dueHandles.length,
+      warmCount: prioritized.warmCount,
+      coldAdmitted: prioritized.coldAdmitted,
+      coldDeferred: prioritized.coldDeferred,
+    },
     'PR sync start',
   );
 

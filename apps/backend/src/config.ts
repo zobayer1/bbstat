@@ -87,6 +87,19 @@ const envSchema = z.object({
   SYNC_BACKOFF_MIN_INTERVAL_MIN: z.coerce.number().nonnegative().default(5),
   SYNC_BACKOFF_MAX_INTERVAL_MIN: z.coerce.number().int().positive().default(1440),
 
+  // Cold-repo admission cap for the commit + PR sync ticks. A "cold" repo
+  // has never been synced (`last_synced_at` / `pr_last_synced_at` IS NULL),
+  // so backoff can't apply (no activity signal yet) and it sorts to the head
+  // of the NULLS-FIRST queue. A bulk discovery sweep can dump hundreds of
+  // cold (old, inactive) repos at once — without a cap they monopolize the
+  // head of the queue and the BB-call budget every tick, starving the warm
+  // active rotation. The fix: warm (already-synced) repos are serviced first
+  // and in full; only this many cold repos are admitted per tick, so a
+  // discovery backlog backfills gradually in the leftover budget instead of
+  // preempting steady-state freshness. Set 0 to pause cold first-syncs
+  // entirely; raise to drain a backlog faster at the cost of warm headroom.
+  SYNC_MAX_COLD_REPOS_PER_TICK: z.coerce.number().int().nonnegative().default(5),
+
   // Per-commit diff-stat ingest (1 BB call per file-page of a commit's
   // /diffstat). Two parallel paths share the inner walker:
   //

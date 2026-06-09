@@ -7,7 +7,22 @@ release gets a section.
 
 ## [Unreleased]
 
-Nothing queued yet.
+### Fixed
+
+- **Cold-repo backlog no longer starves the active sync rotation.** A bulk
+  `REPO_DISCOVERY_ENABLED` sweep tracks hundreds of old, inactive repos at once,
+  all never-synced (`last_synced_at IS NULL`). Those sort to the head of the
+  commit/PR queue (`ORDER BY last_synced_at ASC NULLS FIRST`) and are
+  unconditionally "due" (backoff has no activity signal to throttle on), so they
+  monopolized the queue head and the BB-call budget every tick — warm, active
+  repos got deferred and their new commits went unsynced for many ticks. The
+  sync runner now services warm (already-synced) repos first and in full, and
+  admits at most `SYNC_MAX_COLD_REPOS_PER_TICK` (default 5) cold repos per tick,
+  so a discovery backlog backfills gradually in the leftover budget. Applies to
+  both the commit and PR ticks. Corrects the 1.4.0 claim that discovered
+  inactive repos "self-throttle" — they couldn't, until they'd been synced once.
+  New env var `SYNC_MAX_COLD_REPOS_PER_TICK` (0 pauses cold first-syncs; raise to
+  drain a backlog faster). No schema change.
 
 ## [1.4.0] — 2026-06-09
 

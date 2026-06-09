@@ -151,6 +151,7 @@ async function main(): Promise<void> {
       diffStatsBackfillOptions: diffStatsBackfillOptionsFromConfig(config),
       emptyRevivalOptions: emptyRevivalOptionsFromConfig(config),
       backoffOptions: backoffOptionsFromConfig(config),
+      maxColdReposPerTick: config.SYNC_MAX_COLD_REPOS_PER_TICK,
       cache: redis,
       repoDiscoveryOptions: repoDiscoveryOptionsFromConfig(config),
       bus,
