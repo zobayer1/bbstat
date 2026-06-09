@@ -7,6 +7,18 @@ release gets a section.
 
 ## [Unreleased]
 
+Nothing queued yet.
+
+## [1.5.0] — 2026-06-09
+
+Adds a read-only **MCP server** so LLM agents (Claude Code / Desktop, the Agent
+SDK, any MCP host) can query the dashboard's data directly — full parity with
+the read API across 11 tools. It's the fourth role of the backend image (a new
+`dist/mcp/index.js` command, like `sync`) plus a new `mcp` compose service; no
+separate image to ship. **No schema change, no `CACHE_VERSION` change.** One new
+required env var for the service (`MCP_TOKEN_SECRET`) and a reverse-proxy route.
+See the runbook below and [`docs/mcp.md`](docs/mcp.md).
+
 ### Added
 
 - **Read-only MCP server for LLM agents.** A new
@@ -20,12 +32,55 @@ release gets a section.
   only, never a live BitBucket call) and is strictly read-only — every tool is
   `readOnlyHint`, no admin/write surface. Ships as a fourth role of the backend
   image (`command: dist/mcp/index.js`) and a separate `mcp` compose service —
-  no new image, so the deploy flow is unchanged. Streamable-HTTP transport,
-  bearer-gated by `MCP_TOKEN_SECRET` (stateless HMAC tokens minted with the
-  `mcp:mint-token` CLI), TLS following the API's `BACKEND_TLS` toggle. Off
-  unless you run the service / `make dev-mcp`. New env: `MCP_TOKEN_SECRET`
-  (required to start), `MCP_HOST`, `MCP_PORT`, `MCP_HOST_PORT`. See
-  [`docs/mcp.md`](docs/mcp.md).
+  no new image to ship. Streamable-HTTP transport, bearer-gated by
+  `MCP_TOKEN_SECRET` (stateless HMAC tokens minted with the `mcp:mint-token`
+  CLI), TLS following the API's `BACKEND_TLS` toggle. New env:
+  `MCP_TOKEN_SECRET` (required to start the service), `MCP_HOST`, `MCP_PORT`,
+  `MCP_HOST_PORT`. See [`docs/mcp.md`](docs/mcp.md).
+
+### Operator notes — deploy runbook (1.4.1 → 1.5.0)
+
+Backend image rebuild (it now carries the MCP server + the MCP SDK). **No
+schema migration, no Redis clear, no frontend rebuild** — `CACHE_VERSION` is
+unchanged at 22, so keep the 1.4.1 frontend image.
+
+> The new `mcp` service is gated by a **required** secret: a full
+> `docker compose -f compose.yaml up -d` refuses to start unless
+> `MCP_TOKEN_SECRET` is set (the service interpolates `${MCP_TOKEN_SECRET:?}`).
+> Either provide it (to run the server) or bring up only the other services
+> (`up -d migrate backend sync frontend`) to skip MCP for now.
+
+1. **Build + ship the backend image** (build host) — backend-only:
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.5.0 docker compose build backend
+   docker save -o bbstat-backend-v1.5.0.tar bbstat-backend:v1.5.0
+   scp bbstat-backend-v1.5.0.tar compose.yaml prod:/opt/bbstat/
+   ```
+2. **Load + pin** (prod) — backend / sync / migrate / mcp share the one image:
+   ```bash
+   docker load -i bbstat-backend-v1.5.0.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.5.0
+   export FRONTEND_IMAGE=bbstat-frontend:v1.4.1   # unchanged — keep the 1.4.1 SPA
+   ```
+3. **Set the MCP secret + mint a token** (prod shell, alongside the other
+   secrets):
+   ```bash
+   export MCP_TOKEN_SECRET=<a long random string>
+   docker compose -f compose.yaml run --rm mcp dist/scripts/mint-mcp-token.js <consumer>
+   ```
+   Hand the printed token to each consumer as `Authorization: Bearer <token>`.
+4. **Point your reverse proxy at the mcp service** — it publishes
+   `${MCP_HOST_PORT:-8090}` and serves plain HTTP (`/mcp` + `/healthz`); your
+   proxy terminates TLS, exactly as it fronts the frontend. Skip if you're not
+   exposing it yet.
+5. **Roll out:**
+   ```bash
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml logs migrate   # no new migration in 1.5.0 — no-op
+   docker compose -f compose.yaml logs mcp        # "MCP server listening on …"
+   ```
+6. **No data action required.** No schema change, no rollup rebuild, no Redis
+   clear — `MCP_TOKEN_SECRET` is the only new required input.
 
 ## [1.4.1] — 2026-06-09
 
@@ -566,7 +621,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.4.1...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/tigerit/bbstat/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/tigerit/bbstat/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/tigerit/bbstat/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tigerit/bbstat/compare/v1.2.0...v1.3.0

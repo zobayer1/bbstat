@@ -34,7 +34,7 @@
 # `build:` block to each service for the dev workflow.
 #
 # Pin a specific version per deploy by exporting BACKEND_IMAGE / FRONTEND_IMAGE
-# (e.g. `BACKEND_IMAGE=bbstat-backend:v1.4.1`) before invoking compose. The
+# (e.g. `BACKEND_IMAGE=bbstat-backend:v1.5.0`) before invoking compose. The
 # `:latest` defaults are for local-dev convenience only — production deploys
 # should always pin an explicit tag.
 
