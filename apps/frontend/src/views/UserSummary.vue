@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
+import Breadcrumb from '@/components/Breadcrumb.vue';
+import { GLYPHS } from '@/lib/glyphs';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import BadgeIcon from '@/components/BadgeIcon.vue';
@@ -97,7 +99,12 @@ function relativeTime(iso: string | null): string {
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
-      <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
+      <Breadcrumb
+        :items="[
+          { label: 'Members', to: '/members', icon: GLYPHS.users },
+          { label: summary?.user.displayName ?? `User #${userId}`, bracketed: true },
+        ]"
+      />
       <div class="mt-1 flex items-center gap-3">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">
           {{ summary?.user.displayName ?? `User #${userId}` }}

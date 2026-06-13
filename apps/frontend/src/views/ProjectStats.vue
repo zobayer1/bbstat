@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, RouterLink } from 'vue-router';
+import Breadcrumb from '@/components/Breadcrumb.vue';
+import { GLYPHS } from '@/lib/glyphs';
 import StatCard from '@/components/StatCard.vue';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import ActorPicker from '@/components/ActorPicker.vue';
@@ -84,7 +86,12 @@ const pagedRepositories = computed(() => {
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
-      <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
+      <Breadcrumb
+        :items="[
+          { label: 'Projects', to: '/projects', icon: GLYPHS.rectangleStack },
+          { label: projectKey, bracketed: true },
+        ]"
+      />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">{{ projectKey }}</h1>
         <!-- Thin external link to the canonical BB project page —

@@ -18,6 +18,8 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import Breadcrumb from '@/components/Breadcrumb.vue';
+import { GLYPHS } from '@/lib/glyphs';
 import ActorPicker from '@/components/ActorPicker.vue';
 import ActivityStatusDonut, { type ActivityBucket } from '@/components/ActivityStatusDonut.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
@@ -298,7 +300,7 @@ function clearFilters(): void {
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
-      <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
+      <Breadcrumb :items="[{ label: 'Repositories', icon: GLYPHS.folder }]" />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">Repositories</h1>
         <!-- Thin external link to BB's workspace-wide repository list.

@@ -16,6 +16,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import ActivityFeed from '@/components/ActivityFeed.vue';
+import Breadcrumb from '@/components/Breadcrumb.vue';
+import { GLYPHS } from '@/lib/glyphs';
 import ActorPicker from '@/components/ActorPicker.vue';
 import SunburstRepoContributors from '@/components/SunburstRepoContributors.vue';
 import SyncStateIcon from '@/components/SyncStateIcon.vue';
@@ -246,7 +248,7 @@ function clearFilters(): void {
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
-      <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
+      <Breadcrumb :items="[{ label: 'Projects', icon: GLYPHS.rectangleStack }]" />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">Projects</h1>
         <!-- Thin external link to BB's workspace-wide projects list.

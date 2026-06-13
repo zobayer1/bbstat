@@ -3,6 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Fuse from 'fuse.js';
 import ActiveMembersBar, { type ActivityBucket } from '@/components/ActiveMembersBar.vue';
+import Breadcrumb from '@/components/Breadcrumb.vue';
+import { GLYPHS } from '@/lib/glyphs';
 import ActivityFeed from '@/components/ActivityFeed.vue';
 import ActorPicker from '@/components/ActorPicker.vue';
 import BadgeIcon from '@/components/BadgeIcon.vue';
@@ -314,7 +316,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
-      <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
+      <Breadcrumb :items="[{ label: 'Members', icon: GLYPHS.users }]" />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">Workspace Members</h1>
         <!-- Thin external link to BB's workspace members directory.

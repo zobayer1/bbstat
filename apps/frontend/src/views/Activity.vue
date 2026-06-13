@@ -11,6 +11,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import ActivityRow from '@/components/ActivityRow.vue';
+import Breadcrumb from '@/components/Breadcrumb.vue';
+import { GLYPHS } from '@/lib/glyphs';
 import ActorPicker from '@/components/ActorPicker.vue';
 import CommitHeatmap from '@/components/CommitHeatmap.vue';
 import CommitDetailModal from '@/components/CommitDetailModal.vue';
@@ -494,9 +496,9 @@ function nextCommit(): void {
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="mb-6">
-      <RouterLink to="/" class="text-xs text-slate-500 hover:text-slate-700">← Dashboard</RouterLink>
+      <Breadcrumb :items="[{ label: 'Commits', icon: GLYPHS.bolt }]" />
       <h1 class="mt-1 flex flex-wrap items-baseline gap-x-2 text-3xl font-bold tracking-tight text-slate-900">
-        <span>Activity</span>
+        <span>Commits</span>
         <!-- Time-range chip (preset-matched against the URL). Resets
              automatically when the user picks a custom date. -->
         <span
