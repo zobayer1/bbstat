@@ -9,6 +9,56 @@ release gets a section.
 
 Nothing queued yet.
 
+## [1.5.1] — 2026-06-13
+
+Frontend-only UX polish. The static "← Dashboard" back-link on every
+non-dashboard page becomes an **icon breadcrumb**, the Activity page is
+retitled **Commits**, and **empty repositories now appear in the Repositories
+"Issues" tab**. **Backend unchanged — no schema, no `CACHE_VERSION`, no Redis
+change.** Ship the frontend image only.
+
+### Changed
+
+- **Icon breadcrumb navigation.** Every non-dashboard page's "← Dashboard"
+  (and Person's "← Members") back-link is now a breadcrumb: a home icon +
+  "Home", then the section — carrying the same dashboard glyph
+  (Repositories → folder, Projects → rectangleStack, Members → users,
+  Commits → bolt) — and, on detail pages, the specific repo / project / person
+  as a bracketed `[id]` with no icon. Glyphs are shared with the dashboard
+  stat cards via a new `apps/frontend/src/lib/glyphs.ts` so the two surfaces
+  can't drift. Routes, nav hyperlinks, and section headings are unchanged.
+- **Activity page retitled "Commits"** — its breadcrumb crumb and `<h1>` (the
+  title reads `Commits [Last 7 days]` etc.). The `/activity` route, query
+  params, and "see all →" links are untouched.
+- **Empty repositories surface in the Repositories "Issues" tab** alongside
+  error / excluded, so empty tracked repos are easy to find and triage /
+  archive. They keep their benign gray "Empty" icon, visually distinct from
+  the red / amber problem states.
+
+### Operator notes — deploy runbook (1.5.0 → 1.5.1)
+
+Frontend-only — rebuild + ship the **frontend** image; the backend image
+(backend / sync / mcp / migrate) is unchanged, keep `v1.5.0`. **No schema
+migration, no Redis clear, no `CACHE_VERSION` bump** — users get the new SPA on
+their next load (Vite-hashed bundles cache-bust themselves).
+
+1. **Build + ship the frontend image** (build host):
+   ```bash
+   FRONTEND_IMAGE=bbstat-frontend:v1.5.1 docker compose build frontend
+   docker save -o bbstat-frontend-v1.5.1.tar bbstat-frontend:v1.5.1
+   scp bbstat-frontend-v1.5.1.tar prod:/opt/bbstat/
+   ```
+2. **Load + pin** (prod):
+   ```bash
+   docker load -i bbstat-frontend-v1.5.1.tar
+   export FRONTEND_IMAGE=bbstat-frontend:v1.5.1
+   export BACKEND_IMAGE=bbstat-backend:v1.5.0   # unchanged
+   ```
+3. **Roll out** (your usual two-file invocation; only the frontend recreates):
+   ```bash
+   docker compose -f compose.yaml -f compose.prod-mounts.yaml up -d
+   ```
+
 ## [1.5.0] — 2026-06-09
 
 Adds a read-only **MCP server** so LLM agents (Claude Code / Desktop, the Agent
@@ -621,7 +671,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.0...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/tigerit/bbstat/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/tigerit/bbstat/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/tigerit/bbstat/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/tigerit/bbstat/compare/v1.3.0...v1.4.0
