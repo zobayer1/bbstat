@@ -9,7 +9,7 @@
 // affordances for outliers.
 //
 // Sections, top to bottom:
-//   1. Header (← Dashboard, title, subtitle)
+//   1. Header (breadcrumb, title, subtitle)
 //   2. Sync-health donut (full-width card)
 //   3. Search + project filter + status pill toggle + count
 //   4. Sortable repo table (25/page, full-row click)
@@ -218,7 +218,11 @@ const filtered = computed<TrackedRepositorySummary[]>(() => {
   return stats.repositories.filter((r) => {
     if (projectScope !== undefined && r.project !== projectScope) return false;
     if (statusScope === 'active' && (r.syncStatus !== 'ok' || r.archived)) return false;
-    if (statusScope === 'issues' && r.syncStatus !== 'error' && r.syncStatus !== 'excluded') return false;
+    // Issues tab surfaces repos that aren't cleanly syncing: error / excluded
+    // (red/amber, need attention) plus empty (benign gray — listed so empty
+    // tracked repos are easy to find and triage / archive).
+    if (statusScope === 'issues' && r.syncStatus !== 'error' && r.syncStatus !== 'excluded' && r.syncStatus !== 'empty')
+      return false;
     if (statusScope === 'archived' && !r.archived) return false;
     if (q !== '') {
       const haystack = `${r.slug} ${r.project ?? ''} ${r.workspace}`.toLowerCase();
