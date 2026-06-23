@@ -78,7 +78,7 @@ export interface SyncRunnerDeps {
   // Self-queueing deepen-backfill. When omitted (e.g., in tests that only
   // care about delta sync), the piggyback step inside runCommitsSync is
   // a no-op. All runtime entrypoints wire it.
-  deepenOptions?: { maxPages: number; budgetThreshold: number };
+  deepenOptions?: { maxPages: number; budgetThreshold: number; emptyGraceHours?: number };
   // Retroactive is_merge backfill that runs between deepen and diff-stats
   // backfill. When omitted, the step is skipped — pre-V1_7 commits keep
   // their stale `is_merge = false` value until an operator runs the
@@ -672,10 +672,15 @@ export function prTickOptionsFromConfig(config: AppConfig): PrTickOptions {
   };
 }
 
-export function deepenOptionsFromConfig(config: AppConfig): { maxPages: number; budgetThreshold: number } {
+export function deepenOptionsFromConfig(config: AppConfig): {
+  maxPages: number;
+  budgetThreshold: number;
+  emptyGraceHours: number;
+} {
   return {
     maxPages: config.DEEPEN_BACKFILL_MAX_PAGES,
     budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
+    emptyGraceHours: config.SYNC_EMPTY_GRACE_HOURS,
   };
 }
 

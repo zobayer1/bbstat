@@ -226,7 +226,9 @@ describe('deepenOneRepo', () => {
     // cycle through every deepen tick forever via the "no oldest sha"
     // empty-result path.
     const { store, state } = makeStore({
-      candidate: { ...REPO, oldestSha: null },
+      // Tracked long ago (past the grace window) — a genuinely empty repo,
+      // not a brand-new one mid-first-push.
+      candidate: { ...REPO, oldestSha: null, createdAt: new Date('2020-01-01T00:00:00Z') },
       syncStateByRepo: new Map([
         [
           7,
@@ -255,7 +257,7 @@ describe('deepenOneRepo', () => {
 
   it('empty-on-BB ALSO auto-trips sync_excluded when discoveryStore is wired', async () => {
     const { store, state } = makeStore({
-      candidate: { ...REPO, oldestSha: null },
+      candidate: { ...REPO, oldestSha: null, createdAt: new Date('2020-01-01T00:00:00Z') },
       syncStateByRepo: new Map([
         [
           7,
@@ -289,6 +291,124 @@ describe('deepenOneRepo', () => {
     );
 
     expect(excluded).toEqual([{ id: 7, excluded: true, reason: 'empty-on-bitbucket' }]);
+    expect(state.markedComplete).toEqual([7]);
+  });
+
+  it('does NOT exclude an empty repo within the new-repo grace window — leaves it in active sync', async () => {
+    // Repo tracked seconds ago: empty on BB right now, but it may gain its
+    // first commit any moment. Excluding it here would send it dark until
+    // an operator runs /sync/revive-empty. Within the grace window it must
+    // stay un-excluded with deepen_complete still false so the commit tick
+    // keeps probing.
+    const { store, state } = makeStore({
+      candidate: { ...REPO, oldestSha: null, createdAt: new Date(Date.now() - 1000) },
+      syncStateByRepo: new Map([
+        [
+          7,
+          {
+            repositoryId: 7,
+            lastSeenSha: null,
+            lastSyncedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStartedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStatus: 'success' as const,
+            lastSyncError: null,
+            totalCommitsSynced: 0,
+          } satisfies SyncStateRow,
+        ],
+      ]),
+    });
+    const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+    const excluded: Array<{ id: number; excluded: boolean; reason: string | null }> = [];
+    const discoveryStore = {
+      async updateRepositorySyncExcluded(id: number, ex: boolean, reason: string | null) {
+        excluded.push({ id, excluded: ex, reason });
+      },
+    };
+
+    const result = await deepenOneRepo(
+      {
+        client,
+        store,
+        discoveryStore: discoveryStore as unknown as Parameters<typeof deepenOneRepo>[0]['discoveryStore'],
+      },
+      { maxPages: 5, budgetThreshold: 100, emptyGraceHours: 24 },
+    );
+
+    // Still attempted (rotation bumps), but not excluded, not completed.
+    expect(state.markedAttempt).toEqual([7]);
+    expect(state.markedComplete).toEqual([]);
+    expect(excluded).toEqual([]);
+    expect(result?.reachedRoot).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('excludes an empty repo once it ages past the grace window', async () => {
+    // Same repo, but now older than the (short) grace window — the grace
+    // is a delay, not a permanent reprieve, so exclusion eventually fires.
+    const { store, state } = makeStore({
+      candidate: { ...REPO, oldestSha: null, createdAt: new Date(Date.now() - 2 * 3_600_000) },
+      syncStateByRepo: new Map([
+        [
+          7,
+          {
+            repositoryId: 7,
+            lastSeenSha: null,
+            lastSyncedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStartedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStatus: 'success' as const,
+            lastSyncError: null,
+            totalCommitsSynced: 0,
+          } satisfies SyncStateRow,
+        ],
+      ]),
+    });
+    const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+    const excluded: Array<{ id: number; excluded: boolean; reason: string | null }> = [];
+    const discoveryStore = {
+      async updateRepositorySyncExcluded(id: number, ex: boolean, reason: string | null) {
+        excluded.push({ id, excluded: ex, reason });
+      },
+    };
+
+    await deepenOneRepo(
+      {
+        client,
+        store,
+        discoveryStore: discoveryStore as unknown as Parameters<typeof deepenOneRepo>[0]['discoveryStore'],
+      },
+      { maxPages: 5, budgetThreshold: 100, emptyGraceHours: 1 },
+    );
+
+    expect(excluded).toEqual([{ id: 7, excluded: true, reason: 'empty-on-bitbucket' }]);
+    expect(state.markedComplete).toEqual([7]);
+  });
+
+  it('excludes immediately when createdAt is absent (explicit admin force-deepen path)', async () => {
+    // The admin /deepen route builds a candidate without createdAt. Grace
+    // can't be evaluated, so the deliberate operator action falls through
+    // to today's behavior: an empty repo is excluded.
+    const { store, state } = makeStore({
+      candidate: { ...REPO, oldestSha: null },
+      syncStateByRepo: new Map([
+        [
+          7,
+          {
+            repositoryId: 7,
+            lastSeenSha: null,
+            lastSyncedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStartedAt: new Date('2026-05-13T22:20:00Z'),
+            lastSyncStatus: 'success' as const,
+            lastSyncError: null,
+            totalCommitsSynced: 0,
+          } satisfies SyncStateRow,
+        ],
+      ]),
+    });
+    const client = makeClient(fetchMock as unknown as typeof globalThis.fetch);
+
+    const result = await deepenOneRepo({ client, store }, { maxPages: 5, budgetThreshold: 100, emptyGraceHours: 24 });
+
+    expect(result?.reachedRoot).toBe(true);
     expect(state.markedComplete).toEqual([7]);
   });
 

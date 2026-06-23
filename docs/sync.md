@@ -579,6 +579,22 @@ How it stops, per repo:
   next rotation picks this repo up from the new oldest sha.
 - **Seed 404** — a force-push made our oldest sha disappear upstream.
   Treated as "give up": `deepen_complete = true`, logged.
+- **Empty on BB** — `oldestSha = null` _and_ `last_sync_status = 'success'`
+  (cold mode ran clean but BB had zero commits). The repo is genuinely
+  empty, so `deepen_complete = true` and — when the discovery store is
+  wired — `sync_excluded = true, reason = 'empty-on-bitbucket'` so it
+  drops out of the sync set and gets a dashboard badge.
+  **Grace period:** if the repo was tracked less than `SYNC_EMPTY_GRACE_HOURS`
+  (default 24) ago — measured from `repositories.created_at` — the
+  exclusion is **deferred**: `deepen_complete` and `sync_excluded` are
+  both left alone, so the repo stays in active sync and the commit tick
+  keeps probing each cron firing. This stops a repo added moments before
+  its first push from being excluded in the gap (which would send it dark
+  until an operator ran `POST /api/admin/sync/revive-empty`). The grace is
+  a delay, not a reprieve — once the repo ages past the window while still
+  empty, the next deepen tick excludes it. Set `SYNC_EMPTY_GRACE_HOURS=0`
+  to restore immediate exclusion. The explicit admin force-deepen path
+  carries no `created_at`, so it excludes immediately regardless.
 - **Transient failure** (4xx other than 404, 5xx after retries) —
   leaves `deepen_complete` alone, just bumps `deepen_last_run_at` so
   the round-robin rotates past it on the next tick.
@@ -905,30 +921,31 @@ bitbucket_pr_id) DO UPDATE` — PR state mutates over a PR's lifetime
 All knobs have safe defaults — a fresh clone runs the cron without
 overrides. Set in `.env` at the repo root.
 
-| Env var                                    | Default       | Notes                                                                                                                                                          |
-| ------------------------------------------ | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BITBUCKET_HOURLY_CALL_BUDGET`             | `1000`        | Layer 1: hourly soft cap on outbound BB calls, shared across every sync surface.                                                                               |
-| `BITBUCKET_MIN_CALL_INTERVAL_MS`           | `400`         | Layer 2 floor: minimum wall-clock interval between successive BB calls.                                                                                        |
-| `BITBUCKET_MAX_CALL_INTERVAL_MS`           | `3200`        | Layer 2 ceiling: pacing doubles on each 429, capped here; abort triggers above.                                                                                |
-| `SYNC_COMMITS_CRON`                        | `*/5 * * * *` | When the commit cron fires. Also drives the piggybacked deepen-backfill step.                                                                                  |
-| `COMMITS_BACKFILL_MAX_PAGES`               | `5`           | Cold-mode commit cap: stop after N pages of 100.                                                                                                               |
-| `COMMITS_BACKFILL_SINCE`                   | _(empty)_     | Cold-mode commit cap: ISO 8601 date. Empty = no date cap.                                                                                                      |
-| `COMMIT_SYNC_CONCURRENCY`                  | `3`           | Max repos in flight per commit tick.                                                                                                                           |
-| `COMMIT_SYNC_BUDGET_THRESHOLD`             | `20`          | Defer next repo when budget falls below this.                                                                                                                  |
-| `DEEPEN_BACKFILL_MAX_PAGES`                | `5`           | Self-queueing deepen-backfill: pages × 100 commits per piggybacked run.                                                                                        |
-| `DEEPEN_BUDGET_THRESHOLD`                  | `100`         | Headroom required after the delta tick before deepen runs. Yields to delta sync.                                                                               |
-| `DIFF_STATS_BUDGET_THRESHOLD`              | `10`          | Phase 4: inline-eager forward fetch budget gate inside the commit-sync per-repo loop.                                                                          |
-| `DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK` | `100`         | Phase 4: total pending-commit cap for the diff-stats backfill tick (global, not per-repo).                                                                     |
-| `DIFF_STATS_BACKFILL_BUDGET_THRESHOLD`     | `20`          | Phase 4: budget gate for the backfill tick.                                                                                                                    |
-| `SYNC_PRS_ENABLED`                         | `false`       | Phase 4: kill switch on PR cron registration. Default off — the admin manual trigger still works regardless. Flip to `true` to re-enable scheduled PR ingest.  |
-| `SYNC_PRS_CRON`                            | `0 * * * *`   | Phase 4: when the PR cron fires (hourly), only when `SYNC_PRS_ENABLED=true`.                                                                                   |
-| `PR_BACKFILL_MAX_PAGES`                    | `5`           | Phase 4: cold-mode PR cap (pages × 100).                                                                                                                       |
-| `PR_SYNC_CONCURRENCY`                      | `3`           | Phase 4: max repos in flight per PR tick.                                                                                                                      |
-| `PR_SYNC_BUDGET_THRESHOLD`                 | `20`          | Phase 4: defer next repo when budget falls below this.                                                                                                         |
-| `SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY`     | `4`           | Layer 5: minutes added to the polling interval per day a repo has been quiet.                                                                                  |
-| `SYNC_BACKOFF_MIN_INTERVAL_MIN`            | `5`           | Layer 5: floor on the per-repo polling interval (default matches the commit cron).                                                                             |
-| `SYNC_BACKOFF_MAX_INTERVAL_MIN`            | `1440`        | Layer 5: ceiling on the per-repo polling interval (24h default).                                                                                               |
-| `SYNC_MAX_COLD_REPOS_PER_TICK`             | `5`           | Layer 6: max never-synced repos admitted per commit/PR tick (warm repos always first). `0` pauses cold first-syncs; raise to drain a discovery backlog faster. |
+| Env var                                    | Default       | Notes                                                                                                                                                                                                |
+| ------------------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BITBUCKET_HOURLY_CALL_BUDGET`             | `1000`        | Layer 1: hourly soft cap on outbound BB calls, shared across every sync surface.                                                                                                                     |
+| `BITBUCKET_MIN_CALL_INTERVAL_MS`           | `400`         | Layer 2 floor: minimum wall-clock interval between successive BB calls.                                                                                                                              |
+| `BITBUCKET_MAX_CALL_INTERVAL_MS`           | `3200`        | Layer 2 ceiling: pacing doubles on each 429, capped here; abort triggers above.                                                                                                                      |
+| `SYNC_COMMITS_CRON`                        | `*/5 * * * *` | When the commit cron fires. Also drives the piggybacked deepen-backfill step.                                                                                                                        |
+| `COMMITS_BACKFILL_MAX_PAGES`               | `5`           | Cold-mode commit cap: stop after N pages of 100.                                                                                                                                                     |
+| `COMMITS_BACKFILL_SINCE`                   | _(empty)_     | Cold-mode commit cap: ISO 8601 date. Empty = no date cap.                                                                                                                                            |
+| `COMMIT_SYNC_CONCURRENCY`                  | `3`           | Max repos in flight per commit tick.                                                                                                                                                                 |
+| `COMMIT_SYNC_BUDGET_THRESHOLD`             | `20`          | Defer next repo when budget falls below this.                                                                                                                                                        |
+| `DEEPEN_BACKFILL_MAX_PAGES`                | `5`           | Self-queueing deepen-backfill: pages × 100 commits per piggybacked run.                                                                                                                              |
+| `DEEPEN_BUDGET_THRESHOLD`                  | `100`         | Headroom required after the delta tick before deepen runs. Yields to delta sync.                                                                                                                     |
+| `SYNC_EMPTY_GRACE_HOURS`                   | `24`          | Grace window (from `repositories.created_at`) before a still-empty repo is auto-excluded (`empty-on-bitbucket`). Keeps a freshly-added repo in sync until its first push. `0` = exclude immediately. |
+| `DIFF_STATS_BUDGET_THRESHOLD`              | `10`          | Phase 4: inline-eager forward fetch budget gate inside the commit-sync per-repo loop.                                                                                                                |
+| `DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK` | `100`         | Phase 4: total pending-commit cap for the diff-stats backfill tick (global, not per-repo).                                                                                                           |
+| `DIFF_STATS_BACKFILL_BUDGET_THRESHOLD`     | `20`          | Phase 4: budget gate for the backfill tick.                                                                                                                                                          |
+| `SYNC_PRS_ENABLED`                         | `false`       | Phase 4: kill switch on PR cron registration. Default off — the admin manual trigger still works regardless. Flip to `true` to re-enable scheduled PR ingest.                                        |
+| `SYNC_PRS_CRON`                            | `0 * * * *`   | Phase 4: when the PR cron fires (hourly), only when `SYNC_PRS_ENABLED=true`.                                                                                                                         |
+| `PR_BACKFILL_MAX_PAGES`                    | `5`           | Phase 4: cold-mode PR cap (pages × 100).                                                                                                                                                             |
+| `PR_SYNC_CONCURRENCY`                      | `3`           | Phase 4: max repos in flight per PR tick.                                                                                                                                                            |
+| `PR_SYNC_BUDGET_THRESHOLD`                 | `20`          | Phase 4: defer next repo when budget falls below this.                                                                                                                                               |
+| `SYNC_BACKOFF_SLOPE_MIN_PER_QUIET_DAY`     | `4`           | Layer 5: minutes added to the polling interval per day a repo has been quiet.                                                                                                                        |
+| `SYNC_BACKOFF_MIN_INTERVAL_MIN`            | `5`           | Layer 5: floor on the per-repo polling interval (default matches the commit cron).                                                                                                                   |
+| `SYNC_BACKOFF_MAX_INTERVAL_MIN`            | `1440`        | Layer 5: ceiling on the per-repo polling interval (24h default).                                                                                                                                     |
+| `SYNC_MAX_COLD_REPOS_PER_TICK`             | `5`           | Layer 6: max never-synced repos admitted per commit/PR tick (warm repos always first). `0` pauses cold first-syncs; raise to drain a discovery backlog faster.                                       |
 
 The members + repos crons (`SYNC_MEMBERS_CRON`, `SYNC_REPOS_CRON`) are also
 overridable, but their defaults are intentionally tight for dev visibility —

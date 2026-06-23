@@ -65,6 +65,7 @@ const testConfig: AppConfig = {
   MCP_PORT: 8090,
   IS_MERGE_BACKFILL_MAX_PAGES: 5,
   IS_MERGE_BACKFILL_BUDGET_THRESHOLD: 50,
+  SYNC_EMPTY_GRACE_HOURS: 24,
 };
 
 function makeStatsStore(overrides: Partial<StatsStore> = {}): StatsStore {

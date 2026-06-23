@@ -41,7 +41,21 @@ export interface DeepenBackfillOptions {
   // attempt a deepen page. Higher than the commit-tick threshold so we
   // yield to delta sync.
   budgetThreshold: number;
+  // Grace window (hours) before a still-empty repo is auto-excluded with
+  // reason 'empty-on-bitbucket'. Anchored on `repositories.created_at`
+  // (when WE first tracked it): a repo added moments before its first
+  // push must not be excluded in the gap, or it goes dark until an
+  // operator runs /sync/revive-empty. Within the window the repo stays
+  // in active sync (not excluded, deepen_complete stays false) so the
+  // commit tick keeps probing for its first commit. Optional — defaults
+  // to DEFAULT_EMPTY_GRACE_HOURS.
+  emptyGraceHours?: number;
 }
+
+// Fallback grace window when opts.emptyGraceHours is unset (tests, admin
+// force-deepen literals). Production wires SYNC_EMPTY_GRACE_HOURS through
+// deepenOptionsFromConfig, which also defaults to 24h.
+const DEFAULT_EMPTY_GRACE_HOURS = 24;
 
 export interface DeepenBackfillResult {
   repositoryId: number;
@@ -168,6 +182,31 @@ export async function deepenOneRepo(
     const state = await deps.store.getSyncState(candidate.repositoryId);
     const isEmptyOnBitbucket = state?.lastSyncStatus === 'success';
     if (isEmptyOnBitbucket) {
+      // Grace period: a repo we only just started tracking may be empty
+      // right now but gain its first commit any moment. Excluding it in
+      // that gap sends it dark until an operator runs /sync/revive-empty.
+      // While it's younger than the grace window, leave it untouched —
+      // not excluded, deepen_complete still false — so the commit tick
+      // keeps probing each cron firing and picks up the first push on its
+      // own. `createdAt` is absent only on the explicit admin force-deepen
+      // path; there we fall through to exclusion as before (a deliberate
+      // operator action, not the brand-new-repo race this guards).
+      const graceHours = opts.emptyGraceHours ?? DEFAULT_EMPTY_GRACE_HOURS;
+      if (candidate.createdAt !== undefined) {
+        const ageMs = Date.now() - candidate.createdAt.getTime();
+        if (ageMs < graceHours * 3_600_000) {
+          deps.logger?.debug?.(
+            {
+              repositoryId: candidate.repositoryId,
+              fullName: candidate.fullName,
+              ageMs,
+              graceHours,
+            },
+            'deepen-backfill: repo empty on BB but within new-repo grace window — leaving in active sync',
+          );
+          return { ...emptyResult(candidate.repositoryId, candidate.fullName), seedMissing: false };
+        }
+      }
       await deps.store.markDeepenComplete(candidate.repositoryId);
       // Surface in the dashboard too: an empty repo isn't broken per se
       // but it's not contributing data either, and the operator should

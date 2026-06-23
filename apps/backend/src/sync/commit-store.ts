@@ -449,6 +449,13 @@ export interface DeepenCandidate {
   // the repo has zero commits ingested — caller treats as
   // "nothing to deepen yet; cold mode hasn't run".
   oldestSha: string | null;
+  // When the repo was first tracked by us (repositories.created_at).
+  // Anchors the empty-repo exclusion grace period: a freshly-added repo
+  // that's still empty on BB stays in active sync until this is older
+  // than the grace window, so a repo created moments before its first
+  // push isn't excluded in the gap. Optional because the explicit-repo
+  // admin path (forced deepen) doesn't carry it — see deepenOneRepo.
+  createdAt?: Date;
 }
 
 export interface AnonymousSweepCandidate {
@@ -966,12 +973,14 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         slug: string;
         full_name: string;
         oldest_sha: string | null;
+        created_at: string | Date;
       }>(sql`
         SELECT
           s.repository_id,
           r.workspace,
           r.slug,
           r.full_name,
+          r.created_at,
           (SELECT sha FROM commits WHERE repository_id = s.repository_id ORDER BY authored_at ASC LIMIT 1) AS oldest_sha
         FROM sync_state s
         JOIN repositories r ON r.id = s.repository_id
@@ -987,6 +996,7 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         slug: row.slug,
         fullName: row.full_name,
         oldestSha: row.oldest_sha,
+        createdAt: new Date(row.created_at),
       };
     },
 

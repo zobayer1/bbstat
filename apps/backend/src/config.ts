@@ -181,6 +181,16 @@ const envSchema = z.object({
   DEEPEN_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   DEEPEN_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(100),
 
+  // Grace window before a still-empty repo is auto-excluded from sync
+  // (reason 'empty-on-bitbucket'). A repo with 0 commits at discovery —
+  // e.g. one added moments before its first push — would otherwise be
+  // excluded by the very next deepen tick and go dark until an operator
+  // runs /sync/revive-empty. Anchored on repositories.created_at (when we
+  // first tracked it); within the window the repo stays in active sync so
+  // the commit tick keeps probing and catches the first commit on its own.
+  // Set to 0 to restore the old immediate-exclusion behavior.
+  SYNC_EMPTY_GRACE_HOURS: z.coerce.number().nonnegative().default(24),
+
   // Read-only MCP server (apps/backend/src/mcp) — a separate compose service
   // on the same backend image (command: dist/mcp/index.js), exposing the
   // dashboard read surface to LLM agents over streamable-HTTP. These vars are
