@@ -1,22 +1,14 @@
 // Empty-repo revival sweep. Counterpart to the empty-on-bitbucket auto-trip
-// (deepen-backfill.ts): when a repo's cold + deepen walk converges with zero
-// commits, it's excluded with reason 'empty-on-bitbucket' so the sync stops
-// burning a BB call on it every tick. But an excluded repo is never re-polled
-// — `listRepositoriesForSync` filters `sync_excluded = false` — so if someone
-// later pushes the repo's first commits, nothing notices: it stays dark until
-// an operator manually `/include`s it.
+// (deepen-backfill.ts): an empty-excluded repo is never re-polled
+// (listRepositoriesForSync filters sync_excluded = false), so if someone
+// later pushes its first commits, nothing notices until an operator
+// /include's it.
 //
-// This sweep closes that gap. It periodically re-probes the empty-excluded
-// (non-archived) repos with a single cheap BB call each. The moment one has
-// commits, it clears the exclusion and resets the cursor to cold, so the next
-// commit-sync tick walks the fresh history. ARCHIVED repos are skipped on
-// purpose — archiving is a deliberate retire, and auto-reviving it would
-// override that decision (the candidate query in `listEmptyExcludedRepos`
-// enforces `archived = false`).
-//
-// Detection only: it does NOT ingest commits itself. Clearing the exclusion
-// hands the repo back to the normal tick. Until BitBucket webhooks land, this
-// is the self-healing path for empty -> active repos.
+// This sweep closes that gap: it periodically re-probes the empty-excluded
+// (non-archived) repos with one cheap BB call each, and the moment one has
+// commits, clears the exclusion and resets the cursor to cold. Detection
+// only — it does NOT ingest; clearing the exclusion hands the repo back to
+// the normal tick. ARCHIVED repos are skipped on purpose (deliberate retire).
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits } from '../bitbucket/commits.js';
@@ -25,19 +17,16 @@ import type { CommitStore } from './commit-store.js';
 import type { DiscoveryStore } from './discovery-store.js';
 
 export interface EmptyRevivalOptions {
-  // Cap on repos probed per tick — one BB call each. Bounds the cost in the
-  // pathological case where many repos sit empty-excluded at once; the set
-  // is normally near-empty.
+  // Cap on repos probed per tick — one BB call each. Bounds the cost when
+  // many repos sit empty-excluded; normally near-empty.
   maxReposPerTick: number;
-  // Skip the sweep when the BB call budget is below this — delta sync and the
-  // higher-priority backfills come first.
+  // Skip the sweep below this budget — delta sync and the backfills come first.
   budgetThreshold: number;
 }
 
 export interface EmptyRevivalDeps {
   client: BitbucketClient;
-  // Narrow slices of the full stores — only what the sweep touches, which
-  // keeps the unit-test fakes small.
+  // Narrow store slices — only what the sweep touches, keeping the fakes small.
   discoveryStore: Pick<DiscoveryStore, 'listEmptyExcludedRepos' | 'updateRepositorySyncExcluded'>;
   commitStore: Pick<CommitStore, 'resetSyncCursors'>;
   bus?: EventBus;
@@ -45,7 +34,6 @@ export interface EmptyRevivalDeps {
 }
 
 export interface EmptyRevivalResult {
-  // Repos probed this tick (one BB call each).
   checked: number;
   // fullNames whose exclusion was cleared because BB now has commits.
   revived: string[];
@@ -75,17 +63,16 @@ export async function runEmptyRevivalTick(
 
     let hasCommit = false;
     try {
-      // One page is one BB call; we only need to know whether ANY commit
-      // exists, so take the first and stop iterating.
+      // We only need to know whether ANY commit exists, so take the first
+      // page's first item and stop.
       for await (const _commit of paginateCommits(deps.client, repo.workspace, repo.slug)) {
         hasCommit = true;
         break;
       }
     } catch (err) {
-      // 404 (deleted/renamed upstream) or a transient error — leave the repo
-      // empty-excluded and re-probe next tick. Reclassifying a 404 isn't this
-      // sweep's job; the commit sync's own auto-trip handles that if/when the
-      // repo is back in rotation.
+      // 404 or transient — leave it empty-excluded and re-probe next tick.
+      // Reclassifying a 404 isn't this sweep's job; the commit sync's
+      // auto-trip handles that once the repo is back in rotation.
       deps.logger?.warn?.(
         { fullName: repo.fullName, err: err instanceof Error ? err.message : String(err) },
         'empty-revival: probe failed — leaving excluded, will retry next tick',
@@ -93,11 +80,10 @@ export async function runEmptyRevivalTick(
       continue;
     }
 
-    if (!hasCommit) continue; // still empty — nothing to do
+    if (!hasCommit) continue;
 
-    // Revived. Clear the exclusion and reset the cursor to cold so the next
-    // commit-sync tick walks the fresh history (deepen / is-merge backfill
-    // re-arm too). Detection only — no ingest here.
+    // Clear the exclusion and reset the cursor to cold so the next
+    // commit-sync tick walks the fresh history (deepen / is-merge re-arm too).
     await deps.discoveryStore.updateRepositorySyncExcluded(repo.id, false, null);
     await deps.commitStore.resetSyncCursors(repo.id);
     deps.bus?.publish({

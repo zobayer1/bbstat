@@ -1,11 +1,7 @@
 <script setup lang="ts">
-// Breadcrumb trail shown in the header of every non-dashboard page, replacing
-// the old static "← Dashboard" back-link. The home (dashboard) crumb is always
-// rendered first as a home icon + "Home"; callers pass the rest of the trail
-// via `items`. Each crumb shows an icon + label — the icons are the same
-// @/lib/glyphs shapes the dashboard stat cards use (Repositories → folder,
-// Projects → rectangleStack, Members → users, Commits → bolt). A crumb with
-// `to` is a link; the last/current crumb omits `to` and renders as plain text.
+// Breadcrumb trail in the header of every non-dashboard page. The home crumb
+// is always rendered first; callers pass the rest via `items`. A crumb with
+// `to` is a link; the last/current crumb omits `to` and renders as text.
 //
 //   Index page:  <Breadcrumb :items="[{ label: 'Projects', icon: GLYPHS.rectangleStack }]" />
 //   Detail page: <Breadcrumb :items="[
@@ -19,12 +15,10 @@ export interface BreadcrumbItem {
   label: string;
   // Route path. Omitted on the current page (rendered as text, not a link).
   to?: string;
-  // Heroicons-outline glyph `d` path (from @/lib/glyphs), shown before the
-  // label. Omit for a text-only crumb (e.g. a specific id leaf).
+  // Heroicons-outline glyph `d` path (from @/lib/glyphs). Omit for a text-only crumb.
   icon?: string;
-  // Wrap the label in [brackets] — used for leaf crumbs that name a specific
-  // instance (a repo / project / person) rather than a section, signalling
-  // "this is a particular id" and pairing with the absence of a section icon.
+  // Wrap the label in [brackets] — for leaf crumbs naming a specific instance
+  // (a repo / project / person) rather than a section.
   bracketed?: boolean;
 }
 
@@ -51,7 +45,6 @@ defineProps<{ items: BreadcrumbItem[] }>();
         </RouterLink>
       </li>
       <li v-for="(item, index) in items" :key="index" class="flex items-center gap-1.5">
-        <!-- separator -->
         <svg
           class="h-3 w-3 shrink-0 text-slate-300"
           xmlns="http://www.w3.org/2000/svg"

@@ -1,17 +1,12 @@
 <script setup lang="ts">
-// SVG Lorenz curve — cumulative share of commits (y) vs cumulative share
-// of members (x), sorted ascending by commits. The y=x diagonal is the
-// "perfect equality" reference: a curve hugging the diagonal means flat
-// distribution, a curve bowed deeply toward the bottom-right means a
-// small minority does most of the work. Gini coefficient (1 - 2*area
-// under the curve) is rendered in the corner as the canonical inequality
-// summary stat.
+// SVG Lorenz curve — cumulative share of commits (y) vs members (x). The y=x
+// diagonal is "perfect equality"; a curve bowed toward the bottom-right means
+// a small minority does most of the work. Gini (1 - 2*area under curve) is
+// shown in the corner.
 //
-// Caller passes the raw per-member commit counts; the component sorts,
-// normalizes, and filters zeros (members with zero commits in the active
-// window don't tell us anything about concentration — including them
-// would just push the curve's left tail flat and visually understate
-// the inequality).
+// The component sorts, normalizes, and filters zeros — members with zero
+// commits in the window say nothing about concentration and including them
+// would flatten the left tail and understate the inequality.
 
 import { computed } from 'vue';
 
@@ -20,8 +15,8 @@ const props = withDefaults(
     values: number[];
     width?: number;
     height?: number;
-    // Tailwind-style hex strings so the SVG stays self-contained (no
-    // dependency on inherited text color or surrounding utility classes).
+    // Explicit hex strings keep the SVG self-contained (no dependency on
+    // inherited text color or surrounding utility classes).
     curveColor?: string;
     fillColor?: string;
     equityColor?: string;
@@ -36,10 +31,9 @@ const props = withDefaults(
   },
 );
 
-// Inset for axis labels and tick room. Left padding fits a rotated y-axis
-// title plus the 0% / 100% tick numbers; bottom padding fits the x-axis
-// tick numbers plus a centered axis title underneath them. Plot rectangle
-// = inner viewBox (width/height minus the four pads).
+// Inset for axis labels and ticks. Left fits the rotated y-axis title + tick
+// numbers; bottom fits the x-axis ticks + centered title. Plot rect = viewBox
+// minus the four pads.
 const PAD_LEFT = 46;
 const PAD_RIGHT = 12;
 const PAD_TOP = 12;
@@ -49,9 +43,8 @@ const plotWidth = computed(() => props.width - PAD_LEFT - PAD_RIGHT);
 const plotHeight = computed(() => props.height - PAD_TOP - PAD_BOTTOM);
 
 interface Computed {
-  // Points along the Lorenz curve in plot coordinates, starting at (0,0)
-  // bottom-left of the plot (oldest convention: x→members cumulative,
-  // y→commits cumulative). Empty when no positive values.
+  // Lorenz-curve points in plot coordinates, starting at the bottom-left
+  // origin. Empty when no positive values.
   points: Array<{ x: number; y: number }>;
   gini: number;
   hasData: boolean;
@@ -65,9 +58,8 @@ const computed_ = computed<Computed>(() => {
     return { points: [], gini: 0, hasData: false };
   }
 
-  // Cumulative (x, y) pairs, both normalized to [0, 1]. Pre-pend the
-  // origin so the path closes cleanly at the bottom-left and the area-
-  // under-curve integral covers the full domain.
+  // Cumulative (x, y) pairs normalized to [0, 1]. Prepend the origin so the
+  // path closes cleanly and the integral covers the full domain.
   const pts: Array<{ x: number; y: number }> = [{ x: 0, y: 0 }];
   let cum = 0;
   for (let i = 0; i < n; i++) {
@@ -75,9 +67,7 @@ const computed_ = computed<Computed>(() => {
     pts.push({ x: (i + 1) / n, y: cum / total });
   }
 
-  // Trapezoid integration over the (0..1) domain. The area between the
-  // equality diagonal and the Lorenz curve is (0.5 - area_under_curve),
-  // and Gini = (0.5 - area) / 0.5 = 1 - 2 * area_under_curve.
+  // Trapezoid integration over [0,1]. Gini = (0.5 - area) / 0.5 = 1 - 2*area.
   let area = 0;
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1]!;
@@ -103,8 +93,8 @@ const pathD = computed(() => {
   return moves.join(' ');
 });
 
-// Closed path for the fill — the curve plus a line back along the x-axis
-// to the origin, so the shaded region is the area UNDER the Lorenz curve.
+// Closed path for the fill: the curve plus a line back along the x-axis to
+// the origin, so the shaded region is the area under the curve.
 const fillD = computed(() => {
   const { points, hasData } = computed_.value;
   if (!hasData) return '';
@@ -116,8 +106,8 @@ const fillD = computed(() => {
   return moves.join(' ');
 });
 
-// Equity diagonal in plot coordinates — corner to corner of the plot
-// rectangle. Rendered dashed as the "perfect equality" reference line.
+// Equity diagonal — corner to corner of the plot, the dashed "perfect
+// equality" reference line.
 const equityLine = computed(() => ({
   x1: PAD_LEFT,
   y1: PAD_TOP + plotHeight.value,
@@ -127,17 +117,13 @@ const equityLine = computed(() => ({
 
 const giniLabel = computed(() => `Gini ${computed_.value.gini.toFixed(2)}`);
 
-// Axis tick coordinates — single mid-axis label is enough at this size;
-// 0 and 1 are implied by the corners.
 const xAxisY = computed(() => PAD_TOP + plotHeight.value);
 </script>
 
 <template>
   <div>
-    <!-- SVG is sized by CSS (typically `w-full` from the caller) and the
-         viewBox handles the internal coordinate system. The width / height
-         props now only define the viewBox / coord space, not the rendered
-         size — caller controls render width via class. -->
+    <!-- The width / height props define only the viewBox coordinate space;
+         the caller controls rendered size via class (typically `w-full`). -->
     <svg
       :viewBox="`0 0 ${width} ${height}`"
       preserveAspectRatio="xMidYMid meet"
@@ -145,7 +131,6 @@ const xAxisY = computed(() => PAD_TOP + plotHeight.value);
       aria-label="Commit concentration Lorenz curve"
       class="block h-auto w-full"
     >
-      <!-- Plot frame -->
       <rect
         :x="PAD_LEFT"
         :y="PAD_TOP"
@@ -155,7 +140,6 @@ const xAxisY = computed(() => PAD_TOP + plotHeight.value);
         stroke="#e2e8f0"
         stroke-width="1"
       />
-      <!-- Equity reference (y = x) -->
       <line
         :x1="equityLine.x1"
         :y1="equityLine.y1"
@@ -165,9 +149,7 @@ const xAxisY = computed(() => PAD_TOP + plotHeight.value);
         stroke-width="1"
         stroke-dasharray="3 3"
       />
-      <!-- Filled area under the curve -->
       <path v-if="computed_.hasData" :d="fillD" :fill="fillColor" />
-      <!-- Curve itself -->
       <path
         v-if="computed_.hasData"
         :d="pathD"
@@ -177,8 +159,7 @@ const xAxisY = computed(() => PAD_TOP + plotHeight.value);
         stroke-linejoin="round"
         stroke-linecap="round"
       />
-      <!-- Axis tick labels — corner anchors only (0% / 100% on each axis).
-           Mid-axis ticks are skipped to keep the chart uncluttered. -->
+      <!-- Corner ticks only (0% / 100% on each axis). -->
       <text :x="PAD_LEFT" :y="xAxisY + 14" class="fill-slate-400" style="font-size: 10px">0%</text>
       <text :x="PAD_LEFT + plotWidth" :y="xAxisY + 14" text-anchor="end" class="fill-slate-400" style="font-size: 10px">
         100%
@@ -195,8 +176,7 @@ const xAxisY = computed(() => PAD_TOP + plotHeight.value);
       <text :x="PAD_LEFT - 4" :y="PAD_TOP + 8" text-anchor="end" class="fill-slate-400" style="font-size: 10px">
         100%
       </text>
-      <!-- Axis titles. The y-axis title is rotated -90° around its own
-           anchor point so it reads bottom-to-top along the left edge. -->
+      <!-- y-axis title is rotated -90° so it reads bottom-to-top. -->
       <text
         :x="PAD_LEFT + plotWidth / 2"
         :y="xAxisY + 32"
@@ -216,14 +196,12 @@ const xAxisY = computed(() => PAD_TOP + plotHeight.value);
       >
         Commits (cumulative)
       </text>
-      <!-- Gini badge (top-left of plot) -->
       <g v-if="computed_.hasData" :transform="`translate(${PAD_LEFT + 6}, ${PAD_TOP + 6})`">
         <rect width="56" height="16" rx="3" fill="#1e293b" />
         <text x="28" y="11" text-anchor="middle" class="fill-white" style="font-size: 10px; font-weight: 600">
           {{ giniLabel }}
         </text>
       </g>
-      <!-- Empty-state copy -->
       <text
         v-else
         :x="PAD_LEFT + plotWidth / 2"

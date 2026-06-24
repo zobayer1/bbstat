@@ -3,38 +3,12 @@
 // UUID wasn't in our `users` table at original ingest (typically
 // ex-employees, never-members, or external pushers).
 //
-// Triggered by `make dev-resync` (entry point in
-// `apps/backend/src/anonymous-sweep-main.ts`), runs independently of
-// the main `dev-sync` cron so the operator can run it once to drain
-// the backlog without interfering with steady-state sync. Exits
-// cleanly when all eligible repos are marked complete.
-//
-// Per-repo strategy:
-//   1. List every locally-anonymous commit in the repo (one DB query).
-//   2. Walk BB `/commits` newest-first until we've crossed the oldest
-//      anonymous commit's `authored_at` — we've now seen every sha
-//      that could possibly resolve.
-//   3. For each commit BB returned whose sha matches one of our
-//      anonymous shas: capture `(author.user.uuid, author.raw,
-//      author.user.display_name)` into a metadata map.
-//   4. Auto-create `users` rows (`is_workspace_member = false`) for
-//      every distinct UUID with a parseable email — same email-gated
-//      rule as the forward sync; reuses `upsertAuthorUsers`.
-//   5. Bulk UPDATE the three author columns on the anonymous rows.
-//      WHERE `author_user_id IS NULL` keeps it race-safe; COALESCE on
-//      snapshot columns preserves any pre-existing value.
-//   6. Recompute `commit_daily` for the day range of newly-attributed
-//      rows; invalidate the user-summary cache for affected users.
-//   7. If zero rows were newly attributed → mark the repo complete
-//      (the residual is structurally anonymous; nothing more this
-//      runner can do for it).
-//
-// Outer loop:
-//   while (true):
-//     if count = 0 → exit
-//     if budget < threshold → sleep 60s
-//     pick repo (null → exit, sweep is done)
-//     sweep(repo) [catches transient errors]
+// Runs independently of the main `dev-sync` cron (entry point in
+// `apps/backend/src/anonymous-sweep-main.ts`) so the operator can drain
+// the backlog without interfering with steady-state sync. Same
+// email-gated auto-create rule as the forward sync. Marks a repo
+// complete once a pass produces zero new attributions — the residual is
+// structurally anonymous.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits } from '../bitbucket/commits.js';
@@ -47,15 +21,13 @@ import type { CommitStore } from './commit-store.js';
 export interface AnonymousSweepDeps {
   client: BitbucketClient;
   commitStore: CommitStore;
-  // Optional. When wired, attributed-row updates trigger a scoped
-  // `commit_daily` recompute over the affected day window so the
-  // dashboard reflects the new attribution. Snapshot-only updates
-  // (author_user_id stayed NULL) don't recompute — commit_daily
-  // aggregates by author_user_id, not the snapshot columns.
+  // When wired, attributed-row updates trigger a scoped `commit_daily`
+  // recompute over the affected day window. Snapshot-only updates don't
+  // recompute — commit_daily aggregates by author_user_id, not the
+  // snapshot columns.
   rollupStore?: RollupStore;
-  // Optional. When wired alongside rollupStore, the affected user-
-  // summary cache entries get DEL'd after the rollup recompute. Same
-  // pattern as the existing rollup-hook flow.
+  // When wired alongside rollupStore, affected user-summary cache
+  // entries get invalidated after the rollup recompute.
   userSummaryCache?: UserSummaryCache;
   logger?: BitbucketLogger;
 }
@@ -63,26 +35,18 @@ export interface AnonymousSweepDeps {
 export interface SweepRepoResult {
   repositoryId: number;
   fullName: string;
-  // # of locally-anonymous commits in this repo at the start of the
-  // pass. The walk's upper bound on what could possibly be attributed.
   localAnonymousCount: number;
-  // # of those commits whose sha appeared in BB's `/commits` walk.
-  // Below `localAnonymousCount` if some local shas are unreachable
-  // from BB's main branch (force-pushed-away, in feature branches,
-  // etc.); equal to it in the typical case.
+  // Below `localAnonymousCount` when some local shas are unreachable
+  // from BB's main branch (force-pushed-away, in feature branches);
+  // equal in the typical case.
   matchedFromBB: number;
-  // # of commits where `author_user_id` transitioned NULL → known on
-  // this pass. Drives the rollup recompute scope.
+  // Commits where `author_user_id` transitioned NULL → known on this
+  // pass. Drives the rollup recompute scope.
   attributed: number;
-  // # of commits where the snapshot columns were filled but
-  // `author_user_id` stayed NULL — BB had no UUID OR no parseable
-  // email. These remain anonymous; the residual is structurally
-  // anonymous (needs manual investigation per operator policy).
+  // Snapshot columns filled but `author_user_id` stayed NULL — BB had
+  // no UUID or no parseable email. Structurally anonymous; needs manual
+  // investigation per operator policy.
   snapshotOnly: number;
-  // True iff `markAnonymousSweepComplete` was called for this repo
-  // on this pass. Either (a) `attributed === 0` (residual is stuck)
-  // or (b) BB returned 404 on the repo (operator must rename/delete
-  // or manually flip the flag back).
   complete: boolean;
 }
 
@@ -98,15 +62,14 @@ const DEFAULT_BUDGET_THRESHOLD = 100;
 const DEFAULT_BUDGET_SLEEP_MS = 60_000;
 
 export interface RunAnonymousSweepOptions {
-  // BB hourly call budget below which we sleep instead of starting a
-  // new repo. Defaults to 100 — a single repo's full walk could be
-  // hundreds of pages, so we want headroom before kicking one off.
+  // BB hourly budget below which we sleep instead of starting a new
+  // repo. A single repo's full walk can be hundreds of pages, so we
+  // want headroom before kicking one off. Default 100.
   budgetThreshold?: number;
-  // Milliseconds to sleep when the budget is below threshold.
-  // Defaults to 60_000 (1 min) — the BB hourly window is rolling, so
-  // budget recovers within a few minutes of pacing.
+  // Sleep when budget is below threshold. The BB hourly window is
+  // rolling, so budget recovers within a few minutes. Default 60_000.
   budgetSleepMs?: number;
-  // Optional sleeper hook for tests so they don't actually wait.
+  // Injectable for tests so they don't actually wait.
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -125,14 +88,8 @@ export async function runAnonymousSweep(
 
   deps.logger?.info?.({ budgetThreshold, budgetSleepMs }, 'anonymous-sweep runner: starting');
 
-  // The loop runs until either:
-  //   - `countAnonymousCommits()` is zero — every walkable commit got
-  //     attributed and the dashboard now matches BB.
-  //   - `pickRepoForAnonymousSweep()` returns null — every repo with
-  //     remaining anonymous commits has been marked complete (the
-  //     residual is structurally anonymous; no further work this
-  //     runner can do).
-  // Either is a clean exit.
+  // Two clean exits: zero anonymous commits remaining, or no incomplete
+  // repo left to pick (every repo's residual is structurally anonymous).
   while (true) {
     const remainingAnon = await deps.commitStore.countAnonymousCommits();
     if (remainingAnon === 0) {
@@ -167,10 +124,9 @@ export async function runAnonymousSweep(
       totalSnapshotOnly += result.snapshotOnly;
       deps.logger?.info?.(result, 'anonymous-sweep: repo pass complete');
     } catch (err) {
-      // markAnonymousSweepAttempt already fired inside sweepOneRepo,
-      // so the picker rotates off this repo on next iteration. The
-      // repo is NOT marked complete — operator can retry by re-
-      // running the runner.
+      // markAnonymousSweepAttempt already fired inside sweepOneRepo, so
+      // the picker rotates off this repo next iteration. NOT marked
+      // complete — operator can retry by re-running the runner.
       deps.logger?.error?.(
         { err: err instanceof Error ? err.message : String(err), ...candidate },
         'anonymous-sweep: repo pass failed — rotating to next',
@@ -187,10 +143,8 @@ export async function sweepOneRepo(
   // advances the picker so we don't repeatedly hammer the same repo.
   await deps.commitStore.markAnonymousSweepAttempt(repo.repositoryId);
 
-  // List every locally-anonymous commit in this repo. limit=1_000_000
-  // is effectively no limit — sweep is one-shot per repo, not paginated.
-  // At typical scale a repo has at most a few thousand anonymous rows
-  // and the query is index-driven (commits_author_authored_idx).
+  // limit=1_000_000 is effectively no limit — sweep is one-shot per
+  // repo, not paginated. The query is index-driven.
   const localAnon = await deps.commitStore.listAnonymousCommits({
     workspace: repo.workspace,
     slug: repo.slug,
@@ -198,8 +152,8 @@ export async function sweepOneRepo(
   });
 
   if (localAnon.length === 0) {
-    // Nothing to do. Mark complete so the picker stops returning this
-    // repo (concurrent sync may have drained it between picks).
+    // Concurrent sync may have drained it between picks. Mark complete
+    // so the picker stops returning it.
     await deps.commitStore.markAnonymousSweepComplete(repo.repositoryId);
     return {
       repositoryId: repo.repositoryId,
@@ -216,11 +170,9 @@ export async function sweepOneRepo(
   const shasByLocal = new Map(localAnon.map((c) => [c.sha, c]));
   const metaBySha = new Map<string, { uuid?: string; raw: string; displayName?: string }>();
 
-  // Walk BB /commits paginated. Stop as soon as we've crossed the
-  // oldest local anonymous commit — anything older is guaranteed not
-  // to be in our local set. BitbucketRateLimitError bubbles up; BB
-  // 404 (repo gone upstream) is caught and marks the repo complete
-  // so we don't retry forever.
+  // Stop walking as soon as we've crossed the oldest local anonymous
+  // commit — anything older can't be in our local set. BB 404 (repo
+  // gone upstream) marks the repo complete; rate-limit errors bubble up.
   try {
     for await (const commit of paginateCommits(deps.client, repo.workspace, repo.slug)) {
       const commitMs = new Date(commit.date).getTime();
@@ -247,18 +199,15 @@ export async function sweepOneRepo(
         complete: true,
       };
     }
-    // Rate limit + everything else propagates. The outer loop catches
-    // and rotates to the next repo. Complete flag stays false; the
-    // attempt timestamp has already advanced so the picker won't
-    // re-pick this repo immediately.
+    // Rate limit + everything else propagates; the outer loop rotates
+    // to the next repo. Complete stays false but the attempt timestamp
+    // already advanced, so the picker won't re-pick this repo immediately.
     throw err;
   }
 
-  // Build per-commit attribution data: parse email + display-name,
-  // queue UUID upserts for distinct (uuid, parseable-email) pairs.
   // Same gating as the forward sync: no email → no auto-create →
-  // commit stays anonymous (but snapshot columns are still
-  // populated as a forensic hook).
+  // commit stays anonymous (snapshot columns still populated as a
+  // forensic hook).
   const upsertInputs: Array<{ bitbucketUuid: string; displayName: string; email: string }> = [];
   const seenUuids = new Set<string>();
   type PerCommit = {
@@ -293,10 +242,9 @@ export async function sweepOneRepo(
     upsertInputs.length > 0 ? await deps.commitStore.upsertAuthorUsers(upsertInputs) : new Map<string, number>();
 
   if (perCommit.length === 0) {
-    // We walked BB but none of the returned shas matched our local
-    // anonymous set — typically means the local anonymous commits
-    // live on branches we don't walk. Mark complete; no point
-    // re-trying without changing the walk strategy.
+    // None of BB's returned shas matched our local anonymous set —
+    // typically the local commits live on branches we don't walk. No
+    // point retrying without changing the walk strategy.
     await deps.commitStore.markAnonymousSweepComplete(repo.repositoryId);
     return {
       repositoryId: repo.repositoryId,
@@ -330,10 +278,9 @@ export async function sweepOneRepo(
     }
   }
 
-  // Recompute commit_daily for the day range of newly-attributed
-  // rows. Snapshot-only updates don't shift commit_daily (the rollup
-  // aggregates by author_user_id, not the snapshot columns), so we
-  // skip recompute when attributed === 0.
+  // Snapshot-only updates don't shift commit_daily (it aggregates by
+  // author_user_id, not the snapshot columns), so skip recompute when
+  // attributed === 0.
   if (attributed > 0 && deps.rollupStore !== undefined && attributedAuthoredAt.length > 0) {
     const minMs = attributedAuthoredAt.reduce((m, d) => Math.min(m, d.getTime()), Infinity);
     const maxMs = attributedAuthoredAt.reduce((m, d) => Math.max(m, d.getTime()), -Infinity);
@@ -355,11 +302,10 @@ export async function sweepOneRepo(
     }
   }
 
-  // Mark complete when this pass produced zero attributions. The
-  // residual is structurally anonymous (BB had no UUID, or the email
-  // didn't parse), and the snapshot columns now record what BB
-  // returned — operator can query for manual follow-up. A future
-  // operator can flip the flag back to FALSE in SQL to re-attempt.
+  // Zero attributions → residual is structurally anonymous; mark
+  // complete. Snapshot columns record what BB returned for manual
+  // follow-up; an operator can flip the flag back to FALSE in SQL to
+  // re-attempt.
   const complete = attributed === 0;
   if (complete) {
     await deps.commitStore.markAnonymousSweepComplete(repo.repositoryId);
@@ -381,8 +327,6 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 // Re-exported so tests can construct & throw the same error class the
-// runner explicitly catches. (BitbucketRateLimitError is part of the
-// rate-limit handling contract; the runner lets it propagate but does
-// NOT mark the repo complete, mirroring how the cron tick treats
-// rate-limit errors as transient.)
+// runner catches. The runner lets it propagate but does NOT mark the
+// repo complete, treating rate-limit errors as transient.
 export { BitbucketRateLimitError };

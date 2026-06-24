@@ -22,18 +22,15 @@ const stats = useStatsStore();
 const route = useRoute();
 const router = useRouter();
 
-// Workspace for the "View on BitBucket" header link. Derived from
-// the first tracked repo — single-workspace deployment by design,
-// so any row's workspace is canonical. Empty until stats land,
-// which hides the link via v-if.
+// Workspace for the "View on BitBucket" header link. Single-workspace
+// deployment, so any row's workspace is canonical; empty until stats land.
 const workspace = computed(() => stats.repositories[0]?.workspace ?? '');
 
 onMounted(() => {
   void store.fetch();
-  // Workspace total comes from the stats overview (counts every ingested
-  // user row, including those with zero commits). The members API only
-  // returns rows with commitsAllTime > 0, so we surface both numbers in
-  // the subtitle to explain the gap (e.g., "36 of 49 …").
+  // Overview counts every ingested user (incl. zero-commit); the members
+  // API only returns commitsAllTime > 0. Both numbers feed the subtitle
+  // (e.g. "36 of 49 …") to explain the gap.
   void stats.fetchOverview();
 });
 
@@ -43,10 +40,8 @@ const inactiveMembers = computed<number | null>(() =>
   totalMembers.value === null ? null : Math.max(0, totalMembers.value - activeMembers.value),
 );
 
-// Activity-feed filters (project / repo / contributor), mirroring the
-// other pages. The page's own search / sort are local refs (not
-// URL-synced), so these can use the default `?project` / `?repo` /
-// `?actor` keys with no collision.
+// Activity-feed filters. The page's own search / sort are local refs, so
+// these can use the default `?project` / `?repo` / `?actor` keys without collision.
 const filterActor = useActorFilter();
 const {
   projectModel: filterProject,
@@ -65,8 +60,7 @@ function clearActivityFilters(): void {
   delete next.actorKind;
   void router.replace({ query: next });
 }
-// 30-day cutoff for the "See all activities →" footer (reuses the
-// existing DAY_MS constant defined below for the activity-status buckets).
+// 30-day cutoff for the "See all activities →" footer.
 function localDateString(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -75,40 +69,22 @@ function localDateString(d: Date): string {
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
-// Membership-status partition of the full ingested roster. Counts the
-// whole payload (NOT filtered by activity window) since these counts
-// describe roster shape, not recent activity. Sums to
-// store.members.length.
-//
-// `otherContributorCount` covers everyone whose BB UUID isn't in the
-// workspace's `/members` endpoint at sync time. That bucket is more
-// heterogeneous than "removed" suggests:
-//   - ex-employees who left the workspace,
-//   - external contributors who never joined,
-//   - current workspace members who happen to commit from a different
-//     BB account (i.e. their git email maps to a separate UUID that
-//     hasn't been added to the workspace).
-// "Other Contributors" is the umbrella label that doesn't overclaim
-// about any of those subgroups.
+// Membership-status partition of the full roster (not activity-windowed;
+// these describe roster shape). `otherContributorCount` covers everyone
+// whose BB UUID isn't in the workspace `/members` set at sync time —
+// ex-employees, externals, AND current members committing from a separate
+// BB account. "Other Contributors" is the umbrella label that doesn't
+// overclaim about any subgroup.
 const workspaceMemberCount = computed<number>(() => store.members.filter((m) => m.isWorkspaceMember).length);
 const otherContributorCount = computed<number>(() => store.members.filter((m) => !m.isWorkspaceMember).length);
 
-// Day constant — used by the activity-buckets chart at the bottom of
-// the file. The table itself no longer filters by recency window; it's
-// a straight paginated roster with 7d + 30d columns side-by-side.
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// Sortable columns. `key` is the WorkspaceMember field used for the
-// comparator. `lastActiveAt` sorts on the raw ISO string (lexical order
-// is chronological for ISO-8601), with nulls pushed to the end so a
-// never-active row doesn't outrank an active one in either direction.
-// `scoreTrending` and `consistency90d` similarly push nulls last —
-// rows whose user_score hasn't landed yet (between member sync and the
-// next commits-sync tick) shouldn't ride at the top.
-//
-// Default sort: `scoreTrending` desc — the leaderboard view of this
-// page (docs/scoring.md). Dormant rows (scoreTrending = 0) sink to
-// the bottom naturally.
+// Sortable columns. `lastActiveAt` sorts on the raw ISO string (lexical =
+// chronological), with nulls last so a never-active row doesn't outrank an
+// active one; `scoreTrending` / `consistency90d` push nulls last for the
+// same reason (user_score may not have landed yet). Default sort:
+// `scoreTrending` desc — the leaderboard view (docs/scoring.md).
 type SortKey =
   | 'commits7d'
   | 'commits30d'
@@ -126,29 +102,22 @@ function toggleSort(key: SortKey): void {
     sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc';
   } else {
     sortKey.value = key;
-    // Sensible default direction per column: counts → desc, names → asc.
+    // Default direction: counts → desc, names → asc.
     sortDir.value = key === 'displayName' ? 'asc' : 'desc';
   }
-  // Sort/filter changes shouldn't strand the user on a now-empty page.
   page.value = 1;
 }
 
 const search = ref('');
 
-// Methodology modal — opened from the small `i` icon next to the member
-// count in the filter row. Reads the live member list to fill in the
-// "Current calibration" panel (badge counts, tier counts, etc.).
 const showMethodologyModal = ref(false);
 
-// Fuzzy search over the full roster, tuned to match the ActorPicker
-// (the activity contributor search) so the two behave identically:
-// threshold 0.3 + minMatchCharLength 2 keeps the long tail out (`Zob`
-// shouldn't surface Apu / Sazibul); weighting displayName above
-// username and email above aliasSearch keeps the displayed identity
-// ranking first. `aliasSearch` carries every linked account's
-// name/username/email so a merged person is findable by a non-primary
-// alias too — the row still shows the canonical person. `ignoreLocation`
-// lets a match land anywhere in the string ("han" hits "Zobayer Hasan").
+// Fuzzy search tuned to match the ActorPicker so the two behave identically:
+// threshold 0.3 + minMatchCharLength 2 keeps the long tail out; weighting
+// displayName highest keeps the displayed identity ranking first.
+// `aliasSearch` carries every linked account's name/username/email so a
+// merged person is findable by a non-primary alias. `ignoreLocation` lets a
+// match land anywhere ("han" hits "Zobayer Hasan").
 const fuse = computed(
   () =>
     new Fuse(store.members, {
@@ -179,9 +148,7 @@ const sorted = computed<WorkspaceMember[]>(() => {
       return a.displayName.localeCompare(b.displayName) * dir;
     }
     if (key === 'lastActiveAt') {
-      // Nulls last regardless of direction — a never-active row at the top
-      // of a desc sort would surprise the user. Treat null as "smaller
-      // than anything" then flip the sentinel for asc.
+      // Nulls last regardless of direction.
       const av = a.lastActiveAt;
       const bv = b.lastActiveAt;
       if (av === null && bv === null) return 0;
@@ -190,9 +157,7 @@ const sorted = computed<WorkspaceMember[]>(() => {
       return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
     }
     if (key === 'scoreTrending' || key === 'consistency90d') {
-      // Nulls last regardless of direction — same rationale as
-      // lastActiveAt; a row with no user_score yet shouldn't outrank
-      // someone with a real number in either direction.
+      // Nulls last regardless of direction.
       const av = a[key];
       const bv = b[key];
       if (av === null && bv === null) return 0;
@@ -214,16 +179,11 @@ const paged = computed<WorkspaceMember[]>(() => {
   return sorted.value.slice(start, start + PAGE_SIZE);
 });
 
-// Reset to page 1 whenever the search query changes — a search
-// result of 12 rows shouldn't render an empty page 3.
 watch(search, () => {
   page.value = 1;
 });
 
-// Compact "2h" / "3d" / "5w" relative time. Returns "—" for null
-// (unreachable in steady state — the backend filter requires
-// commitsAllTime > 0 — but we keep the guard for the empty-state
-// render before the first fetch lands).
+// Compact "2h" / "3d" / "5w" relative time; "—" for null.
 function relativeTime(iso: string | null): string {
   if (iso === null) return '—';
   const then = new Date(iso).getTime();
@@ -248,10 +208,8 @@ const sortIndicator = (key: SortKey): string => {
   return sortDir.value === 'asc' ? ' ▲' : ' ▼';
 };
 
-// Score column formatters. Momentum is a raw sum of log-capped per-
-// commit scores so the absolute value is opaque — round to one decimal.
-// Consistency is a 0–1 ratio displayed as a percentage. Both render "—"
-// for null (user_score row not yet written, or cold-start consistency).
+// Momentum rounds to one decimal (raw sum of log-capped scores, opaque);
+// Consistency is a 0–1 ratio shown as a percentage. Both "—" for null.
 function formatMomentum(v: number | null): string {
   if (v === null) return '—';
   return v.toFixed(1);
@@ -262,23 +220,12 @@ function formatConsistency(v: number | null): string {
   return `${(v * 100).toFixed(0)}%`;
 }
 
-// Active-members chart buckets: members counted across CUMULATIVE
-// recency ranges over the trailing 90 days. Each bucket counts every
-// member active within its range — so by construction
-// count(7d) ≤ count(30d) ≤ count(90d); a 5-day-old commit lands in all
-// three, a 60-day-old commit lands only in 90d. The ActiveMembersBar
-// component renders each bucket as its own row (no stacking, no
-// partition) — the honest geometry for nested ranges, since a stacked
-// bar would double-count overlapping members.
-//
-// 90 days aligns with `isDormant` (no eligible commits in 90d → no
-// badge, grayed row) so the chart's outermost ring is exactly the
-// "active vs dormant" boundary used everywhere else in scoring.
-//
-// Three shades of emerald — saturated → faded — read as a single
-// "activity, fading with time" axis: emerald-700 (7d, darkest and
-// shortest bar) for tightest recency; emerald-300 (90d, palest and
-// longest bar) for the widest range.
+// Active-members chart buckets: members counted across CUMULATIVE recency
+// ranges over 90 days, so count(7d) ≤ count(30d) ≤ count(90d). Rendered as
+// separate rows (not stacked) — a stack would double-count overlapping
+// members. 90 days aligns with `isDormant`, so the outermost ring is the
+// active-vs-dormant boundary used elsewhere in scoring. Emerald darkens
+// with recency.
 const ACTIVITY_COLORS = {
   active7d: '#047857', // emerald-700
   active30d: '#10b981', // emerald-500
@@ -291,8 +238,7 @@ const activityBuckets = computed<ActivityBucket[]>(() => {
   for (const m of store.members) {
     if (m.lastActiveAt === null) continue;
     const ageDays = (now - new Date(m.lastActiveAt).getTime()) / DAY_MS;
-    // Cumulative — a member active in the last 7 days also counts
-    // toward the 30d and 90d buckets. No `else if` chain.
+    // Cumulative — no `else if` chain.
     if (ageDays < 90) counts.a90++;
     if (ageDays < 30) counts.a30++;
     if (ageDays < 7) counts.a7++;
@@ -304,12 +250,9 @@ const activityBuckets = computed<ActivityBucket[]>(() => {
   ];
 });
 
-// Lorenz curve values: 30-day commit counts. The table dropped its
-// window-toggle UI, so the curve also stops responding to one —
-// fixed at 30d here, the same window the Trend sparkline column uses.
-// The component itself filters zeros (a member who didn't commit in
-// the window doesn't inform concentration; including them would flatten
-// the left tail and visually understate the inequality).
+// Lorenz curve values: 30-day commit counts (same window as the Trend
+// sparkline). The component filters zeros — a non-committer doesn't inform
+// concentration, and including them would understate the inequality.
 const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 </script>
 
@@ -319,9 +262,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
       <Breadcrumb :items="[{ label: 'Members', icon: GLYPHS.users }]" />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">Workspace Members</h1>
-        <!-- Thin external link to BB's workspace members directory.
-             Hidden until stats land so the URL is never built from an
-             empty workspace string. -->
+        <!-- BB members directory link; hidden until workspace is known. -->
         <a
           v-if="workspace"
           :href="`https://bitbucket.org/${workspace}/workspace/members/`"
@@ -333,10 +274,8 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           View on BitBucket ↗
         </a>
       </div>
-      <!-- Active vs total spelt out so the page reconciles cleanly with
-           the Dashboard's "Workspace Members" card, which counts every
-           ingested user (including not-yet-active testers). Falls back
-           to the bare description while the overview is in flight. -->
+      <!-- Active vs total, reconciling with the Dashboard's "Workspace
+           Members" card (which counts every ingested user). -->
       <p v-if="totalMembers !== null" class="mt-1 text-sm text-slate-500">
         {{ activeMembers }} of {{ totalMembers }} workspace member<span v-if="totalMembers !== 1">s</span> with at least
         one ingested commit<span v-if="inactiveMembers && inactiveMembers > 0">
@@ -346,28 +285,18 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
       <p v-else class="mt-1 text-sm text-slate-500">Every contributor we've ingested at least one commit for.</p>
     </header>
 
-    <!-- Charts run above the filter row because they aggregate the entire
-         roster — they don't respond to the search query, so placing them
-         after the search input would mislead the user into thinking the
-         filter applies here too.
-         Captions live at the CARD level (not inside the chart components)
-         so they sit flush at each card's bottom edge. Grid's default
-         `items-stretch` equalizes card heights, which lines the two
-         captions up horizontally regardless of how much vertical space
-         the donut vs the Lorenz plot consume. -->
+    <!-- Charts run above the filter row: they aggregate the whole roster
+         and don't respond to search, so placing them after the input would
+         imply the filter applies. Captions live at card level so
+         `items-stretch` lines them up across the two cards. -->
     <section class="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
       <div class="flex flex-col rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
         <h2 class="mb-4 text-center text-xs font-medium uppercase tracking-wider text-slate-500">
           Tracked Members
           <span class="text-slate-400">({{ store.members.length }})</span>
         </h2>
-        <!-- Membership-status partition of the full ingested roster,
-             above the bar so it frames the activity breakdown that
-             follows. Workspace Members is the current /members
-             roster; Other Contributors is everyone else (ex-employees,
-             externals, AND current members whose git email maps to a
-             BB account not in the workspace member list). The latter
-             is rendered muted to match the table-row treatment below. -->
+        <!-- Membership-status partition. Other Contributors (muted) =
+             ex-employees, externals, and members on a separate BB account. -->
         <div class="mb-4 grid grid-cols-2 divide-x divide-slate-200 text-center">
           <div>
             <p class="text-2xl font-semibold tabular-nums text-slate-900">{{ workspaceMemberCount }}</p>
@@ -379,9 +308,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           </div>
         </div>
         <div class="flex flex-1 items-center justify-center">
-          <!-- Three nested-range bars (7d, 30d, 1y), each sized to
-               its own cumulative count. See activityBuckets above
-               for the semantic; ActiveMembersBar.vue for the layout. -->
+          <!-- Nested-range bars (7d / 30d / 90d); see activityBuckets above. -->
           <ActiveMembersBar :buckets="activityBuckets" :bar-height="32" :bar-gap="14" class="w-full max-w-[480px]" />
         </div>
         <p class="mt-4 text-center text-[10px] text-slate-400">
@@ -403,11 +330,6 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 
     <section class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-3">
-        <!-- Magnifying-glass affordance anchored inside the input.
-             `relative` on the wrapper + `absolute` on the icon keeps
-             the icon visually inside the field without participating
-             in flex layout (so the field stays its declared width).
-             Input gets left padding to make room for it. -->
         <div class="relative">
           <svg
             class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
@@ -441,9 +363,6 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           {{ sorted.length }} <span v-if="search.trim() !== ''">match{{ sorted.length === 1 ? '' : 'es' }}</span>
           <span v-else>member{{ sorted.length === 1 ? '' : 's' }}</span>
         </span>
-        <!-- Methodology trigger: plain text link rather than an icon so
-             it reads as a deliberate "click here for the math" affordance
-             instead of an ornamental info pip. -->
         <button
           type="button"
           class="cursor-pointer font-medium text-blue-600 underline-offset-2 transition hover:text-blue-800 hover:underline focus:underline focus:outline-none"
@@ -459,21 +378,11 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 
     <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
-        <!-- Column layout (leaderboard mode — docs/scoring.md):
-               [ Badge icon | Member | Trend 30d | Momentum ↓ | Consistency · 90d | Last active | Commits · 7d | Commits · 30d | All-time ]
-             Momentum is the default sort — the decayed per-commit score
-             sum referred to as `scoreTrending` in code / docs (the
-             user-facing label was renamed from "Trending" because the
-             column sits next to "Trend (30d)" and people read "trending"
-             as a boolean flag, not a number). Consistency is a sibling
-             rank — sortable independently per the design discussion
-             ("don't blend the two"). The 30d sparkline sits at column 3
-             (right after Member) so the eye gets a "shape of activity"
-             preview before the numeric scores. The legacy commit-count
-             columns trail so the page still answers "how much did they
-             ship" alongside the score view. Badge column is leftmost
-             as a colored icon (no text label, tooltip-only) — matches
-             the SyncStateIcon column convention in ProjectStats. -->
+        <!-- Leaderboard layout (docs/scoring.md). "Momentum" is the
+             default sort — the decayed score sum called `scoreTrending`
+             in code; the user-facing label avoids "Trending" since it
+             sits next to "Trend (30d)" and would read as a boolean.
+             Consistency is an independent sortable sibling. -->
         <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
           <tr>
             <th class="w-8 px-2 py-2 text-center font-medium">
@@ -528,21 +437,10 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100">
-          <!-- Two independent visual signals on each row:
-                 (1) **Dormant** (`isDormant` = no eligible activity in
-                     the last 90 days): gray + reduced opacity so the
-                     entire row reads as "not currently contributing".
-                 (2) **Non-workspace-member** (`!isWorkspaceMember`):
-                     covers ex-employees, externals, AND current members
-                     committing from a separate BB account whose git
-                     email maps to a UUID that isn't in the workspace
-                     member list. Rendered with a RED email under the
-                     displayName as a distinct signal — independent of
-                     dormancy, so the two cases can coexist (an active
-                     non-member dev gets a normal-toned row with a red
-                     email; a dormant non-member gets gray row + red
-                     email; a dormant workspace member gets gray row,
-                     normal-color email). -->
+          <!-- Two independent row signals: dormant (`isDormant`, no
+               activity in 90d) grays the whole row; non-workspace-member
+               (`!isWorkspaceMember`) reddens the email. They're orthogonal
+               and can coexist. -->
           <tr
             v-for="m in paged"
             :key="`${m.entityKind}:${m.entityId}`"
@@ -553,11 +451,8 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
               <BadgeIcon :badge="m.badge" :tier="m.badgeTier" />
             </td>
             <td class="max-w-[16rem] px-4 py-2">
-              <!-- Person rows link to /people/:id, user rows to /users/:id.
-                   Name truncates with ellipsis and the merged ×N pill
-                   stays on the same line (same treatment as the Top
-                   Contributors lists). The pill only renders on person
-                   rows with >1 attached alias. -->
+              <!-- Person rows → /people/:id, user rows → /users/:id.
+                   ×N pill only on person rows with >1 attached alias. -->
               <RouterLink
                 :to="
                   m.entityKind === 'person'
@@ -578,13 +473,9 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                   ×{{ m.attachedUserIds.length }}
                 </span>
               </RouterLink>
-              <!-- Git-author email: best-effort, parsed from commits.author.raw at
-                   ingest. Rendered muted under the displayName when the BB
-                   account IS in the workspace member list; RED when it isn't
-                   (ex-employee, external, or separate BB account whose git
-                   email maps to an out-of-workspace UUID). Hidden entirely
-                   when null (users predating the column or whose commits
-                   never carried a parseable address). -->
+              <!-- Git-author email (parsed at ingest). Muted when the BB
+                   account is in the workspace member list, RED when not.
+                   Hidden when null. -->
               <div
                 v-if="m.email"
                 :class="['mt-0.5 truncate text-xs', m.isWorkspaceMember ? 'text-slate-400' : 'text-red-600']"
@@ -609,11 +500,8 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
             <td class="px-4 py-2 text-center text-slate-500" :title="m.lastActiveAt ?? ''">
               {{ relativeTime(m.lastActiveAt) }}
             </td>
-            <!-- Per-window cells: primary commit count followed by the
-                 distinct-repo count in parens at half scale + slate-400
-                 so the breadth metric reads as supplementary context,
-                 not a competing number. `tabular-nums` keeps the
-                 digits column-aligned cleanly across rows. -->
+            <!-- Per-window: commit count + distinct-repo count in parens
+                 (muted) as supplementary breadth context. -->
             <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-500' : 'text-slate-900'">
               {{ m.commits7d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos7d }})</span>
@@ -681,8 +569,6 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
 
     <p v-if="store.error" class="mt-4 text-sm text-red-600">Could not load members: {{ store.error }}</p>
 
-    <!-- Activity feed with project / repo / contributor filters, same as
-         the Dashboard / Projects / Repositories pages. -->
     <section class="mb-4 mt-8">
       <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
         <h2 class="text-lg font-semibold text-slate-900">Activity</h2>

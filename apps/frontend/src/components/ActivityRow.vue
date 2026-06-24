@@ -1,13 +1,7 @@
 <script setup lang="ts">
 // One row of the unified activity feed (a commit or a PR). Extracted from
-// ActivityFeed.vue so the dedicated Activity page can render the same row
-// shape without duplicating the badge / link / metadata markup.
-//
-// Owns: badge column (commit/merge or PR state), repository link, sha + title
-// button (which emits `open-commit` so the parent can pop the detail modal),
-// BitBucket external-link icon, author link, timestamp, additions/deletions/
-// files, and the diff-stats-unavailable warning for commits whose /diffstat
-// fetch was given up on by the orchestrator.
+// ActivityFeed.vue so the dedicated Activity page can reuse the row shape.
+// Emits `open-commit` so the parent can pop the detail modal.
 
 import { RouterLink } from 'vue-router';
 import type { ActivityEntry } from '@/api/client';
@@ -16,11 +10,8 @@ defineProps<{ entry: ActivityEntry }>();
 defineEmits<{ 'open-commit': [sha: string] }>();
 
 function commitTitle(message: string): string {
-  // First non-blank line, trimmed. A message that opens with a blank
-  // line (body-only commit, no subject — common when authors hit Enter
-  // before typing) would otherwise render as an empty button beside
-  // the dash, so skip leading whitespace and take the first line with
-  // actual content.
+  // First non-blank line. A body-only commit (leading blank line, no subject)
+  // would otherwise render as an empty button beside the dash.
   for (const line of message.split('\n')) {
     const trimmed = line.trim();
     if (trimmed !== '') return trimmed;
@@ -77,13 +68,9 @@ function formatTime(iso: string): string {
     </span>
 
     <div class="min-w-0 flex-1">
-      <!-- Single-line identifier row. The prefix (repo slug + sha or
-           #PR + dashes) stays at its intrinsic size via `shrink-0`; the
-           title element is the only flex child that can shrink and
-           owns the truncation. That way a long body-only commit
-           message still shows useful prefix text before the ellipsis
-           instead of being entirely replaced by `…` when the parent
-           paragraph runs out of room. -->
+      <!-- The prefix (repo slug + sha / #PR) stays at intrinsic size via
+           `shrink-0`; only the title shrinks and owns the truncation, so a
+           long message still shows the prefix before the ellipsis. -->
       <div class="flex min-w-0 items-baseline gap-1">
         <div class="flex shrink-0 items-baseline gap-1 text-slate-700">
           <RouterLink

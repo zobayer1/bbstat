@@ -1,22 +1,9 @@
-// URL-synced project + repository filter pair with interlock.
-//
-// Anywhere both a project AND a repository dropdown render together,
-// selecting one needs to keep the other coherent:
-//   - Pick a repo → the page knows that repo's project (one-to-one
-//     by data model); auto-select it so the project dropdown stays
-//     accurate.
-//   - Pick a project → the repo dropdown trims to that project's repos;
-//     a previously selected repo from a different project is cleared.
-//
-// Both axes live in `route.query` so deep links work and the browser's
-// Back button does what the user expects. URL updates are coalesced
-// into a single `router.replace` per change so we don't ping-pong
-// query strings on the interlock writes.
-//
-// Project-detail pages can pin the project via `pinProject` — the
-// repo dropdown then stays trimmed to that project regardless of any
-// `?project=` in the URL, and callers typically don't render the
-// project dropdown at all on those pages.
+// URL-synced project + repository filter pair with interlock: picking a
+// repo auto-selects its project (one-to-one by data model); picking a
+// project trims the repo dropdown and clears a now-mismatched repo. Both
+// axes live in `route.query` (deep links + Back button), coalesced into a
+// single `router.replace` per change. `pinProject` keeps the repo dropdown
+// scoped to a fixed project regardless of `?project=` (project-detail pages).
 
 import { computed, type ComputedRef, type Ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -24,17 +11,14 @@ import type { TrackedRepositorySummary } from '@/api/client';
 
 export interface UseActivityFiltersOptions {
   // Source of truth for the repo list (project mapping comes from here).
-  // Accept a Ref so reactivity works whether the caller has a ref-shaped
-  // store value (stats.repositories is a ref) or a computed.
+  // Ref so reactivity works for both ref-shaped store values and computeds.
   repositories: Ref<readonly TrackedRepositorySummary[]> | ComputedRef<readonly TrackedRepositorySummary[]>;
-  // Optional pin — when set, the repo dropdown is always scoped to
-  // this project regardless of the URL `?project=` value. Used on
-  // project-detail pages where the project is fixed by the route.
+  // When set, the repo dropdown is always scoped to this project regardless
+  // of `?project=`. Used on project-detail pages (project fixed by route).
   pinProject?: () => string | undefined;
-  // Optional custom query-param keys for the project / repo axes. Lets a
-  // page that already uses `?project` for a different control (e.g. the
-  // Repositories table's project filter) host an independent activity
-  // filter pair without colliding on the URL. Defaults to project / repo.
+  // Custom query-param keys so a page already using `?project` for a
+  // different control can host an independent filter pair. Defaults to
+  // project / repo.
   queryKeys?: { project?: string; repo?: string };
 }
 
@@ -83,11 +67,9 @@ export function useActivityFilters(opts: UseActivityFiltersOptions) {
     const next = { ...route.query };
     if (v === undefined || v === '') delete next[rKey];
     else next[rKey] = v;
-    // Interlock: auto-select the chosen repo's project so the project
-    // dropdown reflects reality (a repo belongs to exactly one project).
-    // Skip when `pinProject` is set — the project is already known to
-    // the page from the route, and writing it to the query string just
-    // adds redundant noise.
+    // Interlock: auto-select the chosen repo's project (a repo belongs to
+    // exactly one project). Skip when pinned — the project is already known
+    // from the route, so writing it to the query just adds noise.
     if (v !== undefined && v !== '' && opts.pinProject === undefined) {
       const repo = opts.repositories.value.find((r) => r.fullName === v);
       if (repo?.project !== null && repo?.project !== undefined && repo.project !== next[pKey]) {
@@ -97,9 +79,8 @@ export function useActivityFilters(opts: UseActivityFiltersOptions) {
     void router.replace({ query: next });
   }
 
-  // Convenience write-side models so callers can keep using `v-model`
-  // on `<select>` elements (read = computed getter, write = setter that
-  // also runs the interlock).
+  // Write-side models so callers can use `v-model` on `<select>` (write
+  // runs the interlock via the setter).
   const projectModel = computed<string | undefined>({
     get: () => filterProject.value,
     set: (v) => setProject(v),

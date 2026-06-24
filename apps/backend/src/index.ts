@@ -43,25 +43,21 @@ async function main(): Promise<void> {
         }
       : undefined;
 
-  // The DB is always available (it's a hard requirement), so the read-side
-  // stats store is always constructed and the dashboard endpoints are always
-  // registered. BitBucket creds are optional — without them, admin / sync
+  // DB is a hard requirement, so the stats store and dashboard endpoints
+  // are always wired. BB creds are optional — without them, admin / sync
   // routes are absent but the rest of the app still starts.
   const db = createDb(config.DATABASE_URL);
   const statsStore = createDrizzleStatsStore(db);
-  // Shared Redis client: previously only constructed inside the BB-creds
-  // branch (lazy-connect for the user-summary cache). Now also backs the
-  // live-events Redis bridge, so the API process can receive events
-  // published by the separate cron host process.
+  // Shared Redis client: backs the user-summary cache and the live-events
+  // Redis bridge (so the API process receives events published by the
+  // separate cron host process).
   const redis = createCache(config.REDIS_URL);
 
-  // Shared event bus: the sync runner (when wired below) publishes
-  // tick / auto-trip / admin events; buildApp wires it into the SSE
-  // route at /api/live. The Redis bridge fans publishes out to other
-  // processes (the cron host) and re-publishes their events here.
-  // If Redis is unreachable at boot we fall back to the in-process bus
-  // and log a loud warning — the API still serves traffic, but cron
-  // events won't reach SSE clients until Redis is healthy.
+  // Shared event bus. The Redis bridge fans publishes out to other
+  // processes (the cron host) and re-publishes their events here. If Redis
+  // is unreachable at boot we fall back to the in-process bus — the API
+  // still serves traffic, but cron events won't reach SSE clients until
+  // Redis is healthy.
   const localBus = createEventBus();
   let bus = localBus;
   try {
@@ -75,9 +71,8 @@ async function main(): Promise<void> {
   }
 
   let syncDeps: SyncRunnerDeps | undefined;
-  // Declared at the outer scope so both syncDeps wiring (below) and buildApp
-  // (further below) can share the same Redis-backed cache instance. The
-  // sync hook DELs the same keys the route reads/writes.
+  // Outer scope so syncDeps wiring and buildApp share the same cache instance:
+  // the sync hook DELs the same keys the route reads/writes.
   let userSummaryCache: UserSummaryCache<UserSummary> | undefined;
   if (config.BITBUCKET_AUTH_EMAIL && config.BITBUCKET_AUTH_TOKEN && config.BITBUCKET_WORKSPACE) {
     const discoveryStore = createDrizzleDiscoveryStore(db);
@@ -106,9 +101,9 @@ async function main(): Promise<void> {
       logger,
       initialAuthState,
       // Surface BB credential health to the dashboard. On 401/403 we set
-      // a Redis flag; the next 2xx clears it. We also publish through the
-      // already-Redis-bridged bus so the cron host's auth events reach
-      // SSE clients connected here (and vice versa).
+      // a Redis flag; the next 2xx clears it. Published through the
+      // Redis-bridged bus so the cron host's auth events reach SSE clients
+      // connected here (and vice versa).
       onAuthStateChange: (state) => {
         const op =
           state === 'unauthorized'
@@ -123,12 +118,11 @@ async function main(): Promise<void> {
         bus.publish({ event: 'bitbucket.auth-state', payload: { state } });
       },
     });
-    // Seed file path: explicit env wins; otherwise default to
-    // `<repo-root>/tracked-repos.yaml`. Required when explicit so a typo
-    // fails loud; optional on the default path so fresh clones boot fine
-    // without a seed file. We invoke the loader once at startup as a
-    // fail-loud parse check, then pass the same thunk through to the
-    // runner so each sync invocation re-reads the file (no-restart edits).
+    // Seed file path: explicit env wins, else `<repo-root>/tracked-repos.yaml`.
+    // Required when explicit so a typo fails loud; optional on the default path
+    // so fresh clones boot without a seed file. Loader runs once at startup as
+    // a fail-loud parse check, then the same thunk passes to the runner so each
+    // sync invocation re-reads the file (no-restart edits).
     const seedFilePath = resolve(repoRoot, config.SEED_REPO_FILE_PATH ?? 'tracked-repos.yaml');
     const seedRequired = config.SEED_REPO_FILE_PATH !== undefined;
     const loadSeeds = (): ReturnType<typeof loadSeedTrackedRepos> =>

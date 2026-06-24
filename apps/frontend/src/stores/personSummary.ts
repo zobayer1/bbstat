@@ -5,10 +5,8 @@ import type { PersonSummary } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
 // Keyed cache of per-person summaries (Phase 5 alias merge). Same
-// offline-first shape as useUserSummaryStore — components read
-// `byPersonId[id]` synchronously and reconcile against the backend
-// when online. Persisted across reloads; only the payloads, not the
-// transient loading / error maps.
+// offline-first shape as useUserSummaryStore. Only the payloads persist,
+// not the loading / error maps.
 export const usePersonSummaryStore = defineStore(
   'personSummary',
   () => {
@@ -33,16 +31,12 @@ export const usePersonSummaryStore = defineStore(
       error.value = {};
     }
 
-    // Re-fetch every cached person summary. Cheap when one person is
-    // in view; parallel + per-person error isolation otherwise.
+    // Re-fetch every cached person summary in parallel, per-person isolated.
     async function applyTickComplete(): Promise<void> {
       const ids = Object.keys(byPersonId.value).map(Number);
       await Promise.all(ids.map((id) => fetch(id)));
     }
 
-    // Commit ticks and sync-state transitions move the same
-    // commit_daily-derived numbers the person page renders, exactly
-    // as for the user page.
     liveBus.on('tick.commits.complete', () => {
       void applyTickComplete();
     });
@@ -55,9 +49,8 @@ export const usePersonSummaryStore = defineStore(
     liveBus.on('repository.deleted', () => {
       void applyTickComplete();
     });
-    // Person-layer mutations change the attached-alias roster (and
-    // therefore every aggregate). A dissolve of the person currently
-    // in view drops its cache entry so a stale page doesn't linger.
+    // Person-layer mutations change the attached-alias roster (and every
+    // aggregate). A dissolve drops the entry so a stale page doesn't linger.
     liveBus.on('person.attached', () => {
       void applyTickComplete();
     });

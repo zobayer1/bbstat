@@ -1,10 +1,9 @@
-// Builds the MCP server object: registers every tool from the registry and
-// adapts the framework-agnostic ToolDef into the SDK's registerTool call.
-// This is the ONLY place the MCP SDK meets our tool layer.
+// Builds the MCP server object: adapts each framework-agnostic ToolDef from the
+// registry into an SDK registerTool call. The ONLY place the MCP SDK meets our
+// tool layer.
 //
-// One server is built per request in the stateless HTTP transport (see
-// transport.ts) and once per test via the in-memory transport — so this
-// function must stay cheap and side-effect free beyond registration.
+// Built per request in the stateless HTTP transport (see transport.ts) and once
+// per test — so it must stay cheap and side-effect free beyond registration.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Logger } from 'pino';
@@ -30,8 +29,7 @@ export function buildMcpServer(store: StatsStore, logger: Logger): McpServer {
         title: tool.title,
         description: tool.description,
         inputSchema: tool.inputShape,
-        // Every tool here is a pure read — advertise it so hosts can surface
-        // these as safe / non-mutating.
+        // Every tool is a pure read — advertise so hosts treat them as safe.
         annotations: { readOnlyHint: true },
       },
       async (args) => {
@@ -39,8 +37,8 @@ export function buildMcpServer(store: StatsStore, logger: Logger): McpServer {
           const data = await tool.handler(store, args);
           return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
         } catch (err) {
-          // Expected, user-facing failures (unknown id, untracked repo) come
-          // back as a clean isError result the agent can read and recover from.
+          // Expected, user-facing failures come back as a clean isError result
+          // the agent can read and recover from.
           if (err instanceof ToolError) {
             return { content: [{ type: 'text' as const, text: err.message }], isError: true };
           }

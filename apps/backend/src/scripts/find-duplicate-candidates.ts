@@ -1,17 +1,14 @@
 /* eslint-disable no-console -- one-off CLI utility; console output is the deliverable */
 
-// One-off duplicate-account finder. Scans every `users` row, normalizes
-// display names + emails, scores all pairs on name token-overlap / edit
-// distance / shared-or-similar email local-part, clusters the high-scoring
-// pairs (union-find), and prints ranked candidate groups for an operator to
-// review and merge via the /api/admin/people endpoints. READ-ONLY — it never
-// writes to the database.
+// One-off duplicate-account finder. Scores all `users` pairs on name
+// token-overlap / edit distance / shared-or-similar email local-part,
+// clusters high-scoring pairs (union-find), and prints ranked candidate
+// groups for an operator to merge via /api/admin/people. READ-ONLY.
 //
-// Run from a repo checkout with DATABASE_URL pointed at the target DB:
 //   DATABASE_URL=postgres://… pnpm --filter @bbstat/backend run find:duplicates
 //   (or `make find-duplicates`).
-// Optional first arg overrides the minimum score (0–1), e.g. `… 0.7` for
-// tighter, `… 0.45` for more recall. Default 0.55.
+// Optional first arg overrides the minimum score (0–1); higher = tighter,
+// lower = more recall. Default 0.55.
 
 import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
@@ -45,15 +42,15 @@ interface UserRec {
   username: string | null;
   email: string | null;
   nameTokens: string[]; // normalized, deduped, sorted
-  emailNorm: string | null; // full normalized address
-  emailLocal: string | null; // normalized local-part
+  emailNorm: string | null;
+  emailLocal: string | null;
   emailLocalTokens: string[];
 }
 
 function normalizeName(raw: string): string[] {
   const tokens = raw
     .toLowerCase()
-    .replace(/[^a-z\s]/g, ' ') // drop digits/punctuation, keep letters + space
+    .replace(/[^a-z\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .split(' ')
@@ -95,13 +92,11 @@ function ratio(a: string, b: string): number {
   return max === 0 ? 0 : 1 - levenshtein(a, b) / max;
 }
 
-// Weighted, typo-tolerant token-set similarity. Two tokens match when equal
-// or edit-ratio ≥ 0.85 (catches spelling variants like manirul/monirul while
-// keeping distinct names like shahidul/shafiul apart). Each token is weighted
-// by IDF, so a shared *common* surname (Islam, Hossain, Rahman…) barely moves
-// the score while a shared *distinctive* given name dominates — this is what
-// stops a whole org's worth of "<x> Islam" rows from collapsing into one
-// cluster.
+// Weighted, typo-tolerant token-set similarity. Tokens match when equal or
+// edit-ratio ≥ 0.85 (catches manirul/monirul while keeping shahidul/shafiul
+// apart). IDF weighting makes a shared common surname (Islam, Hossain…) barely
+// move the score while a distinctive given name dominates — this stops a whole
+// org's worth of "<x> Islam" rows from collapsing into one cluster.
 function weightedTokenSim(a: string[], b: string[], weight: (t: string) => number): number {
   if (a.length === 0 || b.length === 0) return 0;
   const usedB = new Set<number>();

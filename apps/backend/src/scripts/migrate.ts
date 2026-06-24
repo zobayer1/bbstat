@@ -1,13 +1,10 @@
-// Programmatic Drizzle migrator — runs pending SQL migrations against the
-// database pointed at by DATABASE_URL. Idempotent: drizzle's __drizzle_migrations
-// journal tracks what's been applied, so re-running is a no-op once caught up.
+// Programmatic Drizzle migrator against DATABASE_URL. Idempotent — the
+// __drizzle_migrations journal tracks what's applied, so re-running is a no-op.
 //
-// Local dev: `make db-migrate` still calls drizzle-kit (devDep). This script is
-// the runtime entrypoint inside the production image, where drizzle-kit is not
-// installed. The compose stack invokes it once at boot as a one-shot service:
-//   node dist/scripts/migrate.js
-// Exits 0 on success, 1 on any failure (so `depends_on: service_completed_successfully`
-// gates the backend / sync containers correctly).
+// This is the runtime entrypoint inside the production image (where drizzle-kit
+// isn't installed; local dev's `make db-migrate` uses drizzle-kit instead). The
+// compose stack runs it as a one-shot at boot; exit 1 on failure lets
+// `depends_on: service_completed_successfully` gate the dependent containers.
 
 /* eslint-disable no-console -- one-shot CLI; stdout/stderr is the deliverable */
 
@@ -23,10 +20,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Migrations live at `<backend>/drizzle/` in both source (src/scripts → ../../drizzle)
-  // and built (dist/scripts → ../../drizzle) layouts, so the same relative resolve
-  // works in dev (`tsx`) and in the production image where the Dockerfile copies
-  // the drizzle/ directory alongside dist/.
+  // `../../drizzle` resolves the same from src/scripts (dev `tsx`) and
+  // dist/scripts (prod image copies drizzle/ alongside dist/).
   const migrationsFolder = resolve(import.meta.dirname, '..', '..', 'drizzle');
 
   console.log(`→ Applying migrations from ${migrationsFolder}`);

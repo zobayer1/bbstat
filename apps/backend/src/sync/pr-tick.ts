@@ -1,12 +1,7 @@
-// Bounded-concurrency, budget-aware orchestrator over a list of tracked
-// repositories' PR ingest. Same shape as commits-tick.ts — workers pull
-// from a shared queue; before claiming the next repo each worker checks
-// the client's outbound-call budget. If remaining headroom is below the
-// safety threshold the worker stops scheduling and unclaimed repos are
-// returned as `deferred` for the next tick.
-//
-// Errors in a single repo never abort the tick; they're collected
-// per-repo so a transient 500 on one repo can't starve the others.
+// Bounded-concurrency, budget-aware orchestrator over PR ingest. Same shape
+// as commits-tick.ts — workers pull from a shared queue, stop below the
+// budget threshold and return unclaimed repos as `deferred`, and collect
+// per-repo errors so one repo's failure can't starve the others.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import type { RepositoryHandle } from './commits.js';
@@ -22,18 +17,14 @@ export interface PrTickDeps {
   client: BitbucketClient;
   store: PrStore;
   logger?: BitbucketLogger;
-  // Per-repo sync function. Defaults to syncRepositoryPullRequests;
-  // injectable so the orchestrator can be tested without standing up the
-  // full BB client + store + fetch fixture stack.
+  // Defaults to syncRepositoryPullRequests; injectable for tests.
   syncOne?: (deps: PrSyncDeps, repo: RepositoryHandle, opts: PrSyncOptions) => Promise<RepoPrSyncResult>;
 }
 
 export interface PrTickOptions extends PrSyncOptions {
-  // Max repos in flight at once. PR ingest is slower-cadence than commits
-  // (30-min cron default), so a modest concurrency keeps BB happy.
+  // Max repos in flight.
   concurrency?: number;
-  // Safety margin under hourlyCallBudget. When getBudgetRemaining() falls
-  // below this, no new repos are scheduled.
+  // Safety margin under hourlyCallBudget; below it, no new repos scheduled.
   budgetLowThreshold?: number;
 }
 

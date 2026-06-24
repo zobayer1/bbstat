@@ -19,23 +19,19 @@ export interface BuildAppOptions {
   config: AppConfig;
   logger: Logger;
   https?: { key: Buffer; cert: Buffer };
-  // When set, /api/admin/* routes are registered. Without it (e.g., a fresh
-  // dev environment with no BitBucket creds, or a test that doesn't need the
-  // sync surface), the admin routes are simply absent.
+  // When set, /api/admin/* routes are registered; absent without BB creds.
   syncDeps?: SyncRunnerDeps;
   // When set, /api/stats/* dashboard read endpoints are registered.
   statsStore?: StatsStore;
-  // Optional. When wired alongside statsStore, /users/:id/summary uses it
-  // as a read-through cache. Absent in unit tests that don't care.
+  // When wired alongside statsStore, /users/:id/summary uses it as a
+  // read-through cache.
   userSummaryCache?: UserSummaryCache<UserSummary>;
-  // In-process event bus for the live updates surface. When omitted a
-  // fresh one is created — runtime callers normally pass an instance
-  // shared with the sync runner so publish() events fan out to SSE
-  // subscribers. Tests can pass their own to assert publish calls.
+  // Live-updates event bus. When omitted a fresh one is created — runtime
+  // callers pass an instance shared with the sync runner so publish() events
+  // fan out to SSE subscribers.
   bus?: EventBus;
-  // Shared Redis client. When set, `/api/bitbucket/auth-state` reads
-  // the auth-health flag from it. Without it the route still registers
-  // and returns 'ok' — fine in tests / no-Redis dev.
+  // Shared Redis client backing `/api/bitbucket/auth-state`. Without it the
+  // route still registers and returns 'ok'.
   redis?: CacheClient;
 }
 
@@ -50,7 +46,7 @@ export async function buildApp({
   redis,
 }: BuildAppOptions) {
   // Fastify 5: a pre-built pino instance goes on `loggerInstance`, not `logger`
-  // (which is for config). Same instance ends up at app.log either way.
+  // (which is for config).
   const app = Fastify({
     loggerInstance: logger,
     ...(https ? { https } : {}),
@@ -63,14 +59,9 @@ export async function buildApp({
   });
   await app.register(healthRoutes);
 
-  // Live updates surface — always registered (the bus exists regardless of
-  // BB creds, and a dashboard with no sync configured still benefits from
-  // SSE so it doesn't poll a static dataset).
   const eventBus = bus ?? createEventBus();
   await app.register(liveRoutes, { prefix: '/api', bus: eventBus });
 
-  // BB credential health surface — registered unconditionally. The flag
-  // is per-Redis-instance; without Redis the route returns 'ok'.
   await app.register(bitbucketRoutes, { prefix: '/api/bitbucket', ...(redis ? { redis } : {}) });
 
   if (syncDeps) {

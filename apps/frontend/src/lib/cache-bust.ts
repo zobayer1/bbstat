@@ -1,15 +1,12 @@
 // Boot-time check that wipes stale persisted Pinia state from localStorage
-// when the in-code CACHE_VERSION doesn't match the value last written to
-// the sentinel key. Must run BEFORE any Pinia store hydrates (i.e. before
-// `app.mount` in main.ts), otherwise stores would read the old shape into
-// memory and the bust on the next reload would be the only thing that
-// fixes things — defeating the point of automating this.
+// when the in-code CACHE_VERSION doesn't match the sentinel key. MUST run
+// before any Pinia store hydrates (before `app.mount` in main.ts) — otherwise
+// stores read the old shape into memory and only the next reload's bust fixes
+// it, defeating the automation.
 //
-// The wipe is scoped to `bbstat-` prefixed keys so we don't nuke anything
-// else this origin might be storing. The plugin in src/stores/index.ts
-// applies the prefix globally; any non-prefixed legacy keys from before
-// this change are orphaned on first boot (acceptable — same outcome as a
-// version bump).
+// The wipe is scoped to `bbstat-` prefixed keys so we don't nuke anything else
+// this origin stores. Non-prefixed legacy keys are orphaned on first boot
+// (acceptable — same outcome as a version bump).
 
 import { CACHE_VERSION, STORE_KEY_PREFIX, VERSION_SENTINEL_KEY } from './cache-version.js';
 
@@ -29,9 +26,8 @@ export function bustStaleCacheIfNeeded(): void {
     }
     localStorage.setItem(VERSION_SENTINEL_KEY, current);
   } catch {
-    // Private-browsing / disabled-storage / quota-exceeded — silent no-op
-    // is the right call: the app still works without persistence, and
-    // re-throwing here would just block the entire boot for a non-critical
-    // background concern.
+    // Private-browsing / disabled-storage / quota-exceeded — silent no-op.
+    // The app works without persistence; re-throwing would block the whole
+    // boot for a non-critical concern.
   }
 }

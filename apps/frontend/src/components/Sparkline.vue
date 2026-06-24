@@ -21,7 +21,7 @@ const props = withDefaults(
 
 const max = computed(() => Math.max(...props.points, 1));
 
-// Polyline `d` string. With < 2 points we'd render a single dot; just skip.
+// With < 2 points there's no line to draw; skip.
 const path = computed(() => {
   if (props.points.length < 2) return '';
   const xStep = props.width / (props.points.length - 1);

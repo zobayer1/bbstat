@@ -1,11 +1,8 @@
-// Endpoint wrapper for BitBucket Cloud `GET /repositories/{workspace}` — the
-// list-all-repos-in-a-workspace endpoint. Consumed by the repo-discovery
-// sweep (src/sync/repo-discovery.ts) to auto-track repositories without
-// manual seeding.
+// Endpoint wrapper for `GET /repositories/{workspace}`. Consumed by the
+// repo-discovery sweep (src/sync/repo-discovery.ts).
 
 import type { BitbucketClient } from './client.js';
 
-// Slim repo shape — only the fields the discovery sweep field-filters for.
 export interface BitbucketRepoSummary {
   uuid: string;
   slug: string;
@@ -22,8 +19,8 @@ export interface BitbucketRepoSummary {
   parent?: { full_name: string };
 }
 
-// Field filter for the list endpoint. Paginated → `values.` prefix required;
-// `next` is appended automatically by client.paginate().
+// Paginated endpoint → `values.` prefix required; `next` is appended by
+// client.paginate().
 export const REPO_LIST_FIELDS = [
   'values.uuid',
   'values.slug',
@@ -37,15 +34,14 @@ export const REPO_LIST_FIELDS = [
 ];
 
 export interface PaginateWorkspaceReposOptions {
-  // BBQL lower bound — yields repos with `updated_on` strictly greater than
-  // this ISO timestamp. Omit to walk the whole workspace.
+  // BBQL lower bound — repos with `updated_on` strictly greater than this ISO
+  // timestamp. Omit to walk the whole workspace.
   since?: string;
 }
 
-// Async iterator over every repository in a workspace, ordered by `updated_on`
-// ASCENDING (oldest first). The ascending order is load-bearing for the
-// discovery cursor: it backfills the long tail of inactive repos before
-// catching up to the active front and any newly created repos.
+// Ordered by `updated_on` ASCENDING (oldest first). The ascending order is
+// load-bearing for the discovery cursor: it backfills the inactive tail before
+// catching up to the active front and newly created repos.
 export function paginateWorkspaceRepositories(
   client: BitbucketClient,
   workspace: string,

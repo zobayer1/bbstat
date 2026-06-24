@@ -1,26 +1,21 @@
-// Framework-agnostic tool definitions. Deliberately free of any MCP-SDK type
-// so the data logic is unit-testable on its own (commit 2) and the SDK only
-// shows up at the server boundary (commit 3), which adapts these into
-// `server.registerTool` calls and wraps the return value in MCP content.
+// Framework-agnostic tool definitions, deliberately free of any MCP-SDK type so
+// the data logic is unit-testable on its own; the SDK only shows up at the
+// server boundary (server.ts), which adapts these into registerTool calls.
 //
 // Each tool is a pure read over the StatsStore: a zod input shape + a handler
-// that returns plain JSON-serialisable data. Adding a tool later is one
-// `defineTool({...})` + one line in registry.ts.
+// returning JSON-serialisable data.
 
 import type { z } from 'zod';
 import type { StatsStore } from '../../dashboard/stats-store.js';
 
 export interface ToolDef<Shape extends z.ZodRawShape> {
-  // Stable identifier the agent calls (snake_case, matches MCP conventions).
   name: string;
-  // Short human title for tool listings.
   title: string;
-  // Description shown to the model — this is what teaches it when/how to call
-  // the tool, including how to resolve ids (see contributors.ts).
+  // Description shown to the model — teaches it when/how to call the tool,
+  // including how to resolve ids (see contributors.ts).
   description: string;
-  // Zod raw shape (object of field schemas). The server validates incoming
-  // arguments against `z.object(inputShape)` before invoking the handler, so
-  // the handler always receives parsed, defaulted, typed args.
+  // The server validates args against z.object(inputShape) before invoking the
+  // handler, so the handler always receives parsed, defaulted, typed args.
   inputShape: Shape;
   handler: (store: StatsStore, args: z.infer<z.ZodObject<Shape>>) => Promise<unknown>;
 }
@@ -30,8 +25,8 @@ export interface ToolDef<Shape extends z.ZodRawShape> {
 // tool's own inputShape before calling the handler.
 export type AnyToolDef = ToolDef<z.ZodRawShape>;
 
-// Identity helper that preserves per-tool arg typing at the definition site
-// while erasing it for the registry array.
+// Preserves per-tool arg typing at the definition site while erasing it for the
+// registry array.
 export function defineTool<Shape extends z.ZodRawShape>(def: ToolDef<Shape>): AnyToolDef {
   return def as unknown as AnyToolDef;
 }

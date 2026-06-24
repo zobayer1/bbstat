@@ -1,16 +1,11 @@
-// Storage interface for commit-ingest operations. Mirrors discovery-store:
-// domain logic in commits.ts injects a CommitStore (real or fake) so it stays
-// testable without spinning up Postgres.
+// Storage interface for commit-ingest operations. commits.ts injects a
+// CommitStore (real or fake) so it stays testable without Postgres.
 //
-// Idempotency: insertCommits uses ON CONFLICT … DO UPDATE on
-// commits_sha_repo_unique with a narrow `commits.author_user_id IS NULL AND
-// EXCLUDED.author_user_id IS NOT NULL` guard — re-running a sync that races
-// another trigger never errors, never duplicates, never overwrites an
-// established attribution, but DOES fill in attribution for rows that were
-// previously anonymous (e.g. BB linked the author's email to a workspace
-// member after the original ingest). The cursor helpers (getSyncState,
-// markSync{Running,Success,Failed}) own the sync_state row lifecycle for a
-// single repository.
+// Idempotency: insertCommits uses ON CONFLICT … DO UPDATE with a narrow
+// `commits.author_user_id IS NULL AND EXCLUDED.author_user_id IS NOT NULL`
+// guard — re-running a racing sync never errors, duplicates, or overwrites
+// an established attribution, but DOES fill attribution for rows that were
+// previously anonymous (e.g. BB later linked the author's email to a member).
 
 import { and, asc, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -18,23 +13,15 @@ import { commitDaily, commits, repositories, syncState, users } from '../db/sche
 
 export type SyncStatus = 'idle' | 'running' | 'success' | 'failed';
 
-// Per-commit failure budget threshold for `/diffstat/<sha>` fetches.
-// Cross this many cumulative failures and the orchestrator stops re-
-// queueing the commit. Exported so both the orchestrator (deciding
-// when to stamp-as-done) and the pickup queries (defending against
-// stamp-then-counter-drift) agree on the same number.
+// Per-commit failure budget for `/diffstat/<sha>` fetches. Cross this many
+// cumulative failures and the orchestrator stops re-queueing the commit.
+// Exported so the orchestrator and the pickup queries agree on one number.
 //
-// Weight scheme used by `incrementDiffStatsFailure`: generic 5xx adds
-// 1 per failed tick, HTTP 555 adds 3 (one strike is enough — that
-// class of failure is persistent for the commit shape). So a 555
-// crosses the threshold immediately; a flaky 500/502/503 gets three
-// chances spread across however many ticks it takes the global
-// pickup to re-attempt this commit.
+// Weight scheme (`incrementDiffStatsFailure`): generic 5xx adds 1 per failed
+// tick, HTTP 555 adds 3 — a 555 crosses immediately because that class of
+// failure is persistent for the commit shape; a flaky 500/502/503 gets three
+// chances.
 export const DIFF_STATS_FAILURE_THRESHOLD = 3;
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 export interface CommitInsertInput {
   repositoryId: number;
@@ -43,34 +30,24 @@ export interface CommitInsertInput {
   message: string;
   isMerge: boolean;
   authoredAt: Date;
-  // Snapshot columns — populated from BB's `author.raw` (email parsed
-  // via parseAuthorEmail; name parsed via parseAuthorDisplayName, with
-  // `author.user.display_name` preferred when present). Both may be
-  // NULL when BB doesn't carry enough metadata or the email is
-  // synthetic / noreply-filtered. Captured at first ingest only; the
-  // ON CONFLICT path leaves them alone so the value reflects what was
-  // pushed at the time of the commit, not whatever BB returns now.
+  // Snapshot columns from BB's `author.raw`. Both may be NULL when BB
+  // lacks metadata or the email is synthetic/noreply-filtered. Captured
+  // at first ingest only — the ON CONFLICT path leaves them alone so the
+  // value reflects what was pushed at the time, not what BB returns now.
   authorEmail: string | null;
   authorDisplayName: string | null;
 }
 
 export interface CommitInsertResult {
   inserted: number;
-  // Rows that actually won the ON CONFLICT race (i.e. landed in the table
-  // on this call). Consumed by the inline-eager diff-stats path so the
-  // per-repo commit sync can fetch /diffstat for just-inserted shas
-  // without going back to the DB. Empty when `inserted === 0`.
+  // Rows that landed in the table on this call. The inline-eager
+  // diff-stats path fetches /diffstat for these without re-querying.
   insertedRows: InsertedCommitRow[];
-  // Rows whose `author_user_id` transitioned NULL → known on this call
-  // because BB now resolves the author to a workspace member. Surfaced
-  // separately from `insertedRows` so:
-  //   * the inline-eager diff-stats path stays scoped to *new* commits
-  //     (their diff stats may not be persisted yet); reattributed rows
-  //     already have whatever diff stats they had.
-  //   * the rollup hook can refresh `commit_daily` for the affected
-  //     day window so the stale `(day, repo, NULL)` row disappears
-  //     and the new `(day, repo, user)` row reflects the count.
-  // Empty when no rows were reattributed on this call.
+  // Rows whose `author_user_id` transitioned NULL → known on this call.
+  // Separate from `insertedRows` so the inline-eager diff-stats path
+  // stays scoped to new commits, and the rollup hook can refresh
+  // commit_daily so the stale `(day, repo, NULL)` row gives way to
+  // `(day, repo, user)`.
   reattributedRows: InsertedCommitRow[];
 }
 
@@ -91,8 +68,8 @@ export interface SyncStateRow {
 }
 
 export interface SyncSuccessUpdate {
-  // null leaves the cursor untouched — used when a clean run produced no new
-  // commits (idle repo) and we still want to record a successful tick.
+  // null leaves the cursor untouched — a clean run that produced no new
+  // commits still records a successful tick.
   lastSeenSha: string | null;
   commitsAdded: number;
 }
@@ -103,11 +80,9 @@ export interface PendingDiffStatCommit {
   authoredAt: Date;
 }
 
-// Same shape as PendingDiffStatCommit plus the repo identity needed
-// for the BB call. Returned by the global newest-first pickup the
-// diff-stats backfill tick consumes; the per-repo pickup
-// (`listPendingDiffStatCommits`) is used only by the inline-eager
-// path inside commit-sync where the repo is already known.
+// PendingDiffStatCommit plus repo identity for the BB call. Returned by
+// the global newest-first pickup the diff-stats backfill tick consumes;
+// the per-repo pickup is used only by commit-sync's inline-eager path.
 export interface PendingDiffStatCommitWithRepo extends PendingDiffStatCommit {
   repositoryId: number;
   workspace: string;
@@ -117,46 +92,35 @@ export interface PendingDiffStatCommitWithRepo extends PendingDiffStatCommit {
 }
 
 export interface CommitStore {
-  // Resolve a batch of BitBucket user UUIDs to local users.id values. Missing
-  // UUIDs (anonymous commits, users not yet synced) are absent from the
-  // result map; callers translate that absence into author_user_id = null,
-  // OR (since the auto-create path landed) hand the unresolved UUIDs to
-  // `upsertAuthorUsers` to create out-of-workspace user rows for them.
+  // Resolve BB user UUIDs to local users.id. Missing UUIDs (anonymous
+  // commits, users not yet synced) are absent from the map; callers
+  // translate that to author_user_id = null, or hand the unresolved UUIDs
+  // to `upsertAuthorUsers`.
   resolveUserIdsByUuid(uuids: string[]): Promise<Map<string, number>>;
 
-  // Bulk auto-create user rows for BB UUIDs not currently in our `users`
-  // table — typically ex-employees, never-members, or external pushers
-  // whose accounts BB still resolves on commits but who aren't in
-  // `/workspaces/{ws}/members`. INSERTed rows land with
-  // `is_workspace_member = false`; existing rows are left alone (no
-  // overwrite of display_name / username / email / member flag — keeps
-  // member-sync's TRUE intact and preserves write-once email). Each
-  // entry MUST carry a parseable email (caller enforces) since the
-  // policy is "no auto-create without a real email." Returns a map of
-  // bitbucket_uuid → users.id covering every input so the caller can
-  // resolve `author_user_id` in one pass without a follow-up SELECT.
+  // Bulk auto-create user rows for BB UUIDs not in our `users` table —
+  // ex-employees, never-members, external pushers. INSERTed rows land
+  // with `is_workspace_member = false`; existing rows are never touched
+  // (keeps member-sync's TRUE intact, preserves write-once email). Each
+  // entry MUST carry a parseable email (caller enforces): no auto-create
+  // without a real email. Returns bitbucket_uuid → users.id for every
+  // input so the caller resolves attribution without a follow-up SELECT.
   upsertAuthorUsers(
     inputs: Array<{ bitbucketUuid: string; displayName: string; email: string }>,
   ): Promise<Map<string, number>>;
 
-  // Write-once email capture from commits.author.raw. For each (uuid, email)
-  // entry, sets users.email = email only when the current value IS NULL —
-  // the "first observed wins" policy keeps things stable for developers who
-  // commit from multiple machines with different addresses. UUIDs not in the
-  // users table are silently skipped (no rows match the predicate). No-op
-  // on empty input. Parsing + noreply filtering happens upstream in the
-  // sync layer (see src/sync/author-email.ts).
+  // Write-once email capture from commits.author.raw: sets users.email
+  // only when currently NULL ("first observed wins"), keeping things
+  // stable for developers committing from multiple machines. UUIDs not in
+  // the table are silently skipped. Parsing + noreply filtering happens
+  // upstream (src/sync/author-email.ts).
   setUserEmailsIfMissing(entries: Array<{ bitbucketUuid: string; email: string }>): Promise<void>;
 
-  // One-shot email backfill seed list. Returns every user whose email IS NULL
-  // alongside the (workspace, slug, sha) of their most recently authored
-  // ingested commit, capped by `limit`. The caller hits BB's commit endpoint
-  // for each row, parses author.raw, and writes via setUserEmailsIfMissing.
-  // Archived / sync-excluded repos are filtered out — fetching against them
-  // is unreliable (404s / drift), and the user's NEXT live commit in a
-  // healthy repo will capture their email anyway. Users with no ingested
-  // commits at all (theoretically unreachable today; defensively filtered)
-  // are absent.
+  // Email backfill seed list: every user whose email IS NULL with the
+  // (workspace, slug, sha) of their most recent ingested commit, capped
+  // by `limit`. Archived / sync-excluded repos are filtered out —
+  // fetching against them is unreliable, and the user's next live commit
+  // in a healthy repo captures their email anyway.
   listUsersMissingEmailWithLastCommit(limit: number): Promise<
     Array<{
       userId: number;
@@ -167,16 +131,11 @@ export interface CommitStore {
     }>
   >;
 
-  // Per-user reattribution backfill seed list. Returns anonymous
-  // commits (`author_user_id IS NULL`) in non-archived / non-excluded
-  // repos, newest-authored first, capped by `limit`. Carries the repo
-  // identity needed for the BB lookup. When `opts.workspace` and
-  // `opts.slug` are both set, the result is scoped to that single repo;
-  // either both must be set or both must be omitted (caller enforces).
-  // Archived + sync-excluded are filtered out — same rationale as
-  // listUsersMissingEmailWithLastCommit: fetching against them
-  // unreliable, and the operator wouldn't be reattributing on a dead
-  // repo anyway.
+  // Reattribution backfill seed list: anonymous commits
+  // (`author_user_id IS NULL`) in non-archived / non-excluded repos,
+  // newest-authored first, capped by `limit`, with repo identity for the
+  // BB lookup. `opts.workspace` + `opts.slug` must both be set (scopes to
+  // one repo) or both omitted (caller enforces).
   listAnonymousCommits(opts: { workspace?: string; slug?: string; limit: number }): Promise<
     Array<{
       commitId: number;
@@ -190,51 +149,29 @@ export interface CommitStore {
   >;
 
   // Bulk reattribute previously-anonymous commits to a user. Each entry
-  // is a (commitId, userId) pair the caller has BB-confirmed (BB's
-  // `author.user.uuid` for this sha resolved to the workspace member
-  // identified by userId). The UPDATE is guarded by `author_user_id
+  // is a BB-confirmed (commitId, userId) pair. Guarded by `author_user_id
   // IS NULL` so an established attribution (or a concurrent commit-sync
-  // landing the same row first) is never overwritten — race-safe by
-  // construction. Only touches `author_user_id`; diff-stats columns
-  // (`additions`, `deletions`, `files_changed`, `diff_stats_synced_at`,
-  // `diff_stats_failure_count`) stay exactly as they were so this
-  // operation costs zero `/diffstat` BB calls. Returns rows actually
-  // updated so the caller can scope `commit_daily` recompute to the
-  // affected (repository_id, day) windows.
+  // landing first) is never overwritten — race-safe. Only touches
+  // `author_user_id`, so diff-stats columns are untouched and this costs
+  // zero `/diffstat` calls. Returns updated rows so the caller can scope
+  // the `commit_daily` recompute.
   reattributeAnonymousCommits(
     entries: Array<{ commitId: number; userId: number }>,
   ): Promise<Array<{ id: number; repositoryId: number; authoredAt: Date }>>;
 
   // One-shot SQL backfill of `commits.author_email` +
-  // `commits.author_display_name` for rows where `author_user_id` is
-  // already set (i.e., the commit attributes to a known user) but the
-  // snapshot columns are NULL — typically commits ingested before the
-  // V1_16 schema migration that added those columns. Pulls the value
-  // straight from the linked `users` row via INNER JOIN, no BB call.
-  //
-  // Each column is filled independently via COALESCE so partial
-  // pre-existing data isn't clobbered:
-  //   - If `commits.author_email` is NULL and `users.email` is NOT
-  //     NULL → copy.
-  //   - If `commits.author_display_name` is NULL → copy
-  //     `users.display_name` (the users column is NOT NULL).
-  //   - Otherwise the existing snapshot value is preserved.
-  //
-  // Idempotent: re-running converges (no row matches the WHERE on
-  // the second pass). Anonymous rows (author_user_id IS NULL) are
-  // skipped — they need the BB-walk path (step 3 in the
-  // attribution-fix series) to populate. Returns the post-UPDATE
-  // row count.
+  // `commits.author_display_name` for attributed rows whose snapshot
+  // columns are NULL (typically pre-V1_16 commits). Pulls from the linked
+  // `users` row, no BB call. COALESCE fills each column independently so
+  // partial pre-existing data isn't clobbered. Idempotent. Anonymous rows
+  // are skipped — they need the BB-walk path. Returns the row count.
   backfillAuthorSnapshotsFromUsers(): Promise<{ updated: number }>;
 
-  // Bulk upsert commits. Conflicts on (repository_id, sha) trigger a narrow
-  // DO UPDATE that only fills `author_user_id` when the stored value IS NULL
-  // and the incoming value IS NOT NULL — never overwrites established
-  // attribution. Everything else about a commit (message, parents, authored
-  // timestamp) is treated as immutable, so re-runs converge. Returns truly
-  // inserted rows in `insertedRows` and reattributed rows in
-  // `reattributedRows` (`xmax = 0` split on the RETURNING tuple — the
-  // canonical Postgres trick for distinguishing the two outcomes).
+  // Bulk upsert commits. Conflicts on (repository_id, sha) trigger a
+  // narrow DO UPDATE that fills `author_user_id` only when stored IS NULL
+  // and incoming IS NOT NULL — never overwrites established attribution.
+  // Everything else is immutable, so re-runs converge. `xmax = 0` splits
+  // truly-inserted rows from reattributed ones in the RETURNING tuple.
   insertCommits(input: CommitInsertInput[]): Promise<CommitInsertResult>;
 
   getSyncState(repositoryId: number): Promise<SyncStateRow | null>;
@@ -244,157 +181,117 @@ export interface CommitStore {
 
   // History-rewrite reconciliation support (see src/sync/reconcile.ts).
   //
-  // Newest-authored-first window of `{ sha, authoredAt }` for a repo,
-  // capped at `limit`. The reconcile path diffs this against BitBucket's
-  // current head window to locate the common ancestor and the orphaned
-  // (rewritten-away) shas — bounded so a force-push deep in a large
-  // repo's history doesn't pull the whole table.
+  // Newest-authored-first window of `{ sha, authoredAt }`, capped at
+  // `limit`. reconcile diffs this against BB's current head window to
+  // locate the common ancestor and orphaned (rewritten-away) shas —
+  // bounded so a deep force-push doesn't pull the whole table.
   listRecentCommitShas(repositoryId: number, limit: number): Promise<Array<{ sha: string; authoredAt: Date }>>;
-  // Hard-delete the named shas for this repo; returns the row count.
-  // Used only by reconcile to prune orphans no longer reachable on BB.
+  // Hard-delete the named shas; returns the row count. Used only by
+  // reconcile to prune orphans no longer reachable on BB.
   deleteCommitsByShas(repositoryId: number, shas: string[]): Promise<number>;
   // Re-anchor `last_seen_sha` to a known-good ancestor WITHOUT marking a
   // sync success — reconcile sets the delta cursor here, then re-runs the
   // normal commit sync to ingest only the commits above the ancestor.
   setLastSeenSha(repositoryId: number, sha: string): Promise<void>;
 
-  // Per-repo pickup. Returns commits in this repo whose
-  // `diff_stats_synced_at IS NULL`, ordered newest-authored first,
-  // capped at `limit`. Used only by the inline-eager forward path
-  // inside commit-sync — the global backfill tick uses
-  // `listPendingDiffStatCommitsGlobal` instead.
+  // Per-repo pickup of `diff_stats_synced_at IS NULL` commits, newest
+  // first, capped at `limit`. Used only by commit-sync's inline-eager
+  // path; the global backfill tick uses listPendingDiffStatCommitsGlobal.
   listPendingDiffStatCommits(repositoryId: number, limit: number): Promise<PendingDiffStatCommit[]>;
 
-  // Global newest-first pickup across every non-archived non-excluded
-  // repo. Returns the `limit` newest-authored commits whose
-  // `diff_stats_synced_at IS NULL`, with each row carrying repo
-  // identity (workspace, slug, exclude patterns) so the diff-stat
-  // walker can fan out BB calls without further lookups. Powers the
-  // "freshness-first round-robin" backfill: a repo with 5000 pending
-  // commits no longer monopolizes a tick — its 50 most recent
-  // commits land in the global pool alongside every other repo's
-  // recent commits.
+  // Global newest-first pickup across non-archived non-excluded repos,
+  // each row carrying repo identity so the diff-stat walker can fan out
+  // without further lookups. Powers "freshness-first round-robin": a repo
+  // with 5000 pending commits no longer monopolizes a tick.
   listPendingDiffStatCommitsGlobal(limit: number): Promise<PendingDiffStatCommitWithRepo[]>;
 
-  // Phase 4 T21: persist BB-derived additions / deletions / files_changed
-  // for one commit and stamp diff_stats_synced_at = now() so it's filtered
-  // out of the next pickup. Idempotent — safe to call repeatedly with the
-  // same values.
+  // Persist BB-derived additions / deletions / files_changed for one
+  // commit and stamp diff_stats_synced_at so it drops out of the next
+  // pickup. Idempotent.
   updateCommitDiffStats(
     commitId: number,
     input: { additions: number; deletions: number; filesChanged: number },
   ): Promise<void>;
 
-  // Increment the per-commit `diff_stats_failure_count` by `weight`. The
-  // diff-stats orchestrator calls this from its catch block on every
-  // /diffstat fetch failure surfaced through the BB client (after its
-  // in-tick retry budget has already been exhausted). Generic 5xx uses
-  // weight=1; HTTP 555 (BB compute timeout for this commit's diff) uses
-  // weight=3 so a single 555 strike crosses the threshold immediately —
-  // that class of failure is persistent for the commit shape and
-  // retrying buys nothing. Returns the post-increment count so the
-  // caller can decide whether to also stamp the commit as done (with
-  // zeros) to remove it from future pickups.
+  // Increment the per-commit `diff_stats_failure_count` by `weight`,
+  // called from the orchestrator's catch block after its in-tick retry
+  // budget is exhausted. Generic 5xx uses weight=1; HTTP 555 (BB compute
+  // timeout) uses weight=3 so a single strike crosses the threshold —
+  // that failure class is persistent for the commit shape. Returns the
+  // post-increment count.
   incrementDiffStatsFailure(commitId: number, weight: number): Promise<number>;
 
-  // Oldest known commit (by authored_at ASC) for the repo, used as the
-  // seed sha for deepen-backfill's `include=<sha>` walk. Null when no
-  // commits have been ingested yet (cold mode hasn't run).
+  // Oldest known commit (authored_at ASC), the seed sha for
+  // deepen-backfill's `include=<sha>` walk. Null when no commits ingested.
   getOldestCommitSha(repositoryId: number): Promise<string | null>;
 
-  // Deepen-backfill queue pick: ORDER BY deepen_last_run_at NULLS FIRST so
-  // never-attempted repos go first, then round-robin across the rest by
-  // staleness. Returns null when every tracked repo has deepen_complete = true.
+  // Deepen-backfill queue pick: ORDER BY deepen_last_run_at NULLS FIRST
+  // (never-attempted first, then round-robin by staleness). Null when
+  // every repo has deepen_complete = true.
   pickRepoForDeepening(): Promise<DeepenCandidate | null>;
 
-  // Stamps deepen_last_run_at = now() without changing deepen_complete.
-  // Called even on no-op runs (e.g., budget gate fired mid-page) so the
-  // round-robin advances and we don't repeatedly hammer the same repo.
+  // Stamps deepen_last_run_at without changing deepen_complete. Called
+  // even on no-op runs so the round-robin advances.
   markDeepenAttempt(repositoryId: number): Promise<void>;
 
-  // Flips deepen_complete = true. Called once BB returns no `next` URL on
-  // the deepen pagination (we've reached the repo's first commit) or on
-  // an unrecoverable 404 against the seed sha (force-pushed history).
+  // Flips deepen_complete = true. Called once BB returns no `next` URL
+  // (reached the first commit) or on a 404 against the seed sha
+  // (force-pushed history).
   markDeepenComplete(repositoryId: number): Promise<void>;
 
-  // One-shot retroactive backfill of the `is_merge` column on already-
-  // ingested commits. Used by the admin backfill endpoint after walking
-  // BB's /commits and reading each commit's `parents.length`. Bulk
-  // UPDATE keyed by sha — rows whose sha isn't found are silently
-  // skipped (the caller's list may include not-yet-ingested commits if
-  // BB returned a page past our deepen boundary). Returns rows actually
-  // updated. Idempotent — re-running with the same input is a no-op.
+  // One-shot retroactive backfill of the `is_merge` column. Bulk UPDATE
+  // keyed by sha — shas not found are silently skipped (the caller's list
+  // may include not-yet-ingested commits past our deepen boundary).
+  // Returns updated rows. Idempotent.
   updateIsMergeBatch(
     repositoryId: number,
     entries: Array<{ sha: string; isMerge: boolean }>,
   ): Promise<{ updated: number }>;
 
-  // Retroactive is_merge backfill queue. Picks the next incomplete repo
-  // (`is_merge_backfill_complete = false`), round-robin by
-  // `is_merge_last_run_at ASC NULLS FIRST`. Returns the resume cursor
-  // alongside repo identity. Null when every tracked non-archived
-  // non-excluded repo is complete.
+  // is_merge backfill queue pick: next incomplete repo, round-robin by
+  // `is_merge_last_run_at ASC NULLS FIRST`, with the resume cursor. Null
+  // when every non-archived non-excluded repo is complete.
   pickRepoForIsMergeBackfill(): Promise<IsMergeBackfillCandidate | null>;
 
-  // Bumps `is_merge_last_run_at = now()` without touching cursor or
-  // complete flag. Mirrors `markDeepenAttempt` — called once per pick
-  // so the round-robin advances even when the tick is a no-op (e.g.,
-  // budget gate fires before any walking).
+  // Bumps `is_merge_last_run_at` without touching cursor or complete flag,
+  // so the round-robin advances even on a no-op tick.
   markIsMergeBackfillAttempt(repositoryId: number): Promise<void>;
 
-  // Advances `is_merge_backfill_cursor_sha` to the oldest sha we
-  // verified on this tick (the per-tick page cap fired and more
-  // history remains). Doesn't touch the complete flag.
+  // Advances `is_merge_backfill_cursor_sha` to the oldest sha verified on
+  // this tick (page cap fired, more history remains). Leaves complete alone.
   advanceIsMergeBackfillCursor(repositoryId: number, cursorSha: string): Promise<void>;
 
-  // Flips `is_merge_backfill_complete = true`. Called when the
-  // paginator exhausted without hitting the page cap (verified every
-  // commit BB has) or when the cursor sha 404's (force-pushed history
-  // — give up, mirrors deepen seedMissing).
+  // Flips `is_merge_backfill_complete = true`. Called when the paginator
+  // exhausted without hitting the page cap, or when the cursor sha 404's
+  // (force-pushed history — give up, mirrors deepen seedMissing).
   markIsMergeBackfillComplete(repositoryId: number): Promise<void>;
 
-  // Total anonymous commits across non-archived non-excluded repos.
-  // Used by the standalone anonymous-sweep runner's outer loop to
-  // decide when to exit (when the count is zero) and surfaces a
-  // single number the operator can sanity-check.
+  // Total anonymous commits across non-archived non-excluded repos. The
+  // anonymous-sweep runner exits when this hits zero.
   countAnonymousCommits(): Promise<number>;
 
-  // Anonymous-sweep queue pick: picks the next repo with at least
-  // one anonymous commit AND `anonymous_sweep_complete = false`,
-  // ordered by `anonymous_sweep_last_run_at ASC NULLS FIRST` so
-  // brand-new repos drain first, then round-robin by staleness. Same
-  // shape as `pickRepoForDeepening` / `pickRepoForIsMergeBackfill`.
-  // Returns null when every eligible repo is either complete or has
-  // zero anonymous commits.
+  // Anonymous-sweep queue pick: next repo with at least one anonymous
+  // commit AND `anonymous_sweep_complete = false`, round-robin by
+  // `anonymous_sweep_last_run_at ASC NULLS FIRST`. Null when every
+  // eligible repo is complete or has zero anonymous commits.
   pickRepoForAnonymousSweep(): Promise<AnonymousSweepCandidate | null>;
 
-  // Bumps `anonymous_sweep_last_run_at = now()` without changing
-  // `anonymous_sweep_complete`. Called once per pick so the
-  // round-robin advances even when the sweep is a no-op (e.g., BB
-  // rate-limited mid-walk). Mirrors `markDeepenAttempt`.
+  // Bumps `anonymous_sweep_last_run_at` without changing complete, so the
+  // round-robin advances even on a no-op (e.g. BB rate-limited mid-walk).
   markAnonymousSweepAttempt(repositoryId: number): Promise<void>;
 
-  // Flips `anonymous_sweep_complete = true`. Called when a sweep
-  // pass for the repo attributed zero rows (the residual is
-  // structurally anonymous — BB lacks a UUID or the email is
-  // unparseable) or when BB 404'd on the commits endpoint. Operator
-  // can manually UPDATE back to FALSE to re-arm.
+  // Flips `anonymous_sweep_complete = true`. Called when a sweep pass
+  // attributed zero rows (residual is structurally anonymous) or BB 404'd.
+  // Operator can UPDATE back to FALSE to re-arm.
   markAnonymousSweepComplete(repositoryId: number): Promise<void>;
 
-  // Bulk apply attribution + snapshot updates from the sweep pass.
-  // Each entry carries the resolved attribution data the sweep gathered
-  // from one BB `/commits` page intersected with our local anonymous
-  // rows. The UPDATE:
-  //   - `author_user_id` is overwritten ONLY when the row is still
-  //     anonymous (WHERE author_user_id IS NULL), so a concurrent
-  //     commit-sync that lands attribution first wins — race-safe.
-  //   - `author_email` and `author_display_name` use COALESCE so
-  //     pre-existing snapshot values are preserved (e.g. rows the
-  //     V1_16 forward sync already filled).
-  // Returns rows actually visited (some may have been raced away by
-  // concurrent sync) with a post-UPDATE `attributed` flag so the
-  // caller can scope the `commit_daily` recompute to only the rows
-  // whose `author_user_id` transitioned NULL → known.
+  // Bulk apply attribution + snapshot updates from a sweep pass.
+  // `author_user_id` is overwritten only where the row is still anonymous
+  // (WHERE author_user_id IS NULL) so a concurrent commit-sync that lands
+  // first wins — race-safe. Snapshot columns use COALESCE to preserve
+  // pre-existing values. Returns visited rows with a post-UPDATE
+  // `attributed` flag so the caller scopes the commit_daily recompute to
+  // rows that transitioned NULL → known.
   bulkUpdateAnonymousAttribution(
     entries: Array<{
       commitId: number;
@@ -405,38 +302,24 @@ export interface CommitStore {
   ): Promise<Array<{ id: number; repositoryId: number; authoredAt: Date; attributed: boolean }>>;
 
   // Reset the commit-sync cursor + deepen state to cold-mode defaults.
-  // Used by POST /repositories/:ws/:slug/include after a sync_excluded
-  // recovery so the next tick starts fresh — a stale or invalid
-  // last_seen_sha would just re-trip the history-rewritten exclusion.
-  // Clears: last_seen_sha → NULL, deepen_complete → false,
-  // is_merge_backfill_complete → false, is_merge_backfill_cursor_sha
-  // → NULL. Does NOT touch commits (history stays in the DB) or
-  // total_commits_synced (counter is monotonic / observational).
+  // Used after a sync_excluded recovery so the next tick starts fresh — a
+  // stale last_seen_sha would just re-trip the history-rewritten exclusion.
+  // Clears last_seen_sha, deepen_complete, is_merge_backfill_complete,
+  // is_merge_backfill_cursor_sha. Does NOT touch commits or
+  // total_commits_synced (monotonic / observational).
   resetSyncCursors(repositoryId: number): Promise<void>;
 
-  // Re-arm diff-stat backfill for a repo. Zeros the line counts on
-  // every commit, clears `diff_stats_synced_at`, **resets the
-  // per-commit `diff_stats_failure_count` to zero**, AND zeros the
-  // `commit_daily` aggregates for the repo so the dashboard shows
-  // clearly-wrong (zero) rather than subtly-wrong (mixed) during the
-  // drain. The next diff-stats backfill ticks re-fetch /diffstat with
-  // whatever filter is now configured in
-  // `repositories.diff_stats_exclude_patterns`, and the rollup hook
-  // refills `commit_daily` as commits drain.
+  // Re-arm diff-stat backfill: zeros line counts, clears
+  // `diff_stats_synced_at`, resets `diff_stats_failure_count` to zero, and
+  // zeros the `commit_daily` aggregates so the dashboard shows
+  // clearly-wrong (zero) rather than subtly-wrong (mixed) during the drain.
   //
-  // The failure-count reset is what makes the admin "reset" operation
-  // actually re-arm previously gave-up'd commits — otherwise the
-  // pickup queries' `failure_count < 3` predicate would still filter
-  // them out and the operator's reset would silently do nothing on
-  // those rows. If BB has since recovered on a heavy commit (rare but
-  // possible — BB-side caching artifact, GC'd parent restored, etc.),
-  // this gives them another shot. Commits that are still genuinely
-  // too heavy will fail again on the next attempt and re-cross the
-  // threshold; cost is one round of BB calls per stuck commit.
+  // The failure-count reset is what re-arms previously gave-up'd commits —
+  // otherwise the pickup's `failure_count < 3` predicate would still
+  // filter them out and the reset would silently no-op on those rows.
   //
-  // Single transaction so the dashboard never observes a partial
-  // state. Returns the count of commits whose stamp was cleared
-  // (i.e., re-queued for backfill).
+  // Single transaction so the dashboard never observes a partial state.
+  // Returns the count of commits re-queued for backfill.
   resetDiffStatsForRepo(repositoryId: number): Promise<{ resetCount: number }>;
 }
 
@@ -446,15 +329,13 @@ export interface DeepenCandidate {
   slug: string;
   fullName: string;
   // Seed sha for the deepen walk (oldest known commit). Null only when
-  // the repo has zero commits ingested — caller treats as
-  // "nothing to deepen yet; cold mode hasn't run".
+  // the repo has zero commits ingested (cold mode hasn't run).
   oldestSha: string | null;
-  // When the repo was first tracked by us (repositories.created_at).
-  // Anchors the empty-repo exclusion grace period: a freshly-added repo
-  // that's still empty on BB stays in active sync until this is older
-  // than the grace window, so a repo created moments before its first
-  // push isn't excluded in the gap. Optional because the explicit-repo
-  // admin path (forced deepen) doesn't carry it — see deepenOneRepo.
+  // repositories.created_at. Anchors the empty-repo exclusion grace
+  // period: a freshly-added repo still empty on BB stays in active sync
+  // until this is older than the grace window, so a repo created moments
+  // before its first push isn't excluded in the gap. Optional because the
+  // explicit-repo admin path (forced deepen) doesn't carry it.
   createdAt?: Date;
 }
 
@@ -470,16 +351,11 @@ export interface IsMergeBackfillCandidate {
   workspace: string;
   slug: string;
   fullName: string;
-  // Resume cursor: oldest sha previously verified by this backfill.
-  // NULL = cold (start from newest, no `include` filter on the walk).
-  // Set = `include=<cursorSha>` on the next walk, then skip the seed
-  // sha (we've already verified it).
+  // Resume cursor: oldest sha previously verified. NULL = cold (start
+  // newest, no `include`). Set = `include=<cursorSha>`, then skip the
+  // seed sha (already verified).
   cursorSha: string | null;
 }
-
-// ---------------------------------------------------------------------------
-// Drizzle-backed implementation
-// ---------------------------------------------------------------------------
 
 export function createDrizzleCommitStore(db: Database): CommitStore {
   return {
@@ -494,24 +370,15 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async upsertAuthorUsers(inputs) {
       if (inputs.length === 0) return new Map();
-      // INSERT … ON CONFLICT DO UPDATE with a no-op SET so the row is
-      // always returned via RETURNING (either the inserted row or the
-      // existing one). The "no-op" — SET bitbucket_uuid =
-      // EXCLUDED.bitbucket_uuid — is the canonical PG trick for
-      // achieving DO-NOTHING-but-still-RETURNING. Critically the SET
-      // touches NO mutable column: display_name, username, email, and
-      // is_workspace_member on an existing row are NEVER overwritten
-      // by this path. That keeps member-sync's TRUE intact when the
-      // same UUID is seen by both paths, preserves write-once email
-      // capture, and means a benign concurrent auto-create can't
-      // step on member-sync data.
+      // `SET bitbucket_uuid = EXCLUDED.bitbucket_uuid` is the PG trick for
+      // DO-NOTHING-but-still-RETURNING: it touches no mutable column, so
+      // display_name / username / email / is_workspace_member on an
+      // existing row are never overwritten — keeps member-sync's TRUE
+      // intact and preserves write-once email.
       //
-      // Dedupe by UUID before the SQL build — multiple commits in the
-      // same batch can carry the same author, and emitting duplicate
-      // VALUES rows for one uuid trips ON CONFLICT's "command cannot
-      // affect row a second time" rule. The Map preserves "first
-      // observed wins" within the batch, which is fine because all
-      // values for one uuid carry equivalent data anyway.
+      // Dedupe by UUID first: duplicate VALUES rows for one uuid trip ON
+      // CONFLICT's "command cannot affect row a second time" rule. All
+      // values for one uuid carry equivalent data, so first-wins is fine.
       const byUuid = new Map<string, { displayName: string; email: string }>();
       for (const e of inputs) {
         if (!byUuid.has(e.bitbucketUuid)) {
@@ -537,10 +404,8 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async listUsersMissingEmailWithLastCommit(limit) {
       // DISTINCT ON (author_user_id) picks the newest commit per user in
-      // one pass, backed by the `commits_author_authored_idx` index on
-      // (author_user_id, authored_at). Cheap even at hundreds of
-      // thousands of commits — the planner short-circuits per user as
-      // soon as it sees the first row.
+      // one pass, backed by commits_author_authored_idx — the planner
+      // short-circuits per user on the first row.
       const rows = await db.execute<{
         user_id: number;
         bitbucket_uuid: string;
@@ -573,13 +438,10 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async listAnonymousCommits({ workspace, slug, limit }) {
-      // ORDER BY authored_at DESC mirrors how an operator naturally
-      // reasons about backfill — newest anonymous commits first, so a
-      // partial run (hit the `limit`, hasMore=true) leaves the older
-      // tail for the next call rather than stranding fresh activity.
-      // INNER JOIN to repositories filters archived + sync_excluded in
-      // one round-trip and lets us pull repo identity for the BB
-      // lookup without a second query.
+      // ORDER BY authored_at DESC: a partial run (hit `limit`) leaves the
+      // older tail for the next call rather than stranding fresh activity.
+      // INNER JOIN to repositories filters archived + sync_excluded and
+      // pulls repo identity in one round-trip.
       const scopeBoth = workspace !== undefined && slug !== undefined;
       const rows = await db.execute<{
         commit_id: number;
@@ -619,14 +481,9 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async backfillAuthorSnapshotsFromUsers() {
-      // Single UPDATE FROM joining commits → users on author_user_id.
-      // COALESCE means each column is updated only if currently NULL —
-      // pre-existing snapshot values are preserved. The WHERE clause
-      // filters to rows where at least one of the two columns is NULL
-      // AND a fill is available (users.email IS NOT NULL for email;
-      // users.display_name is NOT NULL by schema). Postgres can handle
-      // hundreds of thousands of rows in one statement; no batching
-      // needed for our scale.
+      // COALESCE updates each column only if currently NULL. The WHERE
+      // filters to rows with at least one NULL column AND a fill available
+      // (users.email IS NOT NULL; users.display_name is NOT NULL by schema).
       const result = await db.execute(sql`
         UPDATE commits c
         SET
@@ -644,16 +501,12 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async reattributeAnonymousCommits(entries) {
       if (entries.length === 0) return [];
-      // Single bulk UPDATE FROM (VALUES …) — one round-trip regardless
-      // of batch size. Per-parameter casts mirror updateIsMergeBatch /
-      // setUserEmailsIfMissing: pg-node sends parameters untyped and
-      // Postgres infers VALUES column types from the first row only.
+      // Per-parameter casts: pg-node sends parameters untyped and Postgres
+      // infers VALUES column types from the first row only.
       // `commits.author_user_id IS NULL` is load-bearing — established
       // attribution is never overwritten, and a concurrent commit-sync
-      // landing the same row first wins (we no-op). The SET clause
-      // intentionally touches only author_user_id, so diff-stats
-      // columns and synced_at stay untouched (no /diffstat re-fetch
-      // ever required from this path).
+      // landing first wins. SET touches only author_user_id, so diff-stats
+      // columns stay untouched (no /diffstat re-fetch).
       const tuples = sql.join(
         entries.map((e) => sql`(${e.commitId}::int, ${e.userId}::int)`),
         sql`, `,
@@ -679,20 +532,14 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async setUserEmailsIfMissing(entries) {
       if (entries.length === 0) return;
-      // Dedupe by uuid before the SQL build — multiple commits in the same
-      // batch can carry the same author, and emitting duplicate VALUES
-      // rows for one uuid would be wasted work (the COALESCE still
-      // converges, just with redundant evaluations).
+      // Dedupe by uuid — duplicate VALUES rows for one uuid are wasted work.
       const byUuid = new Map<string, string>();
       for (const e of entries) {
         if (!byUuid.has(e.bitbucketUuid)) byUuid.set(e.bitbucketUuid, e.email);
       }
-      // Single UPDATE ... FROM (VALUES ...) — one round-trip regardless of
-      // batch size. Casts on each parameter are load-bearing for the same
-      // reason as updateIsMergeBatch: pg-node sends parameters untyped and
-      // Postgres infers VALUES column types from the first row only.
-      // `WHERE users.email IS NULL` enforces write-once; a non-NULL
-      // value already on the row blocks the update, no overwrite.
+      // Per-parameter casts: pg-node sends parameters untyped and Postgres
+      // infers VALUES column types from the first row only. `WHERE
+      // users.email IS NULL` enforces write-once.
       const tuples = sql.join(
         Array.from(byUuid, ([uuid, email]) => sql`(${uuid}::text, ${email}::text)`),
         sql`, `,
@@ -708,19 +555,13 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async insertCommits(input) {
       if (input.length === 0) return { inserted: 0, insertedRows: [], reattributedRows: [] };
-      // Single round-trip bulk upsert with reattribution. The DO UPDATE
-      // WHERE clause is the load-bearing bit: it ONLY fires when the
-      // stored row is anonymous and the incoming row carries a known
-      // author, so established attribution is preserved. `(xmax = 0)`
-      // in RETURNING distinguishes truly-inserted rows (xmax stays 0
-      // on a fresh tuple) from updated rows (xmax = current xid on the
-      // superseded tuple). Filtered-out rows (no conflict resolution
-      // taken) don't appear in RETURNING at all per PG semantics.
-      // Explicit per-column casts: pg-node sends parameters untyped
-      // and Postgres infers VALUES column types from the first row;
-      // without the casts an all-NULL `author_user_id` in row 0 would
-      // poison the whole column to text. Same gotcha as
-      // updateIsMergeBatch / setUserEmailsIfMissing.
+      // The DO UPDATE WHERE is load-bearing: it fires only when the stored
+      // row is anonymous and the incoming row carries a known author, so
+      // established attribution is preserved. `(xmax = 0)` distinguishes
+      // truly-inserted from updated rows; filtered-out rows don't appear
+      // in RETURNING. Per-column casts: pg-node sends parameters untyped
+      // and Postgres infers VALUES types from row 0, so an all-NULL
+      // author_user_id there would poison the column to text.
       const tuples = sql.join(
         input.map(
           (c) => sql`(
@@ -736,12 +577,9 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         ),
         sql`, `,
       );
-      // Snapshot columns (author_email, author_display_name) are
-      // captured at first ingest only — the ON CONFLICT path doesn't
-      // touch them. Re-syncs converge on author_user_id (NULL → known
-      // attribution) but leave the historical email/name intact so the
-      // value reflects what was pushed at the time, not whatever BB
-      // returns later.
+      // Snapshot columns are captured at first ingest only — the ON
+      // CONFLICT path leaves them intact so they reflect what was pushed
+      // at the time, not whatever BB returns later.
       const result = await db.execute<{
         id: number;
         sha: string;
@@ -804,8 +642,8 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async markSyncSuccess(repositoryId, update) {
       const now = new Date();
-      // Atomic increment via SQL expression — concurrent ticks (cron + manual)
-      // can both succeed without losing count to a read-modify-write race.
+      // Atomic SQL increment — concurrent cron + manual ticks both succeed
+      // without losing count to a read-modify-write race.
       const set = {
         lastSyncedAt: now,
         lastSyncStatus: 'success' as const,
@@ -846,8 +684,8 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async deleteCommitsByShas(repositoryId, shas) {
       if (shas.length === 0) return 0;
-      // RETURNING the shas (rather than relying on the driver's rowCount)
-      // keeps the count portable across pg client versions.
+      // RETURNING shas instead of relying on rowCount keeps the count
+      // portable across pg client versions.
       const deleted = await db
         .delete(commits)
         .where(and(eq(commits.repositoryId, repositoryId), inArray(commits.sha, shas)))
@@ -870,13 +708,9 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
           and(
             eq(commits.repositoryId, repositoryId),
             isNull(commits.diffStatsSyncedAt),
-            // Belt-and-suspenders alongside the IS NULL check above —
-            // once a commit crosses the failure threshold the
-            // orchestrator stamps it with zeros so it drops out of the
-            // IS NULL predicate naturally, but this guard means a
-            // future stamp-without-counter-increment (or a manual
-            // operator NULL of the stamp) still skips give-up'd
-            // commits until the counter is reset.
+            // Belt-and-suspenders alongside the IS NULL check: a manual
+            // operator un-stamp still skips give-up'd commits until the
+            // counter is reset.
             lt(commits.diffStatsFailureCount, DIFF_STATS_FAILURE_THRESHOLD),
           ),
         )
@@ -886,15 +720,10 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async listPendingDiffStatCommitsGlobal(limit) {
-      // JOIN to repositories filters out archived + sync_excluded
-      // repos in one round-trip and includes the per-repo identity
-      // the diff-stat walker needs. ORDER BY authored_at DESC across
-      // the whole pool gives the "freshness first" semantics: a
-      // repo's recent commits all jump ahead of any repo's old
-      // commits, regardless of which repo is "next" by some other
-      // ordering. Backed by commits_pending_diff_stats_idx (partial
-      // index on diff_stats_synced_at IS NULL) so the scan stays
-      // sub-millisecond even at hundreds of thousands of commits.
+      // ORDER BY authored_at DESC across the whole pool gives
+      // "freshness first": a repo's recent commits jump ahead of any
+      // repo's old commits. Backed by the partial index
+      // commits_pending_diff_stats_idx (diff_stats_synced_at IS NULL).
       const rows = await db
         .select({
           id: commits.id,
@@ -911,11 +740,7 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
         .where(
           and(
             isNull(commits.diffStatsSyncedAt),
-            // Same belt-and-suspenders as listPendingDiffStatCommits —
-            // commits that crossed the failure threshold are stamped
-            // with zeros + NOW() so the IS NULL check above already
-            // skips them, but the explicit guard means manual operator
-            // un-stamps still skip until the counter is reset.
+            // Belt-and-suspenders — see listPendingDiffStatCommits.
             lt(commits.diffStatsFailureCount, DIFF_STATS_FAILURE_THRESHOLD),
             eq(repositories.archived, false),
             eq(repositories.syncExcluded, false),
@@ -939,9 +764,8 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async incrementDiffStatsFailure(commitId, weight) {
-      // Single UPDATE ... RETURNING — one round-trip, atomic, returns the
-      // post-increment count so the caller can branch on threshold
-      // crossing without a follow-up SELECT.
+      // RETURNING the post-increment count lets the caller branch on the
+      // threshold without a follow-up SELECT.
       const result = await db.execute<{ diff_stats_failure_count: number }>(sql`
         UPDATE commits
         SET diff_stats_failure_count = diff_stats_failure_count + ${weight}::int
@@ -962,11 +786,9 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async pickRepoForDeepening() {
-      // Single query that joins sync_state to repositories, filters to
-      // incomplete repos, orders by deepen_last_run_at NULLS FIRST (so
-      // brand-new entries jump the queue once, then round-robin by
-      // staleness), and pulls the oldest commit sha in the same shot via
-      // a correlated subquery. One DB roundtrip per tick.
+      // ORDER BY deepen_last_run_at NULLS FIRST (brand-new entries jump
+      // the queue once, then round-robin by staleness). Oldest commit sha
+      // pulled in the same shot via a correlated subquery.
       const rows = await db.execute<{
         repository_id: number;
         workspace: string;
@@ -1017,11 +839,8 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async pickRepoForIsMergeBackfill() {
-      // Mirrors pickRepoForDeepening shape: one round-trip, JOIN
-      // repositories so the orchestrator gets workspace/slug for the BB
-      // walk, ORDER BY last_run_at NULLS FIRST for round-robin. Filters
-      // archived + sync_excluded so retired/broken repos don't keep
-      // surfacing.
+      // Mirrors pickRepoForDeepening: round-robin by last_run_at NULLS
+      // FIRST, filters archived + sync_excluded.
       const rows = await db.execute<{
         repository_id: number;
         workspace: string;
@@ -1079,9 +898,8 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async countAnonymousCommits() {
-      // Joining repositories filters archived + sync_excluded so the
-      // count matches what the picker would actually walk. Operator-
-      // facing single number for "how much work remains".
+      // Filters archived + sync_excluded so the count matches what the
+      // picker would actually walk.
       const rows = await db.execute<{ total: number }>(sql`
         SELECT count(*)::int AS total
         FROM commits c
@@ -1094,13 +912,9 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async pickRepoForAnonymousSweep() {
-      // Single round-trip: filter to repos that have at least one
-      // anonymous commit AND haven't been marked complete, then
-      // round-robin by `anonymous_sweep_last_run_at`. The EXISTS
-      // subquery short-circuits per repo as soon as it finds one
-      // anonymous row — much cheaper than `count(*) > 0` at our scale
-      // (Postgres planner uses commits_author_authored_idx via the
-      // author_user_id IS NULL predicate).
+      // EXISTS short-circuits per repo on the first anonymous row — much
+      // cheaper than `count(*) > 0`, and uses commits_author_authored_idx
+      // via the author_user_id IS NULL predicate.
       const rows = await db.execute<{
         repository_id: number;
         workspace: string;
@@ -1153,26 +967,19 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async bulkUpdateAnonymousAttribution(entries) {
       if (entries.length === 0) return [];
-      // Single UPDATE FROM (VALUES …) — one round-trip regardless of
-      // batch size. Per-column casts mirror the existing bulk paths
-      // (setUserEmailsIfMissing, updateIsMergeBatch); pg-node sends
-      // parameters untyped and Postgres infers VALUES column types
-      // from the first row, so an all-NULL column on the first row
-      // would otherwise poison the inferred type.
+      // Per-column casts: pg-node sends parameters untyped and Postgres
+      // infers VALUES types from row 0, so an all-NULL first row would
+      // poison the inferred type.
       //
       // WHERE commits.author_user_id IS NULL is load-bearing — a
-      // concurrent commit-sync landing attribution first wins, and we
-      // never overwrite an established attribution. The COALESCE on
-      // snapshot columns preserves any pre-existing value (e.g. rows
-      // the V1_16 forward sync already filled).
+      // concurrent commit-sync landing attribution first wins; never
+      // overwrites an established attribution. COALESCE on snapshot
+      // columns preserves pre-existing values.
       //
-      // The RETURNING clause reads the POST-update row, so
-      // `commits.author_user_id IS NOT NULL` reflects "did this row
-      // transition NULL → known on this call". Snapshot-only changes
-      // (author_user_id still NULL but email/name newly populated)
-      // come back with attributed=false; the caller skips them for
-      // commit_daily recompute (snapshot columns don't affect the
-      // rollup).
+      // RETURNING reads the POST-update row, so `author_user_id IS NOT
+      // NULL` means "transitioned NULL → known on this call".
+      // Snapshot-only changes come back attributed=false; the caller
+      // skips them for commit_daily recompute.
       const tuples = sql.join(
         entries.map(
           (e) => sql`(
@@ -1227,13 +1034,11 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
     },
 
     async resetDiffStatsForRepo(repositoryId) {
-      // Run both UPDATEs in one transaction so the dashboard never sees
-      // commits.* cleared while commit_daily still has the old (inflated)
-      // sums — or vice versa. The backfill tick repopulates upward as
-      // it drains. diffStatsFailureCount is also zeroed so previously
-      // gave-up'd commits re-enter the pickup queue — without that the
-      // `failure_count < 3` predicate would silently filter them out
-      // and the operator's reset would be a no-op for those rows.
+      // One transaction so the dashboard never sees commits.* cleared
+      // while commit_daily still holds the old sums (or vice versa).
+      // diffStatsFailureCount is zeroed so gave-up'd commits re-enter the
+      // pickup — otherwise `failure_count < 3` filters them out and the
+      // reset no-ops on those rows.
       return await db.transaction(async (tx) => {
         const commitResult = await tx
           .update(commits)
@@ -1249,14 +1054,10 @@ export function createDrizzleCommitStore(db: Database): CommitStore {
 
     async updateIsMergeBatch(repositoryId, entries) {
       if (entries.length === 0) return { updated: 0 };
-      // Single UPDATE ... FROM (VALUES ...) — one round-trip for any
-      // batch size. Drizzle's `sql` template lets us inline the
-      // tuples while still parameterizing every value. Explicit casts
-      // on each parameter are required: pg-node sends parameters
-      // untyped, and Postgres infers VALUES column types from the
-      // first row — without the casts, booleans arrive as text and
-      // the `commits.is_merge = data.is_merge` comparison fails with
-      // "operator does not exist: boolean = text".
+      // Per-parameter casts are required: pg-node sends parameters untyped
+      // and Postgres infers VALUES types from row 0 — without the casts
+      // booleans arrive as text and the `is_merge = data.is_merge`
+      // comparison fails with "operator does not exist: boolean = text".
       const tuples = sql.join(
         entries.map((e) => sql`(${e.sha}::text, ${e.isMerge}::boolean)`),
         sql`, `,

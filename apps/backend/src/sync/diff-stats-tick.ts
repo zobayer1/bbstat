@@ -1,33 +1,16 @@
 // Diff-stats backfill tick — global newest-first pickup.
 //
 // Drains pending diff-stat work (`commits.diff_stats_synced_at IS NULL`)
-// across every non-archived non-excluded repo as a single ordered queue.
-// Replaces the previous per-repo iteration: a repo with 5000 pending
-// commits no longer monopolizes a tick by burning its 50-per-tick cap
-// before any other repo gets attention. Recent commits everywhere
-// land first.
+// across every non-archived non-excluded repo as one ordered queue, so a
+// repo with 5000 pending commits can't monopolize a tick. Recent commits
+// everywhere land first.
 //
-// Priority placement in `runCommitsSync`:
+// Runs last in runCommitsSync (commit → deepen → is-merge → diff-stats), so
+// it yields the shared hourly budget to the earlier steps.
 //
-//   commit tick → deepen tick → IS-MERGE BACKFILL → diff-stats backfill
-//
-// All four share the hourly BB-call budget. Running last, this step
-// yields to commit-list ingest, history deepening, and merge-flag
-// correction.
-//
-// Failure modes:
-//   * BitbucketRateLimitError — tick-wide stop. The remaining pending
-//     pool waits for the next cron firing (5 min) by which time BB's
-//     rolling window has rotated and the pacer has decayed.
-//   * BB 4xx / 5xx for a single commit — failed++, continue. The row
-//     stays `diff_stats_synced_at IS NULL` and gets retried next tick.
-//   * Adaptive pacer saturated — pre-emptive yield via RateLimitError,
-//     same recovery path as above.
-//
-// Rollups: as commits land their diff stats, we accumulate a
-// per-repo day-range map; at end of tick we fire one
-// `commit_daily` recompute per affected repo. Same pattern as the
-// commit-sync rollup hook.
+// Failure modes: BitbucketRateLimitError and a saturated pacer are tick-wide
+// stops — the pool waits for the next cron firing. A single-commit 4xx/5xx
+// is failed++, continue; the row stays pending and retries next tick.
 
 import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
@@ -37,16 +20,11 @@ import type { RollupStore } from '../dashboard/rollup-store.js';
 import type { UserSummaryCache } from '../dashboard/user-summary-cache.js';
 
 export interface DiffStatsBackfillTickOptions {
-  // Maximum commits processed per tick — total across all repos, not
-  // per-repo. Caps burst size and per-tick wall-clock (~maxCommits ×
-  // pacing). Default 100 in `config.ts`. Long-term throughput is
-  // budget-limited (DIFF_STATS_BACKFILL_BUDGET_THRESHOLD yields the
-  // tick when the rolling 1000/hr cap is approached), so the cap
-  // mostly controls burst size, not steady-state drain rate.
+  // Max commits per tick, total across all repos. Caps burst size; steady
+  // throughput is budget-limited, not capped by this.
   maxCommitsPerTick: number;
-  // Headroom required under BITBUCKET_HOURLY_CALL_BUDGET. When
-  // `getBudgetRemaining()` falls below this the loop bails and the
-  // remaining pool waits for the next tick.
+  // Headroom required under the hourly budget. Below it the loop bails and
+  // the pool waits for the next tick.
   budgetThreshold: number;
 }
 
@@ -58,10 +36,8 @@ export interface DiffStatsBackfillTickDeps {
   userSummaryCache?: UserSummaryCache;
 }
 
-// Per-repo summary of work done this tick. Only repos that had at
-// least one commit processed appear — drained-clean repos are
-// silently absent. Surfaced for log line clarity and for the rollup
-// recompute step which fires once per non-empty entry.
+// Per-repo summary of work this tick. Only repos with at least one commit
+// processed appear. Drives the rollup recompute (one per non-empty entry).
 export interface PerRepoDiffStatsResult {
   repositoryId: number;
   fullName: string;
@@ -71,18 +47,12 @@ export interface PerRepoDiffStatsResult {
 }
 
 export interface DiffStatsBackfillTickResult {
-  // Total commits whose diff stats landed this tick.
   totalUpdated: number;
-  // Per-commit failures that did NOT abort the tick (transient
-  // 4xx/5xx, malformed responses). Per-row remains pending.
+  // Per-commit failures that did NOT abort the tick; those rows stay pending.
   totalFailed: number;
-  // Per-repo breakdown of work done. Empty when the tick had nothing
-  // to do (queue drained) — also empty when the very first call
-  // saturated the pacer.
   perRepo: PerRepoDiffStatsResult[];
-  // null = drained cleanly. 'budget' = BB-call budget gate fired.
-  // 'rate-limited' = BB pushed back hard (retry budget exhausted OR
-  // adaptive pacer saturated).
+  // null = drained cleanly. 'budget' = budget gate. 'rate-limited' = retry
+  // budget exhausted or pacer saturated.
   stopReason: 'budget' | 'rate-limited' | null;
   budgetRemainingAtEnd: number;
 }
@@ -91,12 +61,8 @@ export async function runDiffStatsBackfillTick(
   deps: DiffStatsBackfillTickDeps,
   opts: DiffStatsBackfillTickOptions,
 ): Promise<DiffStatsBackfillTickResult> {
-  // Single round-trip global pickup. Returns up to `maxCommitsPerTick`
-  // newest-authored pending commits with their repo identity attached.
   const queue = await deps.store.listPendingDiffStatCommitsGlobal(opts.maxCommitsPerTick);
   if (queue.length === 0) {
-    // Matches the deepen / is-merge ticks' "queue drained" log so an
-    // operator scanning dev-sync output can confirm the step ran.
     deps.logger?.info?.(
       { budgetRemaining: deps.client.getBudgetRemaining() },
       'diff-stats backfill: queue drained — nothing pending across tracked repos',
@@ -110,18 +76,15 @@ export async function runDiffStatsBackfillTick(
     };
   }
 
-  // One-line start signal so the operator knows the tick is running
-  // and has a rough ETA — without it, dev-sync goes quiet for tens of
-  // seconds (50 commits × 400ms pacing floor) while /diffstat
-  // fetches stream through.
+  // Start signal — without it dev-sync goes quiet for tens of seconds
+  // (50 commits × 400ms pacing floor) while /diffstat fetches stream through.
   deps.logger?.info?.(
     { queueSize: queue.length, budgetRemaining: deps.client.getBudgetRemaining() },
     'diff-stats backfill: starting',
   );
 
-  // Per-repo accumulators for the rollup step. Keyed by repositoryId
-  // so a commit that arrives later in the queue for an earlier-seen
-  // repo extends the existing day range correctly.
+  // Per-repo rollup accumulators, keyed by repositoryId so a later commit
+  // for an earlier-seen repo extends the existing day range.
   const perRepo = new Map<number, PerRepoDiffStatsResult & { workspace: string; slug: string }>();
   let totalUpdated = 0;
   let totalFailed = 0;
@@ -183,8 +146,7 @@ export async function runDiffStatsBackfillTick(
       }
     } catch (err) {
       if (err instanceof BitbucketRateLimitError) {
-        // In-request retry budget exhausted. Yield the tick — same
-        // recovery path as the pacer-saturated case.
+        // Retry budget exhausted — yield the tick (same path as pacer-saturated).
         stopReason = 'rate-limited';
         deps.logger?.warn?.(
           {
@@ -201,21 +163,17 @@ export async function runDiffStatsBackfillTick(
       }
       bucket.failed++;
       totalFailed++;
-      // Increment the commit's failure budget. HTTP 555 ("BB compute
-      // timeout on this commit's diff") is permanent for the commit
-      // shape — weight 3 short-circuits the threshold on a single
-      // strike. Everything else (generic 5xx, network blips) gets
-      // weight 1 so 3 cross-tick failures are needed before we give up;
-      // gives transient BB hiccups a chance to recover.
+      // HTTP 555 (BB compute timeout) is permanent for the commit shape —
+      // weight 3 crosses the threshold on a single strike. Everything else
+      // gets weight 1 (3 cross-tick failures before giving up).
       const is555 = err instanceof BitbucketApiError && err.status === 555;
       const weight = is555 ? DIFF_STATS_FAILURE_THRESHOLD : 1;
       const newCount = await deps.store.incrementDiffStatsFailure(commit.id, weight);
       if (newCount >= DIFF_STATS_FAILURE_THRESHOLD) {
-        // Stamp with zeros so the commit drops out of the pickup query
-        // forever — same shape as a genuinely-zero-diff commit but the
-        // surviving failure_count discriminates the two for downstream
-        // readers (activity feed renders an exclamation icon when
-        // count >= threshold).
+        // Stamp with zeros so it drops out of the pickup — same shape as a
+        // genuinely-zero-diff commit, but the surviving failure_count lets
+        // readers tell them apart (activity feed shows an exclamation icon
+        // when count >= threshold).
         await deps.store.updateCommitDiffStats(commit.id, { additions: 0, deletions: 0, filesChanged: 0 });
         deps.logger?.warn?.(
           {
@@ -246,11 +204,9 @@ export async function runDiffStatsBackfillTick(
     perRepo.set(commit.repositoryId, bucket);
   }
 
-  // Rollup recompute per affected repo. Each non-null range scopes the
-  // commit_daily refresh; user-summary cache entries for affected
-  // users are DEL'd so the next read repopulates from fresh data.
-  // Failures here are dashboard-freshness blips, not data-integrity
-  // issues — log and continue.
+  // Rollup recompute per affected repo, then invalidate affected
+  // user-summary cache entries. Failures here are freshness blips, not
+  // data-integrity issues — log and continue.
   if (deps.rollupStore !== undefined) {
     for (const bucket of perRepo.values()) {
       if (bucket.range === null) continue;

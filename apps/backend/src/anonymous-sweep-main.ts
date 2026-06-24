@@ -1,23 +1,8 @@
-// Entry point for the standalone anonymous-commit sweep runner.
-// Invoked by `make dev-resync` (which runs `pnpm run dev:resync` in
-// apps/backend). Boots the same set of dependencies as the main sync
-// runner (`src/sync/index.ts`) but runs the one-shot
-// `runAnonymousSweep` loop instead of scheduling cron jobs.
-//
-// Independent of the main sync — the operator can leave dev-sync off
-// while draining the anonymous backlog, then resume dev-sync once the
-// runner exits. The runner exits cleanly when either:
-//   - every anonymous commit got attributed (count = 0), OR
-//   - every repo with remaining anonymous commits has been marked
-//     complete (the residual is structurally anonymous; manual
-//     investigation required).
-//
-// Future use: the "dev-resync" framing can extend to other targeted
-// re-sync operations (e.g. flipping back the anonymous_sweep_complete
-// flag and re-running). The runner's own loop is generic enough that
-// only the per-repo step (`sweepOneRepo`) varies; keeping it isolated
-// here means future re-sync flavors can compose without touching
-// dev-sync's cron orchestration.
+// Entry point for the standalone anonymous-commit sweep runner (`make
+// dev-resync`). One-shot `runAnonymousSweep` loop instead of cron jobs;
+// independent of the main sync. Exits cleanly when every anonymous commit
+// got attributed (count = 0) or every repo with remaining anonymous commits
+// is marked complete (the residual is structurally anonymous).
 
 import { loadConfig } from './config.js';
 import { createLogger } from './lib/logger.js';

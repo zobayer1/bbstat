@@ -1,11 +1,8 @@
-// Heroicons-outline glyph `d` paths, shared so the same shapes back both the
-// Dashboard stat cards (StatCard3D `glyph-path`) and the Breadcrumb section
-// icons — keeping the visual language identical across the two surfaces
-// without an icon-library dependency. Render inside a 24×24 viewBox with
-// `fill="none" stroke="currentColor"`.
+// Heroicons-outline glyph `d` paths, shared so Dashboard stat cards and
+// Breadcrumb section icons stay visually identical without an icon-library
+// dependency. Render in a 24×24 viewBox, `fill="none" stroke="currentColor"`.
 //
-// Section ↔ glyph mapping used by the dashboard cards (and mirrored in
-// breadcrumbs): Repositories → folder, Projects → rectangleStack,
+// Section ↔ glyph: Repositories → folder, Projects → rectangleStack,
 // Members/Contributors → users, Commits → bolt.
 export const GLYPHS = {
   folder:

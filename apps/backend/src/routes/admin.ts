@@ -1,13 +1,8 @@
 // Admin endpoints — manual sync triggers and curated-repo management.
 //
-// No auth here intentionally. Per CLAUDE.md "Authentication", the dashboard
-// is open within the deployed environment by design (drives intra-org
-// transparency). When BitBucket OAuth + RBAC lands, this is the seam to gate
-// on an admin role — wrap the route handlers with a preHandler that checks
-// `request.session.user.role === 'admin'` (or whatever shape we settle on).
-//
-// Read-only Bitbucket scopes provide a backstop: even a malicious request
-// here can't write to BitBucket through us.
+// No auth by design (CLAUDE.md "Authentication"). When BB OAuth + RBAC lands,
+// this is the seam: wrap handlers with a preHandler checking the admin role.
+// Read-only Bitbucket scopes are a backstop — nothing here can write to BB.
 
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
@@ -68,11 +63,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     return runCommitsSync(opts.syncDeps, 'manual');
   });
 
-  // Manual trigger for the empty-repo revival sweep — the same step the
-  // commit-sync tick runs, on demand. Re-probes empty-on-bitbucket excluded
-  // (non-archived) repos and clears the exclusion for any that now have
-  // commits, so an operator who knows a repo just got its first push doesn't
-  // have to wait for the cron. Returns { checked, revived, stoppedReason }.
+  // Re-probes empty-on-bitbucket excluded (non-archived) repos and clears the
+  // exclusion for any that now have commits. Same step the commit-sync tick runs.
   app.post('/sync/revive-empty', async () => {
     return runEmptyRevivalTick(
       {
@@ -86,12 +78,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     );
   });
 
-  // Workspace-repo discovery sweep — preview or apply on demand. Walks
-  // GET /repositories/{workspace} by updated_on and tracks untracked repos
-  // (forks of external repos excluded). DRY-RUN by default (lists what it
-  // WOULD add, without inserting or advancing the Redis cursor); pass
-  // `?dryRun=false` to apply. Works regardless of REPO_DISCOVERY_ENABLED, so
-  // an operator can preview before turning on the cron sweep.
+  // Workspace-repo discovery sweep. DRY-RUN by default (lists what it WOULD add
+  // without inserting or advancing the Redis cursor); `?dryRun=false` applies.
+  // Works regardless of REPO_DISCOVERY_ENABLED, so an operator can preview first.
   app.post<{ Querystring: { dryRun?: string } }>('/sync/discover-repos', async (request, reply) => {
     if (opts.syncDeps.cache === undefined) {
       return reply.code(503).send({ error: 'cache_not_wired' });
@@ -114,13 +103,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     return runPullRequestsSync(opts.syncDeps, 'manual');
   });
 
-  // Manual trigger for the ShipShow Score rollup (docs/scoring.md
-  // phase 3 + Phase 5). Runs both passes — per-alias `user_score` and
-  // per-person `person_score`. The sync runner already fires this at
-  // the end of every commits-sync tick; this endpoint exists for
-  // backfills after threshold tuning, for the post-deploy verification
-  // step, and for the dev smoke loop. Returns `{ user, person }`
-  // with timings + row counts for each pass.
+  // ShipShow Score rollup (docs/scoring.md). Runs both passes — per-alias
+  // `user_score` and per-person `person_score`. Already fired at the end of
+  // every commits-sync tick; this endpoint is for backfills after threshold tuning.
   app.post('/scores/recompute', async (_request, reply) => {
     if (opts.syncDeps.recomputeAllScores === undefined) {
       return reply.code(503).send({ error: 'score_rollup_not_wired' });
@@ -128,10 +113,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     return opts.syncDeps.recomputeAllScores();
   });
 
-  // Force a fresh delta pull for a single tracked repo. Useful for backfills,
-  // for re-running after fixing a sync bug, and as the manual smoke test for
-  // commit ingest in dev. Idempotent — duplicate shas are deduped by the
-  // commits_sha_repo_unique constraint.
+  // Force a fresh delta pull for a single tracked repo. Idempotent —
+  // duplicate shas are deduped by the commits_sha_repo_unique constraint.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/sync/repositories/:workspace/:slug/commits',
     async (request, reply) => {
@@ -177,8 +160,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         fullName: row.fullName,
         diffStatsExcludePatterns: row.diffStatsExcludePatterns,
       };
-      // The tick options carry concurrency/budget knobs that don't apply to
-      // a single-repo run; strip to just the per-repo subset.
+      // Strip tick-level concurrency/budget knobs to the per-repo subset.
       const prRepoOpts: PrSyncOptions = {
         ...(opts.syncDeps.prTickOptions?.firstRunMaxPages !== undefined
           ? { firstRunMaxPages: opts.syncDeps.prTickOptions.firstRunMaxPages }
@@ -196,11 +178,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Manual deepen trigger for one repo. Useful when an operator wants to
-  // force an immediate page of historical backfill without waiting for the
-  // commit cron to round-robin to that repo. Body / params are ignored
-  // beyond the URL — the deepen worker picks its own next page based on
-  // `commits.authored_at ASC` for the given repo.
+  // Force one immediate page of historical backfill for a repo. The deepen
+  // worker picks its own next page based on `commits.authored_at ASC`.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/sync/repositories/:workspace/:slug/deepen',
     async (request, reply) => {
@@ -210,9 +189,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       if (row === null) {
         return reply.code(404).send({ error: 'not_tracked', fullName });
       }
-      // Manual triggers don't bypass the budget gate — easier reasoning,
-      // no surprise burn. (`runDeepenTick` checks before each iteration;
-      // for one-shot manual runs the budget check lives inline here.)
+      // Manual triggers don't bypass the budget gate — checked inline here
+      // (the tick path checks before each iteration).
       const deepenOptions = opts.syncDeps.deepenOptions ?? { maxPages: 5, budgetThreshold: 100 };
       if (opts.syncDeps.client.getBudgetRemaining() < deepenOptions.budgetThreshold) {
         return reply.code(503).send({
@@ -253,10 +231,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     return reply.code(200).send(result);
   });
 
-  // Soft-retire a tracked repo. Historical data stays (commits,
-  // sync_state, etc.); the row is excluded from `listTrackedRepositories`
-  // so commit / deepen / diff-stats ticks skip it. Idempotent — POSTing
-  // archive on an already-archived repo still returns 200 with the row.
+  // Soft-retire: historical data stays; the row drops out of
+  // `listTrackedRepositories` so sync ticks skip it. Idempotent.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/archive',
     async (request, reply) => {
@@ -269,8 +245,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Reverse of archive. Idempotent — POSTing unarchive on an already-
-  // active repo still returns 200.
+  // Reverse of archive. Idempotent.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/unarchive',
     async (request, reply) => {
@@ -283,17 +258,11 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Recover from an auto-trip exclusion. Clears `sync_excluded` +
-  // `sync_exclude_reason`, AND resets the commit-sync cursors to
-  // cold-mode defaults so the next tick starts fresh. The cursor
-  // reset is the load-bearing bit: when the row was excluded for
-  // `history-rewritten`, the stored `last_seen_sha` is invalid and
-  // a delta walk would just re-trip the same detection. Idempotent
-  // on a non-excluded repo (still returns 200).
-  //
-  // For `empty-on-bitbucket` rows, the cursor reset also flips
-  // `deepen_complete = false` so the deepen tick re-checks once commits
-  // eventually appear.
+  // Recover from an auto-trip exclusion. Clears the exclusion AND resets
+  // commit-sync cursors to cold-mode defaults — the load-bearing bit: for a
+  // `history-rewritten` row the stored `last_seen_sha` is invalid and a delta
+  // walk would just re-trip detection. For `empty-on-bitbucket` rows the reset
+  // also flips `deepen_complete = false`. Idempotent.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/include',
     async (request, reply) => {
@@ -317,13 +286,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Rename. Operator hands us the new workspace/slug; we re-fetch BB
-  // to confirm the bitbucket_uuid still matches our row (i.e., this is
-  // the SAME repo just renamed, not a different repo at the new path).
-  // UUID mismatch is fatal — operator's input pointed at the wrong
-  // repo and merging the histories would silently corrupt data. On
-  // success: workspace/slug/full_name/project update, sync_excluded
-  // clears, cursors reset. Caller can re-sync immediately.
+  // Rename. Re-fetches BB to confirm the bitbucket_uuid still matches our row
+  // (same repo, just renamed). UUID mismatch is fatal — merging two repos'
+  // histories would silently corrupt data. On success: ws/slug/full_name/project
+  // update, exclusion clears, cursors reset.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/rename',
     async (request, reply) => {
@@ -359,8 +325,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         });
       }
 
-      // Capture before the mutating update — some store impls return
-      // a live reference whose `fullName` is rewritten by the rename.
+      // Capture before the mutating update — some store impls return a
+      // live reference whose `fullName` the rename rewrites in place.
       const previousFullName = row.fullName;
       const previousReason = row.syncExcludeReason;
       const wasExcluded = row.syncExcluded;
@@ -391,18 +357,12 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // History-rewrite reconcile. Surgical recovery for a repo auto-excluded
-  // with reason 'history-rewritten' (a force-push rewrote the commit our
-  // cursor pointed at). Unlike `include` — which nulls the cursor and lets
-  // the next tick cold-re-walk the WHOLE repo — this diffs BB's head against
-  // our recent history, deletes only the orphaned (rewritten-away) commits,
-  // re-anchors the cursor to the common ancestor, and re-runs a delta sync
-  // that ingests just the new commits. Minimizes BB API calls; mechanics
-  // and the orphan-diff algorithm live in src/sync/reconcile.ts.
-  //
-  // Defaults to DRY-RUN (returns the plan without mutating); pass
-  // `?dryRun=false` to apply the deletion + re-sync. Scoped to the
-  // history-rewritten state only — 409 otherwise.
+  // Surgical recovery for a repo auto-excluded 'history-rewritten' (force-push
+  // rewrote the cursor commit). Unlike `include` (cold re-walks the WHOLE repo),
+  // this diffs BB's head against our recent history, deletes only orphaned
+  // commits, re-anchors the cursor to the common ancestor, and delta-syncs the
+  // rest — minimizing BB calls. Algorithm lives in src/sync/reconcile.ts.
+  // DRY-RUN by default; `?dryRun=false` applies. 409 unless history-rewritten.
   app.post<{ Params: { workspace: string; slug: string }; Querystring: { dryRun?: string } }>(
     '/repositories/:workspace/:slug/reconcile',
     async (request, reply) => {
@@ -418,8 +378,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
           syncExcludeReason: row.syncExcludeReason,
         });
       }
-      // Mutate only on an explicit opt-out of dry-run, so an accidental
-      // call previews rather than deletes.
+      // Mutate only on explicit dry-run opt-out, so an accidental call previews.
       const dryRun = request.query.dryRun !== 'false' && request.query.dryRun !== '0';
       const handle: RepositoryHandle = {
         repositoryId: row.id,
@@ -457,8 +416,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
   );
 
   // Hard delete. Cascades via FKs to commits, sync_state, branches,
-  // pull_requests. Use when soft-retire (archive) is insufficient and
-  // the row is truly dead. Idempotent on a missing row (404 → no-op).
+  // pull_requests. Idempotent on a missing row (404 → no-op).
   app.delete<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug',
     async (request, reply) => {
@@ -478,20 +436,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // One-shot retroactive backfill of `is_merge` on already-ingested
-  // commits. The column was added in migration 0006 with DEFAULT false,
-  // so rows that pre-date the migration are stuck at false even if BB
-  // reports them as merges. This endpoint walks /commits paginated for
-  // the given repo, reads `parents.length > 1` per row, and bulk-UPDATEs
-  // is_merge by sha. Doesn't touch any other column — additions /
-  // deletions / files_changed / authored_at / message stay untouched.
-  // Idempotent.
-  //
-  // Cost: ~1 BB call per 100 commits in the repo's history (e.g., 38
-  // calls for a 3,700-commit repo). Operator-triggered; not on any
-  // cron, not visible from the UI. New commits ingested after the
-  // migration are flagged correctly at insert time so this is strictly
-  // a historical-cleanup tool.
+  // One-shot retroactive `is_merge` backfill for commits ingested before
+  // migration 0006 (DEFAULT false). Walks /commits, reads parents.length > 1,
+  // bulk-UPDATEs is_merge by sha; touches no other column. Idempotent.
+  // Cost: ~1 BB call per 100 commits of history.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/backfill/is_merge',
     async (request, reply) => {
@@ -504,9 +452,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       let pages = 0;
       for await (const commit of paginateCommits(opts.syncDeps.client, row.workspace, row.slug)) {
         entries.push({ sha: commit.hash, isMerge: commit.parents.length > 1 });
-        // Pagination is internal to paginateCommits; we track pages by
-        // dividing the entry count for the log line, since the iterator
-        // doesn't surface page boundaries.
+        // Iterator doesn't surface page boundaries; derive pages for the log line.
         if (entries.length % 100 === 0) pages = Math.ceil(entries.length / 100);
       }
       pages = Math.ceil(entries.length / 100);
@@ -517,9 +463,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Read the per-repo diff-stat exclude pattern list. Cheap — single
-  // SELECT. Useful for inspecting what the dashboard's additions /
-  // deletions / files_changed columns are currently filtering.
+  // Read the per-repo diff-stat exclude pattern list.
   app.get<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/diff-stats/exclusions',
     async (request, reply) => {
@@ -531,11 +475,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Replace (not merge) the diff-stat exclude pattern list. Each entry
-  // is validated as a parseable picomatch glob before persisting. Does
-  // NOT touch the commit data — the operator runs POST .../reset
-  // separately when they're confident in the new filter. This lets
-  // them iterate on patterns cheaply.
+  // Replace (not merge) the diff-stat exclude pattern list; entries validated
+  // as parseable picomatch globs. Does NOT touch commit data — the operator
+  // runs POST .../reset separately, so they can iterate on patterns cheaply.
   app.put<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/diff-stats/exclusions',
     async (request, reply) => {
@@ -560,17 +502,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // Recount: zero commits.additions/deletions/files_changed + clear
-  // diff_stats_synced_at on every commit for the repo, AND zero
-  // commit_daily.additions/deletions so the dashboard shows
-  // clearly-wrong (zero) rather than subtly-wrong (mixed) during the
-  // drain. The existing diff-stats backfill ticks re-fetch /diffstat
-  // for every cleared commit using the current exclude-pattern list,
-  // and the rollup hook refills commit_daily as each repo drains.
-  //
-  // Cost: 1 BB call per commit, paced by the existing budget gates.
-  // At the default 100-per-repo-per-tick cap, a 3,700-commit repo
-  // drains in ~37 ticks (~3 hours at 5-min cron cadence).
+  // Zero commit + commit_daily diff-stats and clear diff_stats_synced_at so the
+  // dashboard shows clearly-wrong (zero) rather than subtly-wrong (mixed) during
+  // the drain. The backfill ticks re-fetch /diffstat per cleared commit using the
+  // current exclude patterns. Cost: 1 BB call per commit, paced by the budget gates.
   app.post<{ Params: { workspace: string; slug: string } }>(
     '/repositories/:workspace/:slug/diff-stats/reset',
     async (request, reply) => {
@@ -587,29 +522,12 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     },
   );
 
-  // One-shot retroactive email backfill. The live ingest path
-  // (commits.ts + deepen-backfill.ts) captures author-raw emails on
-  // every new commit, but rows that predate the `users.email` column
-  // stay NULL until that user's next commit lands. For inactive
-  // contributors (left the org, on vacation, between projects) that
-  // could be never — this endpoint fills the backlog in one shot.
-  //
-  // Strategy: per user-with-NULL-email, find their most recent
-  // ingested commit's (workspace, slug, sha), hit BB's commits API
-  // anchored at that sha via `include=<sha>` (the first yielded item
-  // IS the sha itself), parse `<email>` out of `author.raw`, write
-  // via setUserEmailsIfMissing. One BB call per user — bounded by
-  // the cap below.
-  //
-  // Cap exists to prevent surprise BB-budget burn if the call lands
-  // against a workspace with thousands of inactive users. With "few
-  // users" being the expected case, the default 500 is well above
-  // any realistic batch size; the operator can pass a query param to
-  // raise it consciously.
-  //
-  // Per-user failures are isolated (try/catch around each user's
-  // fetch) — one BB hiccup doesn't poison the whole pass; the
-  // affected user simply rolls over to a future run.
+  // One-shot retroactive email backfill for users whose rows predate the
+  // `users.email` column (NULL until their next commit lands — possibly never,
+  // for inactive contributors). Per user: anchor BB's commits API at their most
+  // recent ingested sha via `include=<sha>` (first yielded item IS the sha),
+  // parse `<email>` from `author.raw`. One BB call per user, capped to bound
+  // budget burn. Per-user failures are isolated — they roll over to a future run.
   const DEFAULT_BACKFILL_LIMIT = 500;
   app.post<{ Querystring: { limit?: string } }>('/users/backfill-emails', async (request, reply) => {
     const parsed = z.coerce
@@ -633,8 +551,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     for (const u of seed) {
       attempted++;
       try {
-        // paginateCommits with include=<sha> yields the requested sha as
-        // its first item. Break after one — we don't care about ancestors.
+        // include=<sha> yields the sha first; break after one (ignore ancestors).
         let raw: string | null = null;
         for await (const commit of paginateCommits(opts.syncDeps.client, u.workspace, u.slug, {
           include: u.sha,
@@ -654,8 +571,7 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
         }
         entries.push({ bitbucketUuid: u.bitbucketUuid, email });
       } catch (err) {
-        // Don't poison the batch — log + move on. Common cause: BB
-        // 404 on a sha whose repo got renamed/recreated upstream.
+        // Isolate per-user failures (common: BB 404 on a renamed/recreated repo).
         fetchFailed++;
         opts.syncDeps.logger?.warn?.(
           { workspace: u.workspace, slug: u.slug, sha: u.sha, userId: u.userId, err },
@@ -682,20 +598,10 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     };
   });
 
-  // One-shot SQL backfill of commits.author_email + commits.author_display_name
-  // for rows ingested before the V1_16 schema migration added those
-  // columns. Pulls the value straight from the linked users row — no
-  // BB calls. Only fills NULL snapshot columns (COALESCE); never
-  // overwrites pre-existing snapshot data; skips anonymous rows
-  // (author_user_id IS NULL — those need the BB-walk path).
-  //
-  // Idempotent: re-running converges (the WHERE filters out rows
-  // already populated). Single Postgres UPDATE FROM, no batching —
-  // hundreds of thousands of rows complete in seconds at our scale.
-  //
-  // Run once after deploying the V1_16 migration; not part of the
-  // recurring sync cadence. The "step 3" BB-walk path handles the
-  // anonymous tail separately.
+  // One-shot SQL backfill of commits.author_email + author_display_name for rows
+  // predating the V1_16 migration. Pulls from the linked users row — no BB calls.
+  // Only fills NULL snapshot columns (COALESCE), never overwrites; skips anonymous
+  // rows (those need the BB-walk path). Idempotent — the WHERE excludes populated rows.
   app.post('/commits/backfill-author-snapshots', async () => {
     const { updated } = await opts.syncDeps.commitStore.backfillAuthorSnapshotsFromUsers();
     opts.syncDeps.logger?.info?.({ updated }, 'commits author-snapshot backfill complete');
@@ -704,34 +610,19 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
 
   // Per-user retroactive reattribution of anonymous commits.
   //
-  // Why this exists: when a commit is first ingested, we resolve the
-  // author via BB's `author.user.uuid` and write `author_user_id`. If
-  // the commit was authored from an email BB hadn't yet linked to a
-  // workspace member, `author.user` is absent on ingest and we store
-  // NULL. Adding that email to a workspace member LATER makes BB
-  // attribute the same commit on future reads — but our row stays
-  // anonymous until something re-fetches it. The in-place fix in
-  // insertCommits handles re-attribution on cold-mode re-sync; this
-  // endpoint backfills the long tail (commits older than the
-  // cold-mode cap, or rows where the operator doesn't want to wait
-  // for `/include` + a runner tick).
+  // A commit ingested before BB linked its author email to a workspace member is
+  // stored with author_user_id NULL. Linking the email LATER makes BB attribute
+  // the commit on future reads, but our row stays anonymous until re-fetched.
+  // insertCommits fixes this on cold-mode re-sync; this endpoint backfills the
+  // long tail (older than the cold-mode cap, or when waiting isn't acceptable).
   //
-  // Strategy: walk anonymous commits in our DB (newest first, bounded
-  // by `limit`), hit BB `paginateCommits include=<sha>` to read the
-  // current `author.user.uuid`, bulk-UPDATE the matches into the
-  // target user, recompute `commit_daily` for affected days, invalidate
-  // the user's summary cache. Cost is one BB call per anonymous
-  // commit walked, no `/diffstat` calls (UPDATE only touches
-  // `author_user_id`).
-  //
-  // Idempotent: re-calling with the same uuid converges (matches that
-  // already updated drop out of the candidate list on the next pass).
-  // Race-safe: the UPDATE is guarded by `author_user_id IS NULL`, so a
-  // concurrent commit-sync landing the same row first wins and we
-  // no-op.
-  //
-  // Optional `workspace` + `slug` scope the walk to one repo. Both or
-  // neither — partial scope is a 400.
+  // Walks anonymous commits (newest first, bounded by `limit`), reads current
+  // `author.user.uuid` via `include=<sha>`, bulk-UPDATEs matches into the target
+  // user, recomputes `commit_daily`, invalidates the summary cache. One BB call
+  // per commit, no /diffstat (UPDATE only touches author_user_id).
+  // Idempotent — re-calling converges. Race-safe: the UPDATE is guarded by
+  // `author_user_id IS NULL`, so a concurrent commit-sync wins and we no-op.
+  // Optional `workspace` + `slug` scope the walk; both or neither (partial = 400).
   const DEFAULT_REATTRIBUTE_LIMIT = 200;
   const MAX_REATTRIBUTE_LIMIT = 2000;
   const uuidPattern = /^\{[0-9a-fA-F-]{36}\}$/;
@@ -778,11 +669,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       limit,
     });
 
-    // Walk each candidate, hitting BB's commits endpoint anchored at
-    // the sha. paginateCommits with `include=<sha>` yields the
-    // requested sha as the FIRST item — we break after one. A per-
-    // commit try/catch isolates failures so one BB hiccup (404 from a
-    // recreated repo, transient 5xx) doesn't poison the whole batch.
+    // include=<sha> yields the sha first; break after one. Per-commit try/catch
+    // isolates failures (404 from a recreated repo, transient 5xx).
     const matches: Array<{ commitId: number; userId: number }> = [];
     let walked = 0;
     let bbMatched = 0;
@@ -823,11 +711,9 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
 
     const updatedRows = matches.length > 0 ? await opts.syncDeps.commitStore.reattributeAnonymousCommits(matches) : [];
 
-    // Group affected rows by repo + compute UTC day ranges so the
-    // rollup hook recomputes only what changed. `recomputeCommitDailyForRepo`
-    // is authoritative-for-the-window post-fix (DELETE + INSERT), so the
-    // stale (day, repo, NULL) rows disappear and the new (day, repo,
-    // user) rows take their place in one shot.
+    // Group by repo + UTC day range so the rollup recomputes only what changed.
+    // recomputeCommitDailyForRepo is authoritative-for-the-window (DELETE + INSERT),
+    // so stale (day, repo, NULL) rows give way to (day, repo, user) in one shot.
     const rangeByRepo = new Map<number, { sinceMs: number; untilMs: number }>();
     for (const row of updatedRows) {
       const t = row.authoredAt.getTime();
@@ -870,10 +756,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       }
     }
 
-    // `hasMore=true` whenever we filled the limit; operator should
-    // re-call to drain the tail. Conservative — if the limit was
-    // exactly the remaining count, the next call returns 0 candidates
-    // and is a cheap no-op.
+    // hasMore when we filled the limit; operator re-calls to drain the tail.
+    // Conservative — an exact-fit limit makes the next call a cheap no-op.
     const hasMore = walked === limit;
 
     opts.syncDeps.logger?.info?.(
@@ -907,29 +791,13 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     });
   });
 
-  // ---------------------------------------------------------------------------
-  // Phase 5 — person layer (alias merge) admin endpoints
-  // ---------------------------------------------------------------------------
-  //
-  // Operator-curated CRUD for merging multiple BitBucket user rows into a
-  // single canonical person. Discovery happens out-of-band (operator uses
-  // the existing /members name search to find dupes); these endpoints are
-  // the actuators that wire the merge into the DB.
-  //
-  // Every mutation goes through PeopleStore (transactional, schema-
-  // invariant-preserving) and is followed by:
-  //   (a) a person_score recompute via opts.syncDeps.recomputeAllScores
-  //       so the leaderboard reflects the merge immediately;
-  //   (b) Redis user-summary cache invalidation for every affected alias
-  //       so per-user pages stay coherent with the new person attribution;
-  //   (c) an SSE event on opts.syncDeps.bus so open browser tabs refresh.
-  //
-  // setPrimary is a UI-only flag swap — no commit attribution changes —
-  // so it skips (a). All paths emit (c).
-  //
-  // When `opts.syncDeps.peopleStore` is undefined (test scaffolding that
-  // doesn't wire the store), every people endpoint 503s with
-  // `people_store_not_wired`. Production entrypoints always wire it.
+  // Person layer (alias merge): operator-curated CRUD merging multiple BB user
+  // rows into one canonical person. Every mutation goes through PeopleStore
+  // (transactional) and is followed by: (a) a person_score recompute so the
+  // leaderboard reflects the merge; (b) Redis user-summary invalidation for every
+  // affected alias; (c) an SSE event so open tabs refresh. setPrimary is a UI-only
+  // flag swap (no attribution change) so it skips (a). All paths emit (c).
+  // When peopleStore is undefined (test scaffolding) every endpoint 503s.
 
   const createPersonBody = z.object({
     displayName: z.string().min(1).nullable().optional(),
@@ -949,33 +817,26 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     userId: z.number().int().positive(),
   });
 
-  // Cache-only invalidation: DEL the `bbstat:user-summary:{id}` Redis key
-  // for each listed alias. Used directly when a mutation changes a cached
-  // summary's shape but NOT commit attribution (rename, primary swap), so
-  // no score recompute is warranted.
+  // Cache-only invalidation (no score recompute) — used when a mutation changes
+  // a cached summary but NOT commit attribution (rename, primary swap).
   async function invalidateUserSummaries(userIds: ReadonlyArray<number>): Promise<void> {
     if (opts.syncDeps.userSummaryCache === undefined) return;
     await Promise.all(userIds.map((id) => opts.syncDeps.userSummaryCache!.invalidate(id)));
   }
 
-  // Every alias currently attached to a person. A person-layer mutation
-  // shifts the cached summary of ALL of them — not just the one the
-  // operator named: attach/detach changes each sibling's `linkedAccounts`,
-  // a rename changes the embedded `person.displayName`, a primary swap
-  // moves the `isPrimary` flag + the display-name fallback. So the whole
-  // roster must be busted. Returns [] if the person is gone.
+  // Every alias attached to a person. A person-layer mutation shifts the cached
+  // summary of ALL of them (siblings' linkedAccounts, embedded displayName,
+  // isPrimary flag), so the whole roster must be busted. [] if the person is gone.
   async function rosterUserIds(personId: number): Promise<number[]> {
     if (opts.syncDeps.peopleStore === undefined) return [];
     const person = await opts.syncDeps.peopleStore.get(personId);
     return person?.attachedUsers.map((u) => u.id) ?? [];
   }
 
-  // Refresh path after mutations that change commit attribution (create
-  // with primary / attach / detach / dissolve). Runs both scoring passes
-  // (cheap — under 200ms on the live corpus) and DELs the per-user summary
-  // Redis keys for every affected alias. Errors are surfaced to the caller
-  // — the mutation already committed, so a recompute failure is
-  // informational; the next sync tick will redo it.
+  // Refresh after mutations that change commit attribution (create-with-primary /
+  // attach / detach / dissolve): recompute scores + invalidate affected summaries.
+  // Errors surface to the caller — the mutation already committed, so a recompute
+  // failure is informational; the next sync tick redoes it.
   async function refreshAfterPersonMutation(affectedUserIds: ReadonlyArray<number>): Promise<void> {
     if (opts.syncDeps.recomputeAllScores !== undefined) {
       await opts.syncDeps.recomputeAllScores();
@@ -1053,10 +914,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     const body = updatePersonBody.parse(request.body);
     try {
       const person = await opts.syncDeps.peopleStore.updateDisplayName(id, body.displayName);
-      // Rename doesn't touch attribution (no recompute), but the new name
-      // is embedded as `person.displayName` in every attached alias's
-      // cached summary — bust the whole roster so /users/:id stops serving
-      // the old name.
+      // Rename doesn't touch attribution (no recompute), but the new name is
+      // embedded in every attached alias's cached summary — bust the roster.
       await invalidateUserSummaries(person.attachedUsers.map((u) => u.id));
       opts.syncDeps.bus?.publish({ event: 'person.updated', payload: { personId: id } });
       return person;
@@ -1081,8 +940,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       const result = await opts.syncDeps.peopleStore.attach(id, body.userId, {
         ...(body.makePrimary !== undefined ? { makePrimary: body.makePrimary } : {}),
       });
-      // Bust the whole post-attach roster: the new alias gains a person +
-      // siblings, and every pre-existing alias's `linkedAccounts` grew.
+      // Bust the post-attach roster: the new alias plus every sibling whose
+      // `linkedAccounts` grew.
       await refreshAfterPersonMutation([...new Set([...(await rosterUserIds(id)), body.userId])]);
       opts.syncDeps.bus?.publish({
         event: 'person.attached',
@@ -1116,9 +975,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     const body = detachBody.parse(request.body);
     try {
       const result = await opts.syncDeps.peopleStore.detach(id, body.userId);
-      // The detached user is now unattached (person=null, no siblings), and
-      // every remaining alias's `linkedAccounts` shrank — bust both the
-      // detached user and the post-detach roster.
+      // Bust both the now-unattached user and the post-detach roster (every
+      // remaining alias's `linkedAccounts` shrank).
       await refreshAfterPersonMutation([...new Set([...(await rosterUserIds(id)), body.userId])]);
       opts.syncDeps.bus?.publish({
         event: 'person.detached',
@@ -1152,10 +1010,8 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
     const body = setPrimaryBody.parse(request.body);
     try {
       const result = await opts.syncDeps.peopleStore.setPrimary(id, body.userId);
-      // setPrimary doesn't change commit attribution — skip the recompute.
-      // It DOES move the `isPrimary` flag and (when the person has no
-      // explicit display_name) the display-name fallback, both of which
-      // live in every alias's cached summary — so bust the roster.
+      // No attribution change (skip recompute), but moving the `isPrimary` flag
+      // and the display-name fallback shifts every alias's summary — bust the roster.
       await invalidateUserSummaries(await rosterUserIds(id));
       opts.syncDeps.bus?.publish({
         event: 'person.primary-changed',

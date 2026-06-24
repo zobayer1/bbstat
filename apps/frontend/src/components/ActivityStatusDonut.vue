@@ -1,18 +1,13 @@
 <script setup lang="ts">
 // SVG donut chart for member-activity recency. Caller passes buckets in
 // render order (most-active first reads best clockwise from 12 o'clock).
-// Dumb component — no slicing logic lives here, just the geometry.
-//
-// `color` is any CSS color string. Inline-SVG so it inherits CSS pixel
-// density and stays crisp at any container size.
 
 import { computed } from 'vue';
 
 export interface ActivityBucket {
   label: string;
   count: number;
-  // Hex / rgb / Tailwind-generated color string. Kept verbatim and used
-  // for both the donut slice fill and the legend swatch.
+  // Any CSS color string, used for both the slice fill and the legend swatch.
   color: string;
 }
 
@@ -24,22 +19,13 @@ const props = withDefaults(
     innerRadius?: number;
     // Optional overline shown above the centered total — e.g. "MEMBERS".
     centerLabel?: string;
-    // Where the legend sits relative to the donut. `right` (default)
-    // keeps the historical side-by-side layout; `left` flips them so
-    // the legend leads (handy for left-anchored panels where the
-    // labels read first); `below` stacks the donut over the legend
-    // for narrow columns.
+    // `below` stacks donut over legend for narrow columns; `left` flips the
+    // side-by-side order so the legend leads.
     legendPosition?: 'left' | 'right' | 'below';
-    // Toggle the trailing percentage column in each legend row.
-    // Default `true` keeps the existing display; set `false` to
-    // shrink the legend to swatch + label + count when percentages
-    // would crowd a narrow layout.
+    // Set false to drop the percentage column when it would crowd the layout.
     showPercent?: boolean;
-    // Apply a subtle 3D presentation: the donut tilts back via CSS
-    // perspective, a soft drop-shadow grounds it, and each slice
-    // carries a radial gloss highlight so the surface reads as a
-    // physical disc rather than a flat chart. Opt-in (default
-    // false) so callers like Members.vue stay flat.
+    // Opt-in 3D presentation: CSS-perspective tilt + drop-shadow + per-slice
+    // gloss so the surface reads as a physical disc.
     tilt3d?: boolean;
   }>(),
   {
@@ -64,14 +50,11 @@ interface Slice {
   endAngle: number;
 }
 
-// SVG path for an annulus segment: outer arc clockwise, line to inner
-// edge, inner arc counter-clockwise, close. Angle 0 = 12 o'clock,
-// growing clockwise (so we negate the standard math convention).
+// SVG path for an annulus segment. Angle 0 = 12 o'clock, growing clockwise.
 function arcPath(startAngle: number, endAngle: number): string {
   const ri = props.innerRadius;
   const ro = props.outerRadius;
-  // Convert (12-o'clock-zero, clockwise) → (3-o'clock-zero, counter-clockwise)
-  // by subtracting from π/2 — both endpoints, same offset.
+  // Convert to (3-o'clock-zero, math convention) by subtracting π/2.
   const a0 = startAngle - Math.PI / 2;
   const a1 = endAngle - Math.PI / 2;
   const xOuter0 = cx.value + ro * Math.cos(a0);
@@ -103,9 +86,8 @@ const slices = computed<Slice[]>(() => {
       const startAngle = cursor;
       const endAngle = cursor + sweep;
       cursor = endAngle;
-      // 360° single-bucket edge case — SVG can't draw a full arc from a
-      // point back to itself, so nudge the end angle by an imperceptible
-      // epsilon. The visible result is a complete annulus.
+      // 360° single-bucket case — SVG can't arc from a point back to itself,
+      // so nudge the end by an epsilon to still render a full annulus.
       const safeEnd = endAngle - startAngle >= Math.PI * 2 ? endAngle - 0.0001 : endAngle;
       return { bucket, path: arcPath(startAngle, safeEnd), startAngle, endAngle };
     });
@@ -117,9 +99,8 @@ const pct = (count: number): string => {
   return `${Math.round((count / t) * 100)}%`;
 };
 
-// Full-annulus path used as a gloss overlay when tilt3d is on.
-// Two subpaths (outer then inner) combined with fill-rule="evenodd"
-// punches the hole through the disc so the gradient only paints the
+// Full-annulus gloss-overlay path for tilt3d. Two subpaths (outer, inner)
+// with fill-rule="evenodd" punch the hole so the gradient only paints the
 // donut surface, not the centre.
 const annulusPath = computed(() => {
   const ro = props.outerRadius;
@@ -138,8 +119,8 @@ const annulusPath = computed(() => {
   ].join(' ');
 });
 
-// Unique gradient id per instance so two donuts on the same page
-// don't share `<defs>` IDs and clobber each other's gloss overlay.
+// Unique gradient id per instance so two donuts on the same page don't share
+// `<defs>` IDs and clobber each other's gloss overlay.
 const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
 </script>
 
@@ -161,17 +142,15 @@ const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
       :class="['shrink-0', tilt3d ? 'donut-tilt' : '']"
     >
       <defs v-if="tilt3d">
-        <!-- Top-down highlight: brighter near 12 o'clock, fading to
-             transparent past the equator. Acts as overhead lighting
-             so the tilted disc reads as a physical surface. -->
+        <!-- Top-down highlight (overhead lighting): brighter near 12 o'clock,
+             fading to transparent past the equator. -->
         <radialGradient :id="glossId" cx="50%" cy="25%" r="65%">
           <stop offset="0%" stop-color="white" stop-opacity="0.45" />
           <stop offset="55%" stop-color="white" stop-opacity="0.08" />
           <stop offset="100%" stop-color="white" stop-opacity="0" />
         </radialGradient>
       </defs>
-      <!-- Empty-state ring — drawn when total = 0 so the donut placeholder
-           still has visual mass instead of disappearing. -->
+      <!-- Empty-state ring (total = 0) so the placeholder keeps visual mass. -->
       <circle
         v-if="total === 0"
         :cx="cx"
@@ -189,9 +168,6 @@ const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
         stroke="white"
         stroke-width="1"
       />
-      <!-- Gloss overlay — full annulus filled with the radial gradient
-           defined above. fill-rule=evenodd punches the hole so only
-           the donut surface gets the highlight. -->
       <path
         v-if="tilt3d && total > 0"
         :d="annulusPath"
@@ -199,9 +175,7 @@ const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
         fill-rule="evenodd"
         pointer-events="none"
       />
-      <!-- Type scales with outerRadius so the center stays legible at any
-           caller-chosen donut size: ~10% of radius for the overline, ~28%
-           for the total. -->
+      <!-- Type scales with outerRadius so the center stays legible at any size. -->
       <text
         v-if="centerLabel !== ''"
         :x="cx"
@@ -226,13 +200,9 @@ const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
         {{ total }}
       </text>
     </svg>
-    <!-- Legend grid. Each row contributes its swatch, label, count
-         (and optional percent) as four direct grid children via
-         `display: contents` on the <li>. The count column is `auto`
-         (= widest count across rows) with `text-right` inside, so
-         digits right-align without expanding the legend's overall
-         width: the legend stays content-sized and only the count's
-         own column anchors to its right edge. -->
+    <!-- Each <li> uses `display: contents` so its swatch/label/count/percent
+         become direct grid children, letting the count column right-align to
+         the widest count without the legend growing past content width. -->
     <ul
       :class="[
         'grid items-center gap-x-3 gap-y-2 text-sm',
@@ -251,14 +221,9 @@ const glossId = `donut-gloss-${Math.random().toString(36).slice(2, 10)}`;
 </template>
 
 <style scoped>
-/* 3D presentation for the donut. Tilts the SVG back ~22° via CSS
-   perspective so the disc reads as a tilted record on a turntable,
-   and grounds it with a soft drop-shadow. The gloss highlight
-   inside the SVG (radial gradient overlay) does the actual surface
-   modelling — without it, the tilt alone reads as a squashed
-   ellipse. Disabled under prefers-reduced-motion-style preferences
-   isn't necessary here because the transform is static, not
-   animated. */
+/* Tilts the SVG back ~22° via CSS perspective + drop-shadow. The in-SVG gloss
+   overlay does the actual surface modelling — without it the tilt alone reads
+   as a squashed ellipse. */
 .donut-tilt {
   transform: perspective(640px) rotateX(22deg);
   transform-origin: center center;

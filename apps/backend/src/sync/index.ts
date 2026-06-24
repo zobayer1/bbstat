@@ -48,14 +48,11 @@ async function main(): Promise<void> {
   const redis = createCache(config.REDIS_URL);
   const userSummaryCache = createRedisUserSummaryCache(redis);
 
-  // Bridge the local bus through Redis so cron-published events
-  // (tick.commits.complete, repository.sync-excluded, etc.) reach the
+  // Bridge the local bus through Redis so cron-published events reach the
   // SSE subscribers in the separate HTTPS backend process. If Redis is
-  // unreachable at boot the cron still runs — we just fall back to the
-  // local in-memory bus, which means SSE clients won't see cron events
-  // until Redis is healthy. Loud warning so operators notice.
-  // Built before the BB client so the auth-state callback can publish
-  // through it inline (no two-phase init).
+  // unreachable at boot the cron still runs on the local in-memory bus;
+  // SSE clients just won't see cron events until Redis is healthy. Built
+  // before the BB client so the auth-state callback can publish inline.
   const localBus = createEventBus();
   let bus = localBus;
   try {
@@ -68,12 +65,10 @@ async function main(): Promise<void> {
     );
   }
 
-  // Hydrate the client's auth-state from Redis so a fresh process that
-  // boots into a stale 'unauthorized' flag (token rotated while we were
-  // down) recovers correctly when the first 2xx lands — without this,
-  // the client's internal dedupe would suppress the recovery edge and
-  // the dashboard would stay red forever. Falls back to 'ok' if Redis
-  // is unreachable; the next 401 re-trips it normally.
+  // Hydrate auth-state from Redis so a fresh process booting into a stale
+  // 'unauthorized' flag recovers when the first 2xx lands — without it, the
+  // client's dedupe suppresses the recovery edge and the dashboard stays
+  // red forever. Falls back to 'ok'; the next 401 re-trips it.
   let initialAuthState: 'ok' | 'unauthorized' = 'ok';
   try {
     initialAuthState = await bitbucketAuthStateCache.get(redis);
@@ -93,10 +88,9 @@ async function main(): Promise<void> {
     maxCallIntervalMs: config.BITBUCKET_MAX_CALL_INTERVAL_MS,
     logger,
     initialAuthState,
-    // On 401/403 we set the Redis flag and publish the SSE transition;
-    // on the next 2xx we clear both. Redis writes are fire-and-forget
-    // so an upstream blip never blocks the request path. Edge-triggered
-    // by the client itself — see BitbucketClient.notifyAuthState.
+    // On 401/403 set the Redis flag + publish the SSE transition; on the
+    // next 2xx clear both. Redis writes are fire-and-forget so an upstream
+    // blip never blocks the request path.
     onAuthStateChange: (state) => {
       const op =
         state === 'unauthorized'
@@ -111,10 +105,9 @@ async function main(): Promise<void> {
       bus.publish({ event: 'bitbucket.auth-state', payload: { state } });
     },
   });
-  // Mirror the main backend entrypoint: seed path resolves against repo root
-  // (apps/backend/src/sync → ../../../../), explicit path required, default
-  // optional. Loader runs once at startup as a fail-loud parse check, then is
-  // re-invoked by the runner on each sync so YAML edits land without restart.
+  // Seed path resolves against repo root (apps/backend/src/sync →
+  // ../../../../). Loaded once at startup as a fail-loud parse check, then
+  // re-invoked by the runner each sync so YAML edits land without restart.
   const repoRoot = resolve(import.meta.dirname, '..', '..', '..', '..');
   const seedFilePath = resolve(repoRoot, config.SEED_REPO_FILE_PATH ?? 'tracked-repos.yaml');
   const seedRequired = config.SEED_REPO_FILE_PATH !== undefined;
@@ -155,10 +148,8 @@ async function main(): Promise<void> {
     peopleStore: createDrizzlePeopleStore(db),
   };
 
-  // Four independent schedules. Members rarely change; repo metadata
-  // occasionally does; commits change constantly (tightest cadence); PRs
-  // mutate slower than commits (looser cadence). Each op is idempotent —
-  // overlapping manual triggers are safe.
+  // Four independent schedules at different cadences (members slowest,
+  // commits tightest). Each op is idempotent — overlapping triggers are safe.
   cron.schedule(config.SYNC_MEMBERS_CRON, () => {
     void runMembersSync(deps, 'cron').catch((err) => logger.error(err, 'members cron failed'));
   });

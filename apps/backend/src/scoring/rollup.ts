@@ -1,33 +1,12 @@
-// ShipShow Score rollup runner.
-//
-// Two passes share one pure aggregator:
-//
-//   1. `aggregateUserScores` — pure function. Takes the SQL pull results
-//      (per-user totals + the eligible commit set) and returns the rows
-//      ready to UPSERT. No DB. Easy to unit-test against synthetic inputs.
-//
-//   2. `recomputeUserScores` — thin glue for the per-alias pass. Runs the
-//      two SELECTs scoped by `author_user_id`, calls `aggregateUserScores`,
-//      UPSERTs into `user_score`. Drives the per-user detail page.
-//
-//   3. `aggregatePersonScores` + `recomputePersonScores` — Phase 5 sibling
-//      for the merged-identity (alias-union) pass. Reuses
-//      `aggregateUserScores` by remapping the integer key from
-//      `author_user_id` to `users.person_id`; the underlying math is
-//      identical (sum-by-key over the unioned commit set). UPSERTs into
-//      `person_score`. Drives the leaderboard view's person branch.
-//
-//   4. `recomputeAllScores` — orchestrator. Runs both passes back-to-back
-//      under one `now`. Single entry point for the sync tick tail, the
-//      admin endpoint, and the CLI script.
+// ShipShow Score rollup runner. Two passes (per-alias user_score, per-person
+// person_score) share one pure aggregator `aggregateUserScores`.
 //
 // Architecture rationale (docs/scoring.md phase 3): at ~110 devs and
-// ~52k eligible commits the full pull is ~4MB, so we skip the streaming-
-// decay / incremental update complexity entirely and just recompute
-// everything per tick. Sub-second on the live corpus today; revisit if
-// it ever stops being. The person pass adds a JOIN-to-users on
-// `person_id` (partial-index-backed) and stays cheap as long as the
-// attached-alias set is a small minority of the user base.
+// ~52k eligible commits the full pull is ~4MB, so we skip streaming-decay /
+// incremental-update complexity and just recompute everything per tick.
+// Sub-second on the live corpus today; revisit if it stops being. The person
+// pass adds a partial-index-backed JOIN-to-users on `person_id` and stays
+// cheap as long as attached aliases are a small minority of the user base.
 
 import { sql } from 'drizzle-orm';
 
@@ -65,17 +44,14 @@ export interface UserScoreRollupResult {
 
 export interface UserScoreRollupDeps {
   db: Database;
-  // Pino-shaped logger. Omitted in tests that don't care about output.
   logger?: { info?: (obj: object, msg?: string) => void; warn?: (obj: object, msg?: string) => void };
   // Override for tests so decay and window cutoffs are deterministic.
   now?: Date;
 }
 
-// Pure aggregation. Given the two SQL pulls + a `now`, build one
-// `user_score` row per user that appears in `totals`. Users with no
-// eligible commits land as zero-everything rows with `isDormant = true`,
-// which the UI grays out — they're still attributable contributors, just
-// not currently active.
+// Pure aggregation: one user_score row per user in `totals`. Users with no
+// eligible commits land as zero rows with isDormant = true (still
+// attributable contributors, just not currently active).
 export function aggregateUserScores(
   totals: ReadonlyArray<UserTotals>,
   eligible: ReadonlyArray<EligibleCommit>,
@@ -87,7 +63,6 @@ export function aggregateUserScores(
   const cutoff365 = now.getTime() - WINDOW_365D * MS_PER_DAY;
   const consistencyCutoff = now.getTime() - CONSISTENCY_WINDOW_DAYS * MS_PER_DAY;
 
-  // Group eligible commits by author.
   const eligibleByUser = new Map<number, EligibleCommit[]>();
   for (const c of eligible) {
     let bag = eligibleByUser.get(c.authorUserId);
@@ -105,8 +80,8 @@ export function aggregateUserScores(
     const p95 = percentile(churns, 0.95);
     const cap = Math.max(p95, FLOOR);
 
-    // Decayed global + un-decayed window sums. Walk the bag once; per-
-    // commit score depends on the cap, which is constant across the loop.
+    // Decayed global + un-decayed window sums in one pass; the cap is
+    // constant across the loop.
     let scoreTrending = 0;
     let v7 = 0;
     let v30 = 0;
@@ -160,10 +135,8 @@ export function aggregateUserScores(
       additions90d: adds90d,
       deletions90d: dels90d,
     });
-    // Tier is assigned in a second pass below (after all rows are built)
-    // because tier-by-momentum-rank needs the full steady_eddie cohort to
-    // compute each row's rank.
-
+    // Tier is assigned in the second pass below — tier-by-momentum-rank
+    // needs the full steady_eddie cohort to compute each row's rank.
     rows.push({
       userId: t.authorUserId,
       computedAt: now,
@@ -188,11 +161,9 @@ export function aggregateUserScores(
     });
   }
 
-  // Second pass: assign steady_eddie tiers by momentum rank.
-  // Momentum (scoreTrending) already has 30d-half-life decay built in,
-  // so devs who've gone quiet naturally fall in rank and demote out of
-  // gold/silver — without this two-pass approach the tier signal would
-  // lag recency.
+  // Second pass: steady_eddie tiers by momentum rank. scoreTrending carries
+  // 30d-half-life decay, so quiet devs fall in rank and demote out of
+  // gold/silver — without this the tier signal would lag recency.
   const steadyEddieRows = rows
     .filter((r) => r.badge === 'steady_eddie')
     .sort((a, b) => (b.scoreTrending ?? 0) - (a.scoreTrending ?? 0));
@@ -203,9 +174,8 @@ export function aggregateUserScores(
   return rows;
 }
 
-// Linear-interpolation percentile, matches Postgres `percentile_cont` so
-// the threshold calibration in docs/scoring.md transfers to runtime.
-// Returns 0 on an empty array.
+// Linear-interpolation percentile matching Postgres `percentile_cont`, so the
+// threshold calibration in docs/scoring.md transfers to runtime. 0 on empty.
 export function percentile(sortedAscOrEmpty: ReadonlyArray<number>, q: number): number {
   const n = sortedAscOrEmpty.length;
   if (n === 0) return 0;
@@ -222,8 +192,8 @@ export async function recomputeUserScores(deps: UserScoreRollupDeps): Promise<Us
   const startedAtMs = Date.now();
   const now = deps.now ?? new Date();
 
-  // Per-user totals (every author, eligible or not). Drives the row set
-  // and supplies the coverage-warning denominator + tenure.
+  // Per-user totals (every author, eligible or not) — drives the row set and
+  // supplies the coverage denominator + tenure.
   const totalsResult = await deps.db.execute<{
     author_user_id: number;
     commits_total: number;
@@ -242,9 +212,8 @@ export async function recomputeUserScores(deps: UserScoreRollupDeps): Promise<Us
     firstCommitAt: new Date(r.first_commit_at),
   }));
 
-  // Eligible commits across full history. Scoring + consistency both
-  // operate on this set; the p95 cap is global-per-dev (not windowed)
-  // so we need the whole history, not just the last 90 / 365 days.
+  // Eligible commits across full history — the p95 cap is global-per-dev
+  // (not windowed), so we need the whole history, not just 90/365 days.
   const eligibleResult = await deps.db.execute<{
     author_user_id: number;
     additions: number;
@@ -308,9 +277,8 @@ export async function recomputeUserScores(deps: UserScoreRollupDeps): Promise<Us
 // Person-aware (alias-union) pass — Phase 5
 // ---------------------------------------------------------------------------
 
-// Per-person counterparts to UserTotals / EligibleCommit. Same shape; the
-// integer field is a `people.id` (after the SQL pull JOINed
-// commits → users on author_user_id and projected `users.person_id`).
+// Per-person counterparts to UserTotals / EligibleCommit; the integer field
+// is a `people.id` (the SQL pull JOINs commits → users and projects person_id).
 export interface PersonTotals {
   personId: number;
   commitsTotal: number;
@@ -339,28 +307,11 @@ export interface AllScoresRollupResult {
 }
 
 // Pure aggregation for the person pass. Reuses `aggregateUserScores` by
-// relabeling the integer key as person_id on input and remapping
-// `userId` → `personId` on output. Every numeric column carries through
-// unchanged — the scoring math sums linearly within a key group, so
-// "all of Alice-corp + Alice-personal's commits under key=42" produces
-// the same totals as Alice would if she'd pushed everything from one
-// account.
-//
-// Composability (matches what the schema comment on person_score
-// promises):
-//   - score_trending / volume_*: sum over the unioned commit set
-//     (linear in commits; falls straight out of the inner loop).
-//   - p95_churn_cap / median_churn_90d / p95_churn_90d: percentile-of-
-//     unioned-churns (NOT a sum of per-alias percentiles — handled
-//     correctly because the aggregator sees the union as one bag).
-//   - active_days_90d: distinct day count across the unioned set
-//     (Set semantics in the aggregator handle the de-dup).
-//   - is_dormant: `activeDays90dCount === 0`, which is true iff every
-//     alias is dormant (= the union is empty).
-//   - days_since_first_commit: computed from `firstCommitAt` in totals,
-//     which the SQL pull derives from `MIN(authored_at)` across all
-//     attached aliases — i.e. the oldest commit wins.
-//   - badge / badge_tier: recomputed against the unioned inputs.
+// relabeling the integer key as person_id in/out. The scoring math sums
+// linearly within a key group, so the union of Alice's aliases produces the
+// same totals as if she'd pushed everything from one account. Percentiles
+// (p95/median churn) are computed over the unioned churn bag — NOT summed
+// per-alias — which the aggregator gets right because it sees one bag.
 export function aggregatePersonScores(
   totals: ReadonlyArray<PersonTotals>,
   eligible: ReadonlyArray<PersonEligibleCommit>,
@@ -389,15 +340,9 @@ export async function recomputePersonScores(deps: UserScoreRollupDeps): Promise<
   const startedAtMs = Date.now();
   const now = deps.now ?? new Date();
 
-  // Per-person totals — every person with ≥1 attached alias that has
-  // ≥1 commit. People with no commits anywhere never appear here (and
-  // therefore never get a person_score row); the leaderboard view
-  // JOINs person_score, so they stay invisible until activity exists.
-  // Stale-row caveat: if a person previously had commits but their last
-  // attached alias is detached, the prior row in `person_score`
-  // persists with stale values — the admin detach/dissolve endpoints
-  // (Phase 5 commit 3) are responsible for cleanup via the FK cascade
-  // or explicit DELETE.
+  // Per-person totals — every person with ≥1 attached alias that has ≥1
+  // commit. People with no commits never appear here, so never get a
+  // person_score row (the prune DELETE below clears any stale prior row).
   const totalsResult = await deps.db.execute<{
     person_id: number;
     commits_total: number;
@@ -417,10 +362,9 @@ export async function recomputePersonScores(deps: UserScoreRollupDeps): Promise<
     firstCommitAt: new Date(r.first_commit_at),
   }));
 
-  // Eligible commits across the alias-union — same filter as the user
-  // pass (non-merge, diff-stats landed, attribution settled) with the
-  // additional JOIN that relabels each commit's key to its person.
-  // The partial index users_person_id_idx (V1_4) covers the JOIN.
+  // Eligible commits across the alias-union — same filter as the user pass,
+  // plus the JOIN relabeling each commit's key to its person. The partial
+  // index users_person_id_idx (V1_4) covers the JOIN.
   const eligibleResult = await deps.db.execute<{
     person_id: number;
     additions: number;
@@ -447,15 +391,11 @@ export async function recomputePersonScores(deps: UserScoreRollupDeps): Promise<
 
   const rows = aggregatePersonScores(totals, eligible, now);
 
-  // Prune dangling rows — `person_score` entries whose person currently
-  // has no attached aliases (so the totals query above produced nothing
-  // for them). Without this DELETE, a detach that empties a person
-  // would leave its prior person_score row in place with stale
-  // numbers — invisible to the leaderboard view (no aliases → no
-  // leaderboard_entries person row would resolve), but visible to any
-  // direct /api/stats/people/:id reader. The FK ON DELETE CASCADE
-  // covers actual person row deletion; this catches the orphan-stats
-  // case where the person row still exists.
+  // Prune person_score rows whose person no longer has any attached alias.
+  // Without this, a detach that empties a person leaves a stale person_score
+  // row — invisible to the leaderboard view but visible to a direct
+  // /api/stats/people/:id reader. FK ON DELETE CASCADE covers actual person
+  // deletion; this catches the orphan-stats case where the person row remains.
   await deps.db.execute(sql`
     DELETE FROM person_score
     WHERE person_id NOT IN (
@@ -500,14 +440,11 @@ export async function recomputePersonScores(deps: UserScoreRollupDeps): Promise<
   return { startedAt, finishedAt, durationMs, peopleProcessed: rows.length };
 }
 
-// Single entry point for both passes. Sync tick tail, admin endpoint,
-// and the CLI script all call this so neither pass can be accidentally
-// skipped. Passes run sequentially against the same `now` so the
-// `computed_at` timestamps on both tables are coherent for a given
-// rollup cycle. Both runs share `deps.db`'s connection pool; we don't
-// open a transaction because both are pure UPSERT/insert idempotents
-// and we'd rather see the user pass land even if the person pass
-// throws (one bug shouldn't blank the leaderboard).
+// Single entry point for both passes (sync tick, admin endpoint, CLI). Runs
+// sequentially against one `now` so both tables' `computed_at` are coherent.
+// No wrapping transaction: both passes are idempotent UPSERTs, and we'd
+// rather the user pass land even if the person pass throws (one bug
+// shouldn't blank the leaderboard).
 export async function recomputeAllScores(deps: UserScoreRollupDeps): Promise<AllScoresRollupResult> {
   const now = deps.now ?? new Date();
   const user = await recomputeUserScores({ ...deps, now });

@@ -1,11 +1,8 @@
 // Discovery: the slow-cadence sync work that establishes who and what we
 // track. Workspace members go into `users`; the curated repo list (from
 // the SEED_REPO_FILE_PATH YAML plus admin-added entries) goes into
-// `repositories` + `sync_state`.
-//
-// All functions here are pure (relative to the injected `client` and
-// `store`), so they're trivial to test without a database. Wiring into
-// runSync() / cron / admin endpoints lives in Phase 1.3.
+// `repositories` + `sync_state`. Functions here are pure relative to the
+// injected client / store, so they test without a database.
 
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
@@ -21,10 +18,7 @@ export interface DiscoveryDeps {
   logger?: BitbucketLogger;
 }
 
-// ---------------------------------------------------------------------------
-// Types of the BitBucket API responses we consume (only the fields we use)
-// ---------------------------------------------------------------------------
-
+// BitBucket API response shapes — only the fields we consume.
 interface WorkspaceMembership {
   user: {
     uuid: string;
@@ -40,10 +34,6 @@ interface RepositoryResponse {
   workspace: { slug: string };
   project?: { key: string };
 }
-
-// ---------------------------------------------------------------------------
-// Workspace members
-// ---------------------------------------------------------------------------
 
 export interface SyncMembersResult {
   total: number;
@@ -74,30 +64,17 @@ export async function syncWorkspaceMembers(deps: DiscoveryDeps, workspace: strin
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Tracked repositories (curated set)
-// ---------------------------------------------------------------------------
-
 export interface RepoSeed {
   workspace: string;
   slug: string;
-  // Soft-retire seed. Same seed-only semantics — `{ name, archived: true }`
-  // will pre-archive a repo on first insert, but flipping this on an
-  // existing repo via YAML is a no-op. Use the archive / unarchive
-  // admin endpoints for runtime control.
+  // Soft-retire seed: pre-archives on first insert, but flipping it on an
+  // existing repo via YAML is a no-op (use the admin endpoints).
   archived: boolean;
 }
 
-// One entry in the seed file's `repos:` list. Accepts either a plain
-// `<workspace>/<slug>` string (back-compat, archived defaults to false)
-// or an object `{ name: <workspace>/<slug>, archived? }`. Anything else
-// fails the schema check at parse time.
-//
-// A previous schema also carried a `diffStats: true|false` opt-in flag.
-// That column was dropped in 2026-05 (diff-stat ingest is now automatic
-// for every non-archived non-excluded repo via a global newest-first
-// pickup). YAML entries that still carry `diffStats:` are tolerated for
-// back-compat (z.passthrough below) but the value is ignored.
+// One entry in the seed file's `repos:` list: a plain `<workspace>/<slug>`
+// string or `{ name, archived? }`. The legacy `diffStats:` flag is tolerated
+// (z.passthrough) but ignored — diff-stat ingest is automatic now.
 const seedEntrySchema = z.union([
   z.string(),
   z
@@ -108,16 +85,13 @@ const seedEntrySchema = z.union([
     .passthrough(),
 ]);
 
-// Shape of the seed file: a top-level `repos:` list of either bare strings
-// or `{ name, diffStats?, archived? }` objects. Wrapping in a key (vs. a
-// bare top-level list) leaves room to grow the file with sibling sections
-// later without a breaking format change.
+// Wrapping in a `repos:` key (vs. a bare top-level list) leaves room for
+// sibling sections later without a breaking format change.
 const seedFileSchema = z.object({
   repos: z.array(seedEntrySchema),
 });
 
-// Parse the raw YAML text of a seed file into RepoSeed[]. Pure — no IO.
-// Throws on shape mismatches or malformed entries so typos fail loud.
+// Throws on shape mismatches so typos fail loud.
 export function parseSeedRepoFile(text: string): RepoSeed[] {
   const raw: unknown = parseYaml(text);
   const parsed = seedFileSchema.safeParse(raw);
@@ -162,22 +136,17 @@ export interface AddTrackedRepoResult {
 }
 
 export interface AddTrackedRepoOptions {
-  // Pre-archive on insert. Defaults to false. On already-tracked, this
-  // method does NOT update the stored flag — use the archive /
-  // unarchive admin endpoints instead.
+  // Pre-archive on insert. On already-tracked, does NOT update the stored
+  // flag (use the admin endpoints).
   archived?: boolean;
 }
 
-// Idempotent at two layers: the early `findRepositoryByFullName` short-circuit
-// avoids a BB call when the input string already matches a tracked row, and
-// the underlying insert uses ON CONFLICT on bitbucket_uuid so an alias of an
-// existing repo (e.g. a YAML entry whose casing differs from the canonical
-// slug, or a race between two concurrent triggers) resolves to the canonical
-// row with `status: 'already-tracked'` instead of bubbling up a 23505.
-//
-// The returned `fullName` is always the canonical BitBucket-side full_name,
-// not the caller's input — so logs and admin responses identify the repo
-// consistently across alias retries.
+// Idempotent at two layers: the findRepositoryByFullName short-circuit
+// avoids a BB call when the input already matches a tracked row, and the
+// insert's ON CONFLICT on bitbucket_uuid resolves an alias of an existing
+// repo to the canonical row (status 'already-tracked') instead of a 23505.
+// The returned `fullName` is always the canonical full_name, so logs stay
+// consistent across alias retries.
 export async function addTrackedRepository(
   deps: DiscoveryDeps,
   workspace: string,
@@ -228,20 +197,15 @@ export interface BootstrapReposResult {
   inserted: number;
   alreadyTracked: number;
   notFound: string[];
-  // Per-seed failures collected during the loop. A single bad seed never
-  // aborts the run — every entry in `seeds` is attempted, and unexpected
-  // throws land here with the offending repo's input full_name so the admin
-  // / cron caller can see exactly which repo failed and why (e.g. a BB 5xx,
-  // a transient network error, an unknown DB constraint hit).
+  // Per-seed failures. A single bad seed never aborts the run — every entry
+  // is attempted and unexpected throws land here with the offending repo's
+  // full_name.
   errors: Array<{ fullName: string; error: string }>;
 }
 
-// Bootstrap is a **seed-only** operation. New rows pick up
-// `archived` (and other supported flags) from the YAML entry; existing
-// rows are NOT reconciled — once a repo is in the DB, the DB is
-// canonical. Operators flip flags via admin endpoints (archive /
-// unarchive) or direct SQL, and those changes survive every subsequent
-// discovery sync. See schema.ts comments on `repositories`.
+// Seed-only: new rows pick up `archived` from the YAML entry; existing rows
+// are NOT reconciled — once a repo is in the DB, the DB is canonical.
+// Operators flip flags via admin endpoints or SQL.
 export async function bootstrapTrackedRepositories(
   deps: DiscoveryDeps,
   seeds: RepoSeed[],
@@ -254,8 +218,7 @@ export async function bootstrapTrackedRepositories(
     errors: [],
   };
 
-  // Sequential intentionally — BitBucket rate-limit budget plus deterministic
-  // logs. Phase 2 introduces parallelism with budget awareness.
+  // Sequential intentionally — BB rate-limit budget plus deterministic logs.
   for (const seed of seeds) {
     const inputFullName = `${seed.workspace}/${seed.slug}`;
     try {

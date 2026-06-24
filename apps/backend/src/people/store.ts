@@ -1,27 +1,14 @@
-// Storage interface for the Phase 5 person layer. CRUD over `people`
-// plus the attach / detach / primary-swap / dissolve mutations that
-// drive the alias-merge admin endpoints. All mutations run in a single
-// transaction so the schema invariants (CHECK
-// users_primary_requires_person + the partial unique index
-// users_one_primary_per_person_idx) stay tight even if a request races
-// with a concurrent operator.
+// Storage interface for the person layer — CRUD over `people` plus
+// attach/detach/primary-swap/dissolve. All mutations run in a single
+// transaction so the schema invariants (CHECK users_primary_requires_person +
+// partial unique index users_one_primary_per_person_idx) hold even under
+// concurrent operators.
 //
-// The Drizzle-backed implementation at the bottom is what gets wired
-// up in the runtime (admin endpoints via `opts.syncDeps.peopleStore`).
-// The interface boundary lets us unit-test routes with a fake store
-// without spinning up Postgres; tests/admin.test.ts uses the real
-// implementation against the dev DB pattern.
-//
-// On the cycle-free schema (V1_4 amended): primary alias designation
-// lives on `users.is_primary_for_person` rather than on
-// `people.primary_user_id`. That means every mutation that touches
-// the primary state has to clear the flag explicitly before any
-// person_id transition — the CHECK
+// Primary-alias designation lives on `users.is_primary_for_person`, not on
+// `people.primary_user_id` (cycle-free schema). The CHECK
 //   NOT is_primary_for_person OR person_id IS NOT NULL
-// would otherwise block a `person_id = NULL` UPDATE on a row that
-// still has the primary flag set. The store funnels every such
-// transition through a single helper so the invariant is local to
-// this file.
+// means every mutation must clear the primary flag before any person_id→NULL
+// transition; the store funnels those through helpers so the invariant is local.
 
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -33,11 +20,8 @@ import {
   UserNotFoundError,
 } from './errors.js';
 
-// Tx is the first argument of the `db.transaction(async (tx) => …)`
-// callback — a Drizzle PgTransaction that exposes select/update/insert/
-// delete but not `$client` / `transaction()`. The Database type from
-// db/client.ts is a strict superset, so helpers typed against Tx
-// accept both the top-level db and an in-flight tx without casts.
+// The transaction callback's `tx`. Database is a strict superset, so helpers
+// typed against Tx accept both the top-level db and an in-flight tx.
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0];
 
 // ---------------------------------------------------------------------------
@@ -63,19 +47,15 @@ export interface PersonWithAliases {
 
 export interface CreatePersonInput {
   displayName?: string | null;
-  // When provided, the new person is created AND this user is attached
-  // with is_primary_for_person=true in the same transaction. Throws
-  // UserAlreadyAttachedError if the user is already attached elsewhere,
-  // UserNotFoundError if the user id doesn't exist.
+  // When provided, the new person is created AND this user is attached as
+  // primary in the same transaction.
   primaryUserId?: number | null;
 }
 
 export interface AttachOptions {
-  // When true, the new alias becomes primary (atomically clearing any
-  // existing primary for this person). When false (default), the new
-  // alias takes the primary flag only if the person has no primary
-  // yet — i.e. auto-election guarantees every non-empty person has a
-  // primary unless an explicit detach left it empty.
+  // true → new alias becomes primary, clearing any existing one. false
+  // (default) → auto-elect only if the person has no primary yet, so every
+  // non-empty person has a primary unless an explicit detach left it empty.
   makePrimary?: boolean;
 }
 
@@ -88,9 +68,7 @@ export interface DetachResult {
 }
 
 export interface SetPrimaryResult {
-  // Null when the person had no primary set before the swap (a recent
-  // detach cleared it, or no auto-election fired). Useful for the SSE
-  // payload so the frontend can patch its cached roster precisely.
+  // Null when the person had no primary before the swap.
   previousPrimaryUserId: number | null;
 }
 
@@ -178,24 +156,18 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
     return { ...person, attachedUsers: aliasMap.get(personId) ?? [] };
   }
 
-  // Mutation helpers — every state transition that touches person_id or
-  // is_primary_for_person goes through these so the CHECK invariant
-  // (primary requires person_id) stays satisfied locally.
+  // Mutation helpers — every person_id / is_primary_for_person transition goes
+  // through these so the CHECK invariant stays satisfied.
   // -------------------------------------------------------------------------
 
-  // Atomic clear of person_id + is_primary_for_person on a single user.
-  // Both columns move together so the row never transitions through
-  // the (is_primary=true, person_id=NULL) state that the CHECK rejects.
+  // Clear both columns together so the row never passes through the
+  // (is_primary=true, person_id=NULL) state the CHECK rejects.
   async function detachUserRow(tx: Tx, userId: number): Promise<void> {
     await tx.update(users).set({ personId: null, isPrimaryForPerson: false }).where(eq(users.id, userId));
   }
 
-  // Clear is_primary_for_person on every alias currently primary for
-  // `personId`. Used by attach(makePrimary) and setPrimary() before
-  // flipping a new alias to primary. The partial unique index allows
-  // only one primary per person at any time, so we can't write a new
-  // primary without first nulling the existing one (or we'd violate
-  // the unique index).
+  // Clear the current primary flag before flipping a new alias to primary —
+  // the partial unique index allows only one primary per person at a time.
   async function clearPrimaryFlagFor(tx: Tx, personId: number): Promise<void> {
     await tx
       .update(users)
@@ -231,10 +203,7 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
 
   return {
     async list() {
-      // Wrapped in a transaction purely so the helpers (typed against
-      // Tx) accept the same runner the in-transaction mutations use.
-      // Postgres auto-commits read-only single-statement transactions
-      // with negligible overhead — the BEGIN/COMMIT pair adds <0.1ms.
+      // Transaction-wrapped only so the Tx-typed helpers accept this runner.
       return await db.transaction(async (tx) => {
         const personRows = await tx
           .select({
@@ -262,9 +231,7 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
 
     async create(input) {
       return await db.transaction(async (tx) => {
-        // Validate first so the INSERT can't half-succeed (Postgres
-        // would auto-rollback on throw, but pre-checking gives a
-        // cleaner error message before any side effect lands).
+        // Validate before INSERT for a cleaner error than a rollback.
         if (input.primaryUserId !== undefined && input.primaryUserId !== null) {
           const user = await findUserById(tx, input.primaryUserId);
           if (user === null) throw new UserNotFoundError(input.primaryUserId);
@@ -321,17 +288,13 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
         if (user === null) throw new UserNotFoundError(userId);
         if (user.personId !== null) throw new UserAlreadyAttachedError(userId, user.personId);
 
-        // Decide whether this attach also makes the new alias primary.
-        // makePrimary=true → always; else auto-elect if the person
-        // currently has no primary (every non-empty person has one
-        // unless detach explicitly cleared it).
+        // makePrimary=true → always primary; else auto-elect if the person has
+        // no primary yet.
         const explicitPrimary = opts?.makePrimary === true;
         const currentPrimary = explicitPrimary ? null : await findCurrentPrimary(tx, personId);
         const becamePrimary = explicitPrimary || currentPrimary === null;
 
         if (becamePrimary) {
-          // Clear any existing primary so the partial unique index
-          // doesn't get violated when we set the new one.
           await clearPrimaryFlagFor(tx, personId);
         }
         await tx.update(users).set({ personId, isPrimaryForPerson: becamePrimary }).where(eq(users.id, userId));
@@ -362,10 +325,7 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
         }
         const previousPrimaryUserId = await findCurrentPrimary(tx, personId);
         if (previousPrimaryUserId === userId) {
-          // No-op — return early so we don't burn an UPDATE on a
-          // partial unique index that would briefly violate the
-          // single-primary invariant (it wouldn't actually fail, but
-          // skipping the work is cleaner).
+          // Already primary — skip the redundant UPDATE.
           return { previousPrimaryUserId };
         }
         await clearPrimaryFlagFor(tx, personId);
@@ -377,12 +337,11 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
     async dissolve(id) {
       return await db.transaction(async (tx) => {
         if (!(await findPersonId(tx, id))) throw new PersonNotFoundError(id);
-        // Capture the attached set before clearing so the route
-        // handler can invalidate caches + emit a complete SSE payload.
+        // Capture the attached set before clearing so the route can invalidate
+        // caches + emit a complete SSE payload.
         const attached = await tx.select({ id: users.id }).from(users).where(eq(users.personId, id));
-        // Clear person_id AND is_primary_for_person in one UPDATE —
-        // the FK ON DELETE SET NULL would otherwise fire mid-DELETE
-        // with the primary flag still set and trip the CHECK.
+        // Clear both columns explicitly — relying on the FK ON DELETE SET NULL
+        // would fire mid-DELETE with the primary flag still set and trip the CHECK.
         await tx.update(users).set({ personId: null, isPrimaryForPerson: false }).where(eq(users.personId, id));
         await tx.delete(people).where(eq(people.id, id));
         return { detachedUserIds: attached.map((r) => r.id) };

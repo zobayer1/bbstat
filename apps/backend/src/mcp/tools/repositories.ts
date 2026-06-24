@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import { defineTool, ToolError } from './types.js';
 
-// The repo directory + sync health. Also the resolver for workspace/slug,
-// which get_repository_activity needs.
 export const listRepositoriesTool = defineTool({
   name: 'list_repositories',
   title: 'List repositories',
@@ -14,7 +12,6 @@ export const listRepositoriesTool = defineTool({
   },
 });
 
-// Per-repo activity detail. workspace/slug come from list_repositories.
 export const repositoryActivityTool = defineTool({
   name: 'get_repository_activity',
   title: 'Repository activity',
@@ -35,9 +32,6 @@ export const repositoryActivityTool = defineTool({
   },
 });
 
-// The Projects "sunburst": top repos by commits in a window, each with its top
-// contributors. A distinct cross-repo aggregation — answers "which repos drove
-// activity and who in each", optionally scoped to one project.
 export const repoContributorBreakdownTool = defineTool({
   name: 'repo_contributor_breakdown',
   title: 'Repo × contributor breakdown',

@@ -2,9 +2,6 @@ import { z } from 'zod';
 import type { ActivityDailyFilters, ActivityFilters } from '../../dashboard/stats-store.js';
 import { defineTool } from './types.js';
 
-// Shared sub-shapes. `actor` keys on entity_kind + entity_id (resolve via
-// list_members / top_contributors); `repo` on workspace + slug (resolve via
-// list_repositories).
 const actorShape = z
   .object({
     kind: z.enum(['user', 'person']),
@@ -19,7 +16,7 @@ const repoShape = z
   })
   .describe('Filter to one repository.');
 
-// The AND-combinable filter set shared by search_activity and count_activity.
+// AND-combinable filter set shared by search_activity and count_activity.
 // (limit is search-only — count is over the full filtered universe.)
 const activityFilterShape = {
   actor: actorShape.optional(),
@@ -37,7 +34,6 @@ const activityFilterShape = {
 
 type ActivityFilterArgs = z.infer<z.ZodObject<typeof activityFilterShape>>;
 
-// Map validated filter args + a limit into the store's ActivityFilters shape.
 // MCP is a stateless read surface — no cursor pagination, so offset is always 0.
 function buildFilters(args: ActivityFilterArgs, limit: number): ActivityFilters {
   return {
@@ -53,8 +49,6 @@ function buildFilters(args: ActivityFilterArgs, limit: number): ActivityFilters 
   };
 }
 
-// The unified commit + PR feed with AND-combinable filters. This is the
-// flexible query surface — most "what happened with X" questions route here.
 export const searchActivityTool = defineTool({
   name: 'search_activity',
   title: 'Search activity',
@@ -69,8 +63,6 @@ export const searchActivityTool = defineTool({
   },
 });
 
-// Exact total for a filter set — over the FULL universe, not capped by a limit
-// like search_activity. The tool for "how many …" questions.
 export const countActivityTool = defineTool({
   name: 'count_activity',
   title: 'Count activity',
@@ -84,8 +76,6 @@ export const countActivityTool = defineTool({
   },
 });
 
-// Daily commit counts for the trailing year — the heatmap data, useful for
-// "how consistent has X been" without pulling every entry.
 export const activityDailyTool = defineTool({
   name: 'activity_daily',
   title: 'Daily activity series',

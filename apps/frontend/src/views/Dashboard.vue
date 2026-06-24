@@ -18,10 +18,8 @@ const stats = useStatsStore();
 const route = useRoute();
 const router = useRouter();
 
-// Workspace-wide 365-day daily aggregate for the dashboard heatmap.
-// Reads from /api/activity-daily with no filters so the chart is the
-// org-level cadence picture. SSE-refreshes whenever a commits-tick
-// lands so the most-recent day's cell fills in without a page reload.
+// Workspace-wide 365-day aggregate for the heatmap (unfiltered
+// /api/activity-daily). SSE-refreshes on each commits-tick.
 const dailyCommits = ref<{ date: string; commits: number }[]>([]);
 async function loadDailyCommits(): Promise<void> {
   try {
@@ -45,15 +43,8 @@ onUnmounted(() => {
   liveCleanups.length = 0;
 });
 
-// Filter state is URL-synced (router.replace, no history entries) so deep
-// links work — e.g. /?actor=42&repo=tigerit/foo lands on a pre-filtered
-// view. The actor filter (user or person) is owned by useActorFilter.
+// Filter state is URL-synced so deep links work (e.g. /?actor=42&repo=…).
 const filterActor = useActorFilter();
-// Project + repo share a single composable that owns the URL sync and
-// the project↔repo interlock (picking a repo auto-fills its project;
-// picking a project trims the repo dropdown and clears a now-mismatched
-// repo). `repoOptions` is the trimmed-by-project list for the
-// `<select>` below.
 const {
   projectModel: filterProject,
   repoModel: filterRepo,
@@ -82,14 +73,9 @@ const totalCommits = computed(() => stats.overview?.totalCommits ?? '—');
 const commitsLast7Days = computed(() => stats.overview?.commitsLast7Days ?? '—');
 const commitsLast30Days = computed(() => stats.overview?.commitsLast30Days ?? '—');
 
-// Stat-card glyphs come from the shared @/lib/glyphs module (same shapes the
-// breadcrumb section icons use). Section ↔ glyph mapping lives there.
-
-// Recompute `after` boundaries every time the dashboard mounts so a stale
-// tab doesn't bake in a week-old window. Format is YYYY-MM-DD (matches the
-// `<input type="date">` controls on the Activity page so they hydrate
-// cleanly from the URL) — Activity.vue converts to an ISO timestamp at
-// request time.
+// Recompute `after` boundaries on each mount so a stale tab doesn't bake in
+// a week-old window. YYYY-MM-DD matches the Activity page's date inputs;
+// Activity.vue converts to an ISO timestamp at request time.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -103,17 +89,10 @@ const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now
 const windows: ContributorWindow[] = ['7d', '30d'];
 const windowLabel = (w: ContributorWindow) => (w === '7d' ? 'Last 7 days' : 'Last 30 days');
 
-// Denominator for the per-contributor share bar — total commits across the
-// whole workspace in the active window. Falls back to 0 when overview hasn't
-// landed yet; the bar guards with `share === 0 ? 0 : ...` so the unfilled
-// track still renders cleanly.
-//
-// Bar metric: **log-volume** = ln(1 + additions + deletions) over the
-// active 7d/30d window, normalised against the displayed group's max.
-// Log compresses large differences so a 50k-churn dev doesn't dwarf a
-// 500-churn dev visually while the order still reflects volume.
-// Window-responsive: `additionsWindow` and `deletionsWindow` change
-// when the tab toggles between 7d and 30d, so the bar moves too.
+// Share-bar metric: log-volume = ln(1 + additions + deletions) over the
+// active 7d/30d window, normalised against the displayed group's max. Log
+// compresses large differences so a 50k-churn dev doesn't visually dwarf a
+// 500-churn dev while the order still reflects volume.
 const contributorVolumeLn = (c: { additionsWindow: number; deletionsWindow: number }): number =>
   Math.log1p(c.additionsWindow + c.deletionsWindow);
 
@@ -134,30 +113,23 @@ const volumeShare = (c: { additionsWindow: number; deletionsWindow: number }): n
 
 const tooltipMomentum = (m: number | null): string => (m === null ? '—' : m.toFixed(1));
 const tooltipConsistency = (c: number | null): string => (c === null ? '—' : `${Math.round(c * 100)}%`);
-// Same value that drives the bar — ln(1 + adds + dels) for the active
-// window. Shown raw (not the normalised percentage) so the tooltip
-// states the underlying coefficient, not its visual projection.
+// Raw ln(1 + adds + dels) — the bar's underlying coefficient, not its
+// normalised percentage.
 const tooltipVolume = (c: { additionsWindow: number; deletionsWindow: number }): string =>
   contributorVolumeLn(c).toFixed(2);
 
-// Top Contributors + Activity share the same vertical real estate via a
-// tab control. Default to Contributors per user spec; switching tabs is
-// pure component state (no URL sync — filters in the URL still apply to
-// the Activity tab when it's open, the tab itself doesn't need persisting).
+// Top Contributors + Activity share vertical space via a tab control.
+// Tab choice is pure component state (no URL sync).
 type DashboardTab = 'contributors' | 'activity';
 const activeTab = ref<DashboardTab>('contributors');
-// Sized to the Top Contributors content (~10 rows × ~46px ≈ 28rem). The
-// Contributors container uses `overflow-y: hidden` — a hairline overflow
-// doesn't surface a scrollbar, and any future content growth (bigger
-// LIMIT, longer names wrapping) gets clipped cleanly inside the box
-// instead of escaping into the panels below. Activity keeps its
-// `overflow-y: auto` so paging works.
+// Sized to the Top Contributors content (~10 rows ≈ 28rem). Contributors
+// uses `overflow-y: hidden` so a hairline overflow doesn't surface a
+// scrollbar; Activity keeps `overflow-y: auto` so paging works.
 const ACTIVITY_PANEL_HEIGHT = '28rem';
 
-// Projects panel is derived from the repository list — group by project key
-// (skipping repos with no project assignment), sum commits/repos, and take the
-// max last-commit timestamp as the project's "last activity". Sorted by 30d
-// activity desc so the most-active projects float to the top.
+// Projects panel — group repos by project key (skipping unassigned), sum
+// commits/repos, take max last-commit as "last activity". Sorted by 30d
+// activity desc.
 const projectsPanel = computed(() => {
   const buckets = new Map<string, { repoCount: number; commits30d: number; lastActivity: string | null }>();
   for (const r of stats.repositories) {
@@ -175,9 +147,7 @@ const projectsPanel = computed(() => {
 
 const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
 
-// Top 10 repositories by 30-day commit volume. Always-visible
-// leaderboard on the dashboard — the full searchable / paginated
-// repository list lives on the Projects page.
+// Top 10 repositories by 30-day commit volume.
 const topRepos = computed(() =>
   stats.repositories
     .slice()
@@ -189,11 +159,7 @@ const topRepos = computed(() =>
 <template>
   <main class="mx-auto max-w-6xl px-6 py-8">
     <header class="relative mb-6 h-[88px] overflow-hidden rounded-lg">
-      <!-- Full-width water. Two layered paths fan across any
-           viewport via preserveAspectRatio="none": a higher cyan
-           layer with sharply irregular peaks, and a softer sky
-           layer rolling underneath. The boat + title sit over
-           this background. -->
+      <!-- Full-width water: two layered wave paths via preserveAspectRatio="none". -->
       <svg
         class="absolute inset-x-0 bottom-0 h-11 w-full"
         viewBox="0 0 1200 80"
@@ -211,18 +177,13 @@ const topRepos = computed(() =>
           opacity="0.85"
         />
       </svg>
-      <!-- Sheen sweep over the water — translucent white gradient
-           translating left-to-right on a slow ease-in-out loop,
-           same trick as the Repositories top-5 bar wave. Pinned to
-           the water layer's bounds so it never leaks onto the boat
-           or title above. Disabled under prefers-reduced-motion. -->
+      <!-- Sheen sweep over the water (see .water-sheen; disabled under
+           prefers-reduced-motion). Pinned to the water layer's bounds. -->
       <div
         class="water-sheen pointer-events-none absolute inset-x-0 bottom-0 h-11 overflow-hidden"
         aria-hidden="true"
       />
-      <!-- Boat carrying the poop emoji. Bottom-left, sized to sit
-           with hull straddling the wave-line — top half over the
-           transparent area, hull in the water. -->
+      <!-- Boat carrying the poop emoji, hull straddling the wave-line. -->
       <svg
         class="absolute bottom-2 left-2 size-20"
         viewBox="0 0 80 80"
@@ -241,10 +202,7 @@ const topRepos = computed(() =>
         <path d="M34 54 Q40 57 46 54" stroke="#1f2937" stroke-width="1.5" fill="none" stroke-linecap="round" />
         <path d="M8 60 L72 60 L62 72 L18 72 Z" fill="#1d4ed8" />
       </svg>
-      <!-- Title + subtitle. Pinned to the bottom of the hero so the
-           subtitle's baseline sits just inside the water's bottom
-           edge — the block reads as a caption floating on the wave.
-           Padded left to clear the boat. -->
+      <!-- Title + subtitle, pinned to the hero bottom, padded left to clear the boat. -->
       <div class="absolute inset-x-0 bottom-3 pl-24">
         <h1 class="text-4xl font-bold tracking-tight text-slate-900">
           ShipShow
@@ -262,20 +220,10 @@ const topRepos = computed(() =>
       </div>
     </header>
 
-    <!-- `perspective-[1200px]` sets the vanishing point depth for every
-         card's 3D hover transform. Each card carries its own slightly
-         different rotateX / rotateY pair via StatCard3D's `tilt` prop so
-         the grid reads as six distinct surfaces under hover, not one
-         repeated template. Tone follows CMY-RGB (Members keeps the
-         original blue): row 1 = cyan / fuchsia / blue, row 2 = yellow /
-         green / red. -->
+    <!-- `[perspective:1200px]` sets the shared depth for each card's 3D
+         hover tilt; per-card `tilt` props vary the rotateX/rotateY so the
+         grid reads as distinct surfaces. -->
     <section class="grid grid-cols-1 gap-4 [perspective:1200px] sm:grid-cols-2 lg:grid-cols-3">
-      <!-- Repos / Projects don't link anywhere yet — dedicated browse pages
-           are next on the roadmap. The "Browse all →" hint is rendered as
-           a placeholder so all six cards keep the same vertical rhythm
-           (otherwise the two hint-less cards collapse to a shorter height
-           and break the grid baseline). Swap to a real `to` prop when the
-           pages land. -->
       <StatCard3D
         label="Repositories"
         :value="repos"
@@ -332,20 +280,13 @@ const topRepos = computed(() =>
       />
     </section>
 
-    <!-- Workspace-wide 365-day commit heatmap. Sits between the stat
-         cards and the tabbed Contributors / Activity panel — the same
-         year-grid component used on user / repo / project detail
-         pages, fed by the unfiltered /api/activity-daily aggregate. -->
+    <!-- Workspace-wide 365-day heatmap (unfiltered /api/activity-daily). -->
     <section class="mt-8">
       <h2 class="mb-3 text-lg font-semibold text-slate-900">Activity — last 365 days</h2>
       <CommitHeatmap :data="dailyCommits" />
     </section>
 
     <section class="mt-8">
-      <!-- Tab buttons + contextual controls. Switching the active tab swaps
-           both the right-side controls (window vs. filter dropdowns) and the
-           panel below. Both panels are height-capped to the same value so the
-           surrounding layout stays stable across tab switches. -->
       <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
         <div role="tablist" class="flex gap-1 text-sm" aria-label="Dashboard panels">
           <button
@@ -429,8 +370,6 @@ const topRepos = computed(() =>
         </div>
       </div>
 
-      <!-- Contributors tab — internal scroll matches the activity panel so
-           swapping tabs doesn't reflow the page. -->
       <div
         v-show="activeTab === 'contributors'"
         role="tabpanel"
@@ -439,11 +378,9 @@ const topRepos = computed(() =>
         <div :style="{ height: ACTIVITY_PANEL_HEIGHT, overflowY: 'hidden' }">
           <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
             <li v-for="(c, i) in stats.topContributors" :key="`${c.entityKind}:${c.entityId}`">
-              <!-- Whole row is one link target — `group` lives on the
-                   RouterLink so descendant `group-hover:*` variants still
-                   match on hover, and the row gets a soft slate-50 wash so
-                   it reads as clickable everywhere, not just on the name.
-                   Person rows link to /people/:id, user rows to /users/:id. -->
+              <!-- Whole row is the link target — `group` lives on the
+                   RouterLink so descendant `group-hover:*` still match.
+                   Person rows → /people/:id, user rows → /users/:id. -->
               <RouterLink
                 :to="
                   c.entityKind === 'person'
@@ -463,26 +400,17 @@ const topRepos = computed(() =>
                     ×{{ c.attachedUserIds.length }}
                   </span>
                 </span>
-                <!-- Vertical dividers flank the share bar — same height as
-                   the bar, same `gap-3` spacing on both sides — so the bar
-                   reads as a contained metric channel rather than free-
-                   floating between the name and the sparkline. On row
-                   hover both dividers shift to blue-600, matching the
-                   sparkline's hover treatment. -->
+                <!-- Vertical dividers flanking the share bar; shift to
+                     blue-600 on row hover to match the sparkline. -->
                 <span
                   class="h-6 w-px shrink-0 bg-slate-200 transition-colors group-hover:bg-blue-600"
                   aria-hidden="true"
                 />
                 <!-- Bar: log-normalised volume (adds + dels) over the
-                   active 7d/30d window. The list is sorted by momentum;
-                   this bar layers in window-scoped churn on a log scale
-                   so the spread is readable across orders of magnitude.
-                   Gradient `blue-200 → blue-700` covers the full track
-                   (position-in-track determines the shade — left = light,
-                   right = deep), and a `bg-slate-100` overlay masks the
-                   unfilled right portion. Tooltip surfaces the raw
-                   Momentum / Consistency values so the visual stays
-                   honest about what the rank is built from. -->
+                     active window. List is sorted by momentum; the bar
+                     layers in window-scoped churn on a log scale. Gradient
+                     fills the full track; a `bg-slate-100` overlay masks
+                     the unfilled right portion. -->
                 <div
                   class="relative h-6 min-w-0 flex-1 overflow-hidden rounded-sm bg-gradient-to-r from-blue-200 to-blue-700"
                   :title="`Momentum: ${tooltipMomentum(c.momentum)} · Consistency: ${tooltipConsistency(c.consistency90d)} · Volume: ${tooltipVolume(c)}`"
@@ -494,8 +422,7 @@ const topRepos = computed(() =>
                   />
                   <span class="share-bar-sheen pointer-events-none absolute inset-0" aria-hidden="true" />
                 </div>
-                <!-- `mr-4` on the right divider pushes the sparkline farther
-                   from the bar — bar→sparkline gap = gap-3 + mr-4 = 28px. -->
+                <!-- `mr-4` widens the bar→sparkline gap. -->
                 <span
                   class="mr-4 h-6 w-px shrink-0 bg-slate-200 transition-colors group-hover:bg-blue-600"
                   aria-hidden="true"
@@ -506,24 +433,15 @@ const topRepos = computed(() =>
                   :height="16"
                   class="shrink-0 text-slate-400 transition-colors group-hover:text-blue-600"
                 />
-                <!-- Window-scoped adds / dels — same 3-column grid as
-                     the Members table, with the `/` centered in a
-                     fixed column so the separator lines up vertically
-                     down the panel. Adds right-justify into the gap,
-                     dels left-justify out of it. -->
+                <!-- Window-scoped adds / dels — `/` centered in a fixed
+                     column so the separator lines up down the panel. -->
                 <div class="grid w-32 shrink-0 grid-cols-[1fr_auto_1fr] items-baseline gap-1 text-xs tabular-nums">
                   <span class="text-right text-emerald-600">+{{ c.additionsWindow.toLocaleString() }}</span>
                   <span class="text-slate-300">/</span>
                   <span class="text-left text-rose-600">−{{ c.deletionsWindow.toLocaleString() }}</span>
                 </div>
-                <!-- Digit gets the flex-1 left slot (right-aligned via
-                     text-right); label sits in a fixed-width right
-                     slot, left-aligned, plural-aware. Because the
-                     label box is the same width on every row, the
-                     digit's right edge and the label's left edge
-                     are uniform across rows — `1 commit` / `1 repo`
-                     stay grammatically correct without breaking the
-                     column alignment. -->
+                <!-- Fixed-width label box keeps digit/label edges aligned
+                     across rows while staying plural-aware (1 commit). -->
                 <div class="flex w-24 shrink-0 items-baseline gap-1 text-sm tabular-nums text-slate-500">
                   <span class="flex-1 text-right">{{ c.commits }}</span>
                   <span class="w-14 text-left">commit{{ c.commits !== 1 ? 's' : '' }}</span>
@@ -539,8 +457,7 @@ const topRepos = computed(() =>
             No commits in the {{ windowLabel(stats.contributorsWindow).toLowerCase() }}.
           </p>
         </div>
-        <!-- "More →" footer — sits below the height-capped scrolling area
-             so it stays in view regardless of how many rows render above. -->
+        <!-- "More →" footer, below the height-capped scroll area so it stays in view. -->
         <RouterLink
           :to="{ name: 'members' }"
           class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
@@ -549,15 +466,11 @@ const topRepos = computed(() =>
         </RouterLink>
       </div>
 
-      <!-- Activity tab — same height cap so the surrounding layout doesn't
-           shift when switching tabs. v-show keeps the component mounted, so
-           any filter state / loaded pages stay live across tab toggles. -->
+      <!-- v-show (not v-if) keeps filter state / loaded pages live across tab toggles. -->
       <div v-show="activeTab === 'activity'" role="tabpanel">
         <ActivityFeed :actor="filterActor" :repo="filterRepo" :project="filterProject" :height="ACTIVITY_PANEL_HEIGHT">
           <template #footer>
-            <!-- Mirror of the contributors footer. Lands on /activity
-                 with the "last 7 days" range pre-applied so the user
-                 picks up where the dashboard's quick-look left off. -->
+            <!-- Lands on /activity with the last-7-days range pre-applied. -->
             <RouterLink
               :to="{ name: 'activity', query: { after: activitySinceSevenDays } }"
               class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
@@ -569,10 +482,6 @@ const topRepos = computed(() =>
       </div>
     </section>
 
-    <!-- Top 10 repositories by recent commit volume. Always visible —
-         a workspace-wide leaderboard belongs above the fold rather
-         than behind a collapsible row. The dedicated Projects page
-         carries the full searchable / paginated list. -->
     <section class="mt-8">
       <h2 class="mb-3 text-lg font-semibold text-slate-900">Top 10 repositories · last 30 days</h2>
       <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -617,9 +526,6 @@ const topRepos = computed(() =>
           </tbody>
         </table>
         <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No tracked repositories.</p>
-        <!-- "More →" footer matches the contributors / activity tab
-             footers — pinned to the bottom edge of the card, lands on
-             the dedicated /repositories index. -->
         <RouterLink
           :to="{ name: 'repositories' }"
           class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
@@ -634,11 +540,8 @@ const topRepos = computed(() =>
 </template>
 
 <style scoped>
-/* Share-bar sheen: a soft white band that sweeps left→right across the
- * bar once each time its parent row enters hover. Resting state is
- * off-screen-left + invisible; the animation property is only attached
- * while the row is hovered, so removing hover removes the rule entirely
- * and re-hovering re-applies it (which restarts the animation). */
+/* Share-bar sheen: a white band sweeps once per hover. The animation is
+ * only attached on hover, so removing/re-hovering restarts it. */
 @keyframes share-bar-wave {
   from {
     transform: translateX(-100%);
@@ -658,11 +561,8 @@ const topRepos = computed(() =>
   animation: share-bar-wave 0.9s ease-out 1 both;
 }
 
-/* Slow left→right shimmer over the hero water. Same idea as the
- * Repositories top-5 bar sweep — a soft translucent gradient
- * translating from one edge to the other on a long ease-in-out
- * loop. Lives in the .water-sheen overlay div pinned to the water
- * layer's bounds so the boat / text above stay untouched. */
+/* Slow shimmer over the hero water — a translucent gradient on a long
+ * ease-in-out loop, pinned to the .water-sheen overlay's bounds. */
 @keyframes water-sheen-sweep {
   0% {
     transform: translateX(-100%);

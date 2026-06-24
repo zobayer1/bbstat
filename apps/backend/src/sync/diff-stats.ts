@@ -1,31 +1,13 @@
 // Per-commit diff-stat ingest — fetches /diffstat/:sha and persists
-// additions / deletions / files_changed onto each commit row. Two call
-// paths share the inner walker:
+// additions / deletions / files_changed. Two call paths share this walker:
+// inline-eager (forward, fed the just-inserted rows by
+// syncRepositoryCommits) and backfill (backward, fed a global newest-first
+// pickup by runDiffStatsBackfillTick).
 //
-//   1. Inline-eager (forward path) — invoked by `syncRepositoryCommits`
-//      right after `insertCommits` returns the newly-landed rows. We feed
-//      those rows directly into `fetchDiffStatsForCommits`, so brand-new
-//      commits get their stats with minimal lag and without a DB pickup.
-//
-//   2. Backfill (backward path) — invoked by `runDiffStatsBackfillTick`
-//      after the deepen tick, lower priority than commit-list ingest.
-//      That orchestrator does a single global newest-first pickup
-//      across every non-archived non-excluded repo
-//      (`commits.diff_stats_synced_at IS NULL`, ORDER BY
-//      `commits.authored_at DESC`) and walks the resulting queue
-//      directly — the per-repo `syncRepositoryDiffStats` wrapper that
-//      used to live here was removed in 2026-05.
-//
-// Resumability lives on `diff_stats_synced_at`: a successful fetch +
-// UPDATE stamps now(), so the next pickup query skips it. A transient
-// failure (HTTP 5xx, network blip) leaves the row NULL → retried next
-// tick. A persistent 4xx on a single commit will waste one BB call per
-// tick until investigated, but won't block others since the loop
-// continues past per-commit errors.
-//
-// Per-repo opt-in was removed in 2026-05; every non-archived
-// non-excluded repo participates by default. The walker's only gate
-// is now the empty-commits short-circuit in `fetchDiffStatsForCommits`.
+// Resumability lives on `diff_stats_synced_at`: a successful fetch stamps
+// now() so the next pickup skips it; a transient failure leaves it NULL to
+// retry next tick. The loop continues past per-commit errors so one bad
+// commit never blocks others.
 
 import { getCommitDiffStat } from '../bitbucket/diff-stats.js';
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
@@ -34,27 +16,20 @@ import { DIFF_STATS_FAILURE_THRESHOLD, type CommitStore, type PendingDiffStatCom
 import type { RepositoryHandle } from './commits.js';
 
 export interface DiffStatsSyncOptions {
-  // Headroom below BITBUCKET_HOURLY_CALL_BUDGET. The loop stops scheduling
-  // new commits once getBudgetRemaining() falls below this; remaining
-  // pending commits are picked up on the next tick.
+  // Headroom below the hourly budget; the loop stops scheduling new
+  // commits below it and the rest is picked up next tick.
   budgetThreshold: number;
 }
 
 export interface DiffStatsSyncResult {
-  // Commits whose diff stats were successfully fetched + persisted this run.
   updated: number;
-  // Commits whose fetch failed and remain pending (diff_stats_synced_at IS NULL).
+  // Fetch failed; row stays pending (diff_stats_synced_at IS NULL).
   failed: number;
-  // Commits that were pulled from the pickup query this tick but not
-  // processed before the walker bailed (budget gate hit mid-batch).
-  // = pending.length - updated - failed. Surfaced for log clarity:
-  // "this repo had work pending but couldn't drain it this tick."
+  // Pulled this tick but not processed (budget gate hit mid-batch).
   deferred: number;
-  // True iff the budget gate fired and we stopped before draining the pickup.
   hitBudgetGate: boolean;
-  // UTC day range covering every commit whose diff stats just landed. Consumed
-  // by the rollup hook to scope the commit_daily refresh. Null when nothing
-  // was successfully updated.
+  // UTC day range over commits whose diff stats just landed; scopes the
+  // commit_daily refresh. Null when nothing updated.
   diffStatsRange: { sinceDay: string; untilDay: string } | null;
 }
 
@@ -73,11 +48,8 @@ const EMPTY: DiffStatsSyncResult = {
 };
 
 // Inline-eager forward path. Fetches diff stats for an explicit list of
-// commits (typically the ones just inserted by `syncRepositoryCommits`)
-// — no DB pickup, no per-tick cap (caller decides how many rows to
-// pass in). Budget gate still applies so a fat batch can't blow the
-// hourly cap. Backfill path lives in diff-stats-tick.ts which uses a
-// global newest-first pickup across the whole opted-in pool.
+// commits — no DB pickup, no per-tick cap (caller decides the batch). The
+// budget gate still applies so a fat batch can't blow the hourly cap.
 export async function fetchDiffStatsForCommits(
   deps: DiffStatsSyncDeps,
   repo: RepositoryHandle,
@@ -115,12 +87,10 @@ async function walkAndPersist(
       );
       break;
     }
-    // Pre-emptive yield when the adaptive pacer has fully saturated.
-    // Continuing to call at the ceiling (default 3.2 s/call) makes minimal
-    // progress and produces a stream of 429s — better to defer the
-    // remaining commits to the next cron firing. Throws RateLimitError so
-    // the orchestrator yields the whole tick (instead of just this repo),
-    // mirroring the post-retry-exhaustion path.
+    // Pre-emptive yield when the pacer is saturated: calling at the ceiling
+    // (default 3.2 s/call) makes minimal progress and just produces 429s.
+    // Throws RateLimitError so the orchestrator yields the whole tick, not
+    // just this repo.
     if (deps.client.isPacingSaturated()) {
       deps.logger?.warn?.(
         {
@@ -143,37 +113,24 @@ async function walkAndPersist(
       );
       await deps.store.updateCommitDiffStats(commit.id, stat);
       updated++;
-      // YYYY-MM-DD of the commit's authored_at, matching Postgres'
-      // `(date_trunc('day', x AT TIME ZONE 'UTC'))::date` exactly — same
-      // bucketing the rollup uses, so the range we hand back lines up.
+      // YYYY-MM-DD matching Postgres' UTC day bucketing, so the range we
+      // hand back lines up with the rollup.
       const day = commit.authoredAt.toISOString().slice(0, 10);
       if (sinceDay === null || day < sinceDay) sinceDay = day;
       if (untilDay === null || day > untilDay) untilDay = day;
     } catch (err) {
-      // Rate-limit-exhausted is a tick-wide stop signal, NOT a per-commit
-      // failure. The BitbucketClient throws this only after pacing has
-      // topped out (default 3200ms) AND BB still 429s through the
-      // in-request retry budget — soldiering on to the next commit just
-      // hammers BB and produces dozens more 429s per tick. Re-throw so
-      // `runDiffStatsBackfillTick` can yield the queue to the next cron
-      // firing, by which time BB's rolling window has rotated and the
-      // pacer has had time to decay.
+      // Rate-limit-exhausted is a tick-wide stop, NOT a per-commit failure
+      // — re-throw so runDiffStatsBackfillTick yields the queue to the next
+      // cron firing rather than hammering BB with more 429s.
       if (err instanceof BitbucketRateLimitError) {
         throw err;
       }
       failed++;
-      // Same failure-budget mechanics as `runDiffStatsBackfillTick`: 555
-      // (BB compute timeout on this commit's diff) is persistent for the
-      // commit shape — weight 3 short-circuits the threshold on a single
-      // strike. Other 5xx / network blips get weight 1 so 3 cross-tick
-      // failures are needed before giving up.
-      //
-      // Without this, a heavy commit pushed *right now* would fail
-      // inline-eager (without counter increment), then fail again in the
-      // next backfill tick (which DOES increment) — paying ~2× the BB
-      // calls. Inline-eager touching the counter keeps the give-up path
-      // consistent regardless of which orchestrator surfaced the
-      // failure first.
+      // Same failure-budget as the backfill tick: 555 weight 3 (crosses on
+      // one strike), other failures weight 1. Incrementing the counter here
+      // too keeps the give-up path consistent — otherwise a heavy commit
+      // would fail inline-eager without counting, then fail again in
+      // backfill, paying ~2× the BB calls.
       const is555 = err instanceof BitbucketApiError && err.status === 555;
       const weight = is555 ? DIFF_STATS_FAILURE_THRESHOLD : 1;
       const newCount = await deps.store.incrementDiffStatsFailure(commit.id, weight);
@@ -218,10 +175,8 @@ async function walkAndPersist(
     hitBudgetGate,
     diffStatsRange,
   };
-  // No-op completions (zero commits walked, zero rows updated/failed,
-  // no budget gate fired) log at debug — they fire per opted-in repo
-  // per backfill tick once a repo has fully drained, and at 26+
-  // opted-in repos × 12 ticks/hr this saturates the log without signal.
+  // No-op completions log at debug — they fire per repo per tick once a
+  // repo has drained, which would saturate the log without signal.
   if (updated === 0 && failed === 0 && deferred === 0 && !hitBudgetGate) {
     deps.logger?.debug?.(logFields, 'diff-stats sync complete (idle)');
   } else {

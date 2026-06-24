@@ -1,8 +1,5 @@
-// CLI utility: verifies BitBucket credentials end-to-end before any sync
-// code runs. Hits /workspaces/<ws>, prints the workspace metadata and the
-// rate-limit budget snapshot. Exits 0 on success, 1 on any failure.
-//
-// Run from the repo root: `make doctor`
+// CLI: verifies BitBucket credentials end-to-end (GET /workspaces/<ws>) before
+// any sync runs. `make doctor`. Exits 0 on success, 1 on any failure.
 
 /* eslint-disable no-console -- CLI utility, console output is the deliverable */
 

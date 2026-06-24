@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import { defineTool, ToolError } from './types.js';
 
-// Project rollup. The project key is the grouping key shown on repo rows
-// (list_repositories) and on the dashboard Projects panel.
 export const projectStatsTool = defineTool({
   name: 'get_project_stats',
   title: 'Project stats',

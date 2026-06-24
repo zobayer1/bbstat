@@ -1,11 +1,7 @@
 <script setup lang="ts">
-// Compact connection-state indicator for the live updates surface.
-// Renders nothing while the SSE pipe is healthy ('open') — the operator
-// shouldn't need a status badge to tell them "everything's fine."
-// Surfaces a small pill when the stream is reconnecting (the
-// EventSource is mid-retry per the backend's `retry: 5000` directive)
-// or closed (parent component is shutting down — typically only seen
-// briefly on app teardown).
+// Connection-state pill for live updates. Renders nothing while the SSE pipe
+// is 'open' — no badge needed to say "everything's fine". Shows when the
+// EventSource is reconnecting or closed.
 
 import { computed } from 'vue';
 import type { LiveConnectionState } from '@/lib/live';

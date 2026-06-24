@@ -1,15 +1,8 @@
 <script setup lang="ts">
-// Dashboard stat card with a watermark SVG glyph anchored to the right
-// edge and a subtle 3D hover transform. Six variants — one per dashboard
-// card — keyed by `tone` (the highlight colour the glyph flips to on
-// hover) and `tilt` (the rotateX/rotateY pair so each card's hover
-// rotates a slightly different way; users notice the difference under
-// the hood without consciously cataloguing it).
-//
-// When `to` is set the wrapper renders as a `<RouterLink>` so the whole
-// card is clickable. When omitted it renders as a plain div with the
-// hover transform still applied (consistent visual treatment across all
-// six cards even when only some navigate).
+// Dashboard stat card with a watermark SVG glyph and a 3D hover transform,
+// keyed by `tone` (hover highlight colour) and `tilt` (per-card rotateX/Y).
+// With `to` set it's a clickable RouterLink; otherwise a plain div that keeps
+// the same hover treatment for visual consistency.
 
 import { computed } from 'vue';
 import { RouterLink, type RouteLocationRaw } from 'vue-router';
@@ -20,21 +13,17 @@ const props = defineProps<{
   label: string;
   value: string | number;
   hint?: string;
-  // SVG path `d` attribute. We render the glyph inline so each card can
-  // own its own shape without an icon-library dependency. Stroke-only,
-  // currentColor-driven — the tone class on the SVG drives the colour.
+  // SVG path `d`, rendered inline (no icon-library dependency). Stroke-only,
+  // coloured via the tone class.
   glyphPath: string;
   tone: Tone;
-  // rotateX (positive = tip forward) / rotateY (positive = tilt right)
-  // in degrees. Members card stays at +6 / -4 to match the existing
-  // pattern; other cards get small unique variations.
+  // rotateX (positive = tip forward) / rotateY (positive = tilt right), degrees.
   tilt: { x: number; y: number };
   to?: RouteLocationRaw;
 }>();
 
-// Static class lookups — Tailwind's JIT needs each class to appear as a
-// literal string somewhere in the source, so we can't compose them from
-// the `tone` prop at runtime via string concatenation. Keep them here.
+// Full literal class strings — Tailwind's JIT only emits classes it can see in
+// source, so these can't be composed from the `tone` prop at runtime.
 const TONE_CLASSES: Record<Tone, string> = {
   cyan: 'text-slate-300 group-hover:text-cyan-500 group-focus-visible:text-cyan-500',
   fuchsia: 'text-slate-300 group-hover:text-fuchsia-500 group-focus-visible:text-fuchsia-500',
@@ -79,12 +68,9 @@ const hoverTransform = computed(() => {
 </template>
 
 <style scoped>
-/* Per-card tilt drives a CSS custom property so each instance hovers
-   with its own rotateX/rotateY pair. Defined here (scoped) instead of
-   as an inline `:style="{ transform: hoverTransform }"` because the
-   transform is on `:hover`, not at rest — Vue's `:style` would clobber
-   the base transform, while a CSS variable lets the cascade apply only
-   when hover matches. */
+/* Driven by a CSS variable rather than inline `:style` because the transform
+   applies only on :hover — inline style would clobber the base transform,
+   while the variable lets the cascade apply it only when hover matches. */
 .group:hover {
   transform: var(--hover-transform);
 }

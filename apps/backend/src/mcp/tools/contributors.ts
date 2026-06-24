@@ -1,9 +1,6 @@
 import { z } from 'zod';
 import { defineTool, ToolError } from './types.js';
 
-// Leaderboard over a trailing window. Each row carries entityKind + entityId,
-// which is exactly what get_contributor_summary needs — so this doubles as a
-// resolver from "who's active" to a drillable id.
 export const topContributorsTool = defineTool({
   name: 'top_contributors',
   title: 'Top contributors',
@@ -24,8 +21,6 @@ export const topContributorsTool = defineTool({
   },
 });
 
-// The directory. Resolve a name / email a human mentions into the
-// entity_kind + entity_id that the detail tools key on.
 export const listMembersTool = defineTool({
   name: 'list_members',
   title: 'List members',
@@ -37,9 +32,7 @@ export const listMembersTool = defineTool({
   },
 });
 
-// Full per-contributor detail. Dispatches on entity_kind: 'user' (a single
-// unmerged BitBucket account) vs 'person' (a merged identity aggregating
-// several aliases). Ids are NOT interchangeable across kinds.
+// Dispatches on entity_kind: 'user' and 'person' ids are NOT interchangeable.
 export const contributorSummaryTool = defineTool({
   name: 'get_contributor_summary',
   title: 'Contributor summary',

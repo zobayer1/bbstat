@@ -1,14 +1,10 @@
-// CLI utility: re-aggregates `commit_daily` from the entire `commits` table
-// via a single unscoped UPSERT. Reconciles drift when commits land outside
-// the wrapped sync path (raw SQL imports, restored backups, migrations
-// applied after pre-hook sync runs). Idempotent and safe to re-run.
+// CLI: re-aggregates `commit_daily` from all of `commits` via one unscoped
+// UPSERT, reconciling drift when commits land outside the wrapped sync path
+// (raw SQL imports, restored backups). Idempotent. `make rebuild-rollups`.
 //
-// Shipped as a script (not an HTTP admin endpoint) because the deployment
-// has no auth yet — shell access is a sharper authz fence for a heavy
-// destructive-shaped operation. Logic lives on RollupStore.rebuildAll so
-// a future authenticated admin route can reuse it without duplication.
-//
-// Run from the repo root: `make rebuild-rollups`
+// A script, not an HTTP endpoint, because the deployment has no auth yet —
+// shell access is a sharper authz fence for a destructive-shaped operation.
+// Logic lives on RollupStore.rebuildAll so a future admin route can reuse it.
 
 /* eslint-disable no-console -- CLI utility, console output is the deliverable */
 

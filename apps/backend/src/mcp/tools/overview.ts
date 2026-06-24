@@ -1,6 +1,5 @@
 import { defineTool } from './types.js';
 
-// Org-wide headline numbers — the cheapest "how's the workspace doing?" call.
 export const getOverviewTool = defineTool({
   name: 'get_overview',
   title: 'Org overview',

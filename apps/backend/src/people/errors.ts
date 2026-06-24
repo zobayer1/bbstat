@@ -1,12 +1,10 @@
-// Typed errors thrown by PeopleStore mutations. Route handlers do
-// instanceof checks to translate to HTTP status codes:
+// Typed errors thrown by PeopleStore mutations. Route handlers instanceof-check
+// these to translate to HTTP status codes:
 //
 //   PersonNotFoundError              → 404
 //   UserNotFoundError                → 404
-//   UserAlreadyAttachedError         → 409 (conflict — caller must detach first)
-//   UserNotAttachedToPersonError     → 400 (caller passed the wrong personId)
-//
-// Same naming convention as bitbucket/errors.ts.
+//   UserAlreadyAttachedError         → 409 (caller must detach first)
+//   UserNotAttachedToPersonError     → 400 (wrong personId)
 
 export class PersonNotFoundError extends Error {
   constructor(public readonly personId: number) {
@@ -22,11 +20,8 @@ export class UserNotFoundError extends Error {
   }
 }
 
-// Thrown when an attach (or create-with-primary) targets a user whose
-// `person_id` is already non-NULL — regardless of whether the existing
-// attachment is to the same person or a different one. The caller must
-// detach first if they intend to re-attach; the store does NOT
-// auto-move aliases between people.
+// Attach targeting a user whose `person_id` is already non-NULL (same or
+// different person). The store does NOT auto-move aliases — caller detaches first.
 export class UserAlreadyAttachedError extends Error {
   constructor(
     public readonly userId: number,
@@ -37,10 +32,8 @@ export class UserAlreadyAttachedError extends Error {
   }
 }
 
-// Thrown by detach / setPrimary when the user exists but isn't attached
-// to the personId in the URL (either unattached or attached to a
-// different person). Distinct from UserNotFoundError so the route can
-// pick the right HTTP code + error code.
+// detach / setPrimary when the user exists but isn't attached to the URL's
+// personId. Distinct from UserNotFoundError so the route picks the right code.
 export class UserNotAttachedToPersonError extends Error {
   constructor(
     public readonly userId: number,

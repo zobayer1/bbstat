@@ -14,12 +14,9 @@ export interface ActivityFilters {
 
 const PAGE_SIZE = 50;
 
-// Hard ceiling on how many entries any single filtered view will accumulate
-// in memory. Once a filter set reaches this many entries, `loadMore` is a
-// no-op — the UI surfaces a "narrow your filter" hint. Defensive against
-// runaway scroll on a workspace with thousands of ingested commits + PRs:
-// 500 rows is plenty to skim, the DOM stays responsive, and the
-// per-filter Pinia cache stays small.
+// Hard ceiling per filtered view. Once reached, `loadMore` is a no-op and the
+// UI surfaces a "narrow your filter" hint — defends against runaway scroll
+// keeping the DOM responsive and the per-filter Pinia cache small.
 export const MAX_ENTRIES_PER_FILTER = 500;
 
 function keyFor(filters: ActivityFilters): string {
@@ -32,19 +29,15 @@ function keyFor(filters: ActivityFilters): string {
   });
 }
 
-// Keyed cache of paginated activity-feed pages. Pinia is the client-side
-// cache per CLAUDE.md — backend is the source of truth. Intentionally NOT
-// persisted: an "activity feed" is volatile by nature, and persisting it
-// would write potentially hundreds of KB to localStorage on every page
-// navigation as a user scrolls. Fresh fetch on mount is what you actually
-// want here.
+// Keyed cache of paginated activity-feed pages. Intentionally NOT persisted:
+// the feed is volatile, and persisting it would write hundreds of KB to
+// localStorage as the user scrolls. Fresh fetch on mount is what we want.
 export const useActivityStore = defineStore('activity', () => {
   const byKey = ref<Record<string, ActivityEntry[]>>({});
   const loading = ref<Record<string, boolean>>({});
   const error = ref<Record<string, string | null>>({});
-  // `exhausted` is set when a fetch returns fewer rows than PAGE_SIZE —
-  // signals "no more pages on the server" so the IntersectionObserver
-  // sentinel doesn't keep firing loadMore.
+  // Set when a fetch returns fewer rows than PAGE_SIZE — "no more pages",
+  // so the IntersectionObserver sentinel stops firing loadMore.
   const exhausted = ref<Record<string, boolean>>({});
 
   async function load(filters: ActivityFilters): Promise<void> {
@@ -66,10 +59,8 @@ export const useActivityStore = defineStore('activity', () => {
     const key = keyFor(filters);
     if (exhausted.value[key] === true) return;
     const current = byKey.value[key] ?? [];
-    // Defensive cap: stop accumulating once we hit the per-filter ceiling.
-    // The component's IntersectionObserver also checks `isCapped` so we
-    // shouldn't normally get here, but a stray callsite or a future tweak
-    // shouldn't bypass the ceiling.
+    // Defensive cap — the component's IntersectionObserver also checks
+    // `isCapped`, but a stray callsite shouldn't bypass the ceiling.
     if (current.length >= MAX_ENTRIES_PER_FILTER) return;
     if (current.length === 0) {
       await load(filters);
@@ -100,13 +91,10 @@ export const useActivityStore = defineStore('activity', () => {
     exhausted.value = {};
   }
 
-  // Live updates: re-fetch the first page for every currently-loaded
-  // filter. New entries surface at the top; pagination state (the
-  // user's accumulated additional pages) is intentionally NOT
-  // preserved — `load()` overwrites `byKey[key]` with the fresh page.
-  // For an activity feed this is the right call: a "live" feed
-  // shouldn't strand the user 10 pages deep in stale data when a tick
-  // just landed new commits at the top.
+  // Re-fetch page 1 for every loaded filter. Accumulated extra pages are
+  // intentionally NOT preserved — `load()` overwrites with the fresh page so
+  // a live feed doesn't strand the user N pages deep in stale data when a
+  // tick lands new commits at the top.
   async function applyTickComplete(): Promise<void> {
     const keys = Object.keys(byKey.value);
     await Promise.all(
@@ -114,8 +102,7 @@ export const useActivityStore = defineStore('activity', () => {
         const filters = JSON.parse(key) as { actor: string | null; repo: string | null; project: string | null };
         const restored: ActivityFilters = {};
         if (filters.actor !== null) {
-          // Stored as "kind:id" (see keyFor) — split back into the
-          // discriminated actor.
+          // Stored as "kind:id" (see keyFor) — split back into the actor.
           const sep = filters.actor.indexOf(':');
           const kind = filters.actor.slice(0, sep);
           const id = Number(filters.actor.slice(sep + 1));
@@ -130,9 +117,6 @@ export const useActivityStore = defineStore('activity', () => {
     );
   }
 
-  // Wire push + polling fallback. Both call applyTickComplete so the
-  // store has one re-fetch path regardless of trigger. Stays registered
-  // for the app lifetime — Pinia stores aren't torn down in an SPA.
   liveBus.on('tick.commits.complete', () => {
     void applyTickComplete();
   });
@@ -142,8 +126,8 @@ export const useActivityStore = defineStore('activity', () => {
   liveBus.on('repository.deleted', () => {
     void applyTickComplete();
   });
-  // Phase 5 — attach / detach / dissolve changes which commits a person
-  // filter resolves to, so any cached person-filtered feed must refetch.
+  // Attach / detach / dissolve changes which commits a person filter
+  // resolves to, so any cached person-filtered feed must refetch.
   liveBus.on('person.attached', () => {
     void applyTickComplete();
   });

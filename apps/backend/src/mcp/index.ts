@@ -1,7 +1,7 @@
 // Entrypoint for the read-only MCP server — the fourth role of the backend
 // image (alongside API / sync / migrate), run as a separate compose service
-// with `command: ['dist/mcp/index.js']`. Reads the same Postgres store as the
-// dashboard via the in-process StatsStore; never calls BitBucket.
+// with `command: ['dist/mcp/index.js']`. Reads the dashboard's Postgres store
+// via the in-process StatsStore; never calls BitBucket.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -16,9 +16,9 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger(config.NODE_ENV);
 
-  // Fail loud: the endpoint is meant to be exposed publicly, so refuse to
-  // start without a signing secret. The other roles ignore MCP_TOKEN_SECRET,
-  // so the shared config keeps it optional — this is the only enforcement.
+  // The endpoint is exposed publicly, so refuse to start without a signing
+  // secret. Other roles ignore MCP_TOKEN_SECRET (shared config keeps it
+  // optional), so this is the only place it's enforced.
   if (config.MCP_TOKEN_SECRET === undefined || config.MCP_TOKEN_SECRET === '') {
     logger.error('MCP_TOKEN_SECRET must be set to start the MCP server. Mint tokens with the mcp:mint-token CLI.');
     process.exit(1);
@@ -28,10 +28,9 @@ async function main(): Promise<void> {
   const store = createDrizzleStatsStore(db);
 
   // TLS parity with the API server: terminate HTTPS in-process when
-  // BACKEND_TLS=on (host dev), using the shared self-signed cert. In the
-  // container BACKEND_TLS=off, so we serve plain HTTP behind the proxy. The
-  // image ships no certs and won't find them with BACKEND_TLS=on — same
-  // constraint as the backend. repoRoot is 4 levels up from src/mcp/.
+  // BACKEND_TLS=on (host dev); the container sets BACKEND_TLS=off and serves
+  // plain HTTP behind the proxy. The image ships no certs and won't start with
+  // BACKEND_TLS=on. repoRoot is 4 levels up from src/mcp/.
   const repoRoot = resolve(import.meta.dirname, '..', '..', '..', '..');
   const https =
     config.BACKEND_TLS === 'on'

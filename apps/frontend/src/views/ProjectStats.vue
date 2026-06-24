@@ -25,34 +25,28 @@ const error = computed(() => store.error[projectKey.value] ?? null);
 
 onMounted(() => {
   void store.fetch(projectKey.value);
-  // Stats store feeds the repo dropdown options below — a deep link
-  // into /projects/:key won't have the dashboard's prior fetch.
+  // Feeds the repo dropdown; a deep link won't have a prior fetch.
   void globalStats.fetchOverview();
 });
 watch(projectKey, (next) => {
-  // Reset pagination when navigating between projects.
   repositoriesPage.value = 1;
   void store.fetch(next);
 });
 
-// Project is pinned via route params, so we expose a repo + user filter
-// pair only. The repo dropdown is auto-trimmed to this project's repos
-// via the composable's `pinProject` option.
+// Project is pinned via route params → repo + user filter only. Repo
+// dropdown is auto-trimmed to this project via `pinProject`.
 const { repoModel: filterRepo, repoOptions: repoFilterOptions } = useActivityFilters({
   repositories: computed(() => globalStats.repositories),
   pinProject: () => projectKey.value,
 });
 
-// Workspace of any repo in the project. Picking the first one is
-// safe — the tracked set is single-workspace per deployment per
-// CLAUDE.md, and a BB project always lives inside exactly one
-// workspace anyway. Used to build the canonical BB project URL
-// surfaced via the "View on BitBucket" link in the page header.
+// Workspace for the "View on BitBucket" header link. Single-workspace
+// deployment and a BB project lives in exactly one workspace, so the
+// first repo's workspace is canonical.
 const projectWorkspace = computed(() => stats.value?.repositories[0]?.workspace);
 
-// 30-day cutoff as YYYY-MM-DD for the "See all activities →" link.
-// Matches the Activity page's range-preset detection so the title chip
-// lights up "[Last 30 days]" on landing.
+// 30-day cutoff for the "See all activities →" link; matches the Activity
+// page's preset detection so the "[Last 30 days]" chip lights up.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -65,16 +59,14 @@ const filterActor = useActorFilter();
 
 const formatLastCommit = (iso: string | null): string => (iso === null ? '—' : new Date(iso).toLocaleString());
 
-// Pagination state for the repositories table. Backend already sorts by
-// `last_commit_at DESC NULLS LAST`, so this slice presents pages in
-// freshness order without any client-side reshaping.
+// Backend already sorts by `last_commit_at DESC NULLS LAST`, so this slice
+// is freshness-ordered with no client-side reshaping.
 const PAGE_SIZE = 10;
 const repositoriesPage = ref(1);
 const repositoriesPageCount = computed(() =>
   Math.max(1, Math.ceil((stats.value?.repositories.length ?? 0) / PAGE_SIZE)),
 );
-// Clamp current page when the underlying list shrinks — keeps the
-// template safe from out-of-range indices mid-render.
+// Clamp when the list shrinks so the template can't index out of range.
 const repositoriesPageClamped = computed(() => Math.min(repositoriesPage.value, repositoriesPageCount.value));
 const pagedRepositories = computed(() => {
   const all = stats.value?.repositories ?? [];
@@ -94,9 +86,7 @@ const pagedRepositories = computed(() => {
       />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">{{ projectKey }}</h1>
-        <!-- Thin external link to the canonical BB project page —
-             hidden until we know the workspace (the link is built
-             from the first repo's workspace once stats land). -->
+        <!-- BB project link; hidden until the workspace is known. -->
         <a
           v-if="projectWorkspace"
           :href="`https://bitbucket.org/${projectWorkspace}/workspace/projects/${projectKey}`"
@@ -206,20 +196,15 @@ const pagedRepositories = computed(() => {
         </div>
       </section>
 
-      <!-- Contributor table — same layout as the per-repo Contributors
-           list on RepoActivity.vue (rank · name · sparkline · adds /
-           dels · commits). Data is project-scoped: sparkline + diff
-           stats aggregate across every repo carrying this project's
-           key. Sparkline excludes merge commits via the same NOT
-           is_merge predicate used by the repo-page query. -->
+      <!-- Project-scoped contributor table: sparkline + diff stats
+           aggregate across every repo in this project; sparkline excludes
+           merge commits. -->
       <section class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Contributors — last 30 days</h2>
         <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
           <ul v-if="stats.topContributors.length > 0" class="divide-y divide-slate-100">
             <li v-for="(c, i) in stats.topContributors" :key="`${c.entityKind}:${c.entityId}`">
-              <!-- Person rows link to /people/:id, user rows to /users/:id.
-                   Name follows the dashboard Top Contributors pattern:
-                   truncate + ×N merged pill when a person has >1 alias. -->
+              <!-- Person rows → /people/:id, user rows → /users/:id. -->
               <RouterLink
                 :to="
                   c.entityKind === 'person'
@@ -268,10 +253,7 @@ const pagedRepositories = computed(() => {
       <section class="mt-8">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
           <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
-          <!-- Project is pinned by the route, so the user gets a repo
-               filter (auto-trimmed to this project's repos by the
-               composable) plus a user filter sourced from the project's
-               own contributor list. -->
+          <!-- Project pinned by route → repo filter (auto-trimmed) + user filter. -->
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <label for="project-filter-repo" class="flex items-center gap-1">
               <span class="text-slate-500">Repository:</span>
@@ -294,8 +276,7 @@ const pagedRepositories = computed(() => {
         </div>
         <ActivityFeed :project="projectKey" :repo="filterRepo" :actor="filterActor" height="24rem">
           <template #footer>
-            <!-- "See all activities →" pre-applies this project so the
-                 dedicated /activity page lands on the same scope. -->
+            <!-- Pre-applies this project on /activity. -->
             <RouterLink
               :to="{ name: 'activity', query: { project: projectKey, after: activitySinceThirtyDays } }"
               class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"

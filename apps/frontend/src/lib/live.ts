@@ -1,37 +1,28 @@
-// Live updates: EventSource wrapper + typed event bus + low-cadence
-// polling fallback. One EventSource per browser tab, mounted at
-// App.vue. Per-store handlers register via `liveBus.on(...)` at first
-// store use; subscriptions persist for the app lifetime.
+// Live updates: EventSource wrapper + typed event bus + low-cadence polling
+// fallback. One EventSource per browser tab, mounted at App.vue. Subscriptions
+// register via `liveBus.on(...)` and persist for the app lifetime.
 //
-// Backend protocol: GET /api/live (Server-Sent Events). Each frame is
-// `event: <name>\ndata: <json>\n\n`. See apps/backend/src/routes/live.ts
-// for the wire format and apps/backend/src/events/bus.ts for the event
-// catalog. Frontend mirrors the slim payloads in api/client.ts.
+// Backend protocol: GET /api/live (SSE), frames `event: <name>\ndata: <json>\n\n`.
+// See apps/backend/src/routes/live.ts (wire format) + events/bus.ts (catalog).
 //
-// Polling fallback: when no event has arrived in `POLL_FALLBACK_MS`
-// (default 5 min), the bus emits a synthetic 'fallback.poll' signal so
-// stores can re-fetch as if a tick had landed. Fires whenever push is
-// stale regardless of connection state — covers SSE drops, NAT idle
-// timeouts, and proxy disconnects without needing per-store retry logic.
+// Polling fallback: when no event arrives in POLL_FALLBACK_MS, the bus emits a
+// synthetic fallback signal so stores re-fetch as if a tick landed. Fires on
+// stale push regardless of connection state — covers SSE drops, NAT idle
+// timeouts, and proxy disconnects without per-store retry logic.
 
 import { onMounted, onUnmounted, ref, type Ref } from 'vue';
 import type { LiveEventMap, LiveEventName } from '@/api/client';
 
-// 5 minutes — matches the commits cron cadence on the backend, so a
-// healthy push pipeline emits tick.commits.complete before the poll
-// timer fires. When SSE works, polling is effectively idle.
+// Matches the backend commits cron cadence, so a healthy push emits
+// tick.commits.complete before this fires — polling stays idle when SSE works.
 const POLL_FALLBACK_MS = 5 * 60 * 1000;
-// Tick the poll-check loop more often than the threshold so the
-// fallback latency is bounded. Cheap: a single Date.now() compare.
+// Check more often than the threshold to bound fallback latency (cheap).
 const POLL_CHECK_MS = 30 * 1000;
 
 export type LiveConnectionState = 'connecting' | 'open' | 'closed';
 
-// Typed pub/sub for live events. Stores register handlers via `on()`;
-// the EventSource pumps received frames in via internal `emit()`. The
-// extra 'fallback.poll' channel fires synthetically when SSE has been
-// stale beyond POLL_FALLBACK_MS — stores listen on it the same way
-// they would for any backend event.
+// Typed pub/sub for live events. The extra fallback channel fires
+// synthetically when SSE has been stale beyond POLL_FALLBACK_MS.
 type Handler<P> = (payload: P) => void;
 type FallbackHandler = () => void;
 
@@ -83,22 +74,20 @@ class LiveEventBus {
     }
   }
 
-  // Test-only: tear down every registered handler. Pinia setup-style
-  // stores register handlers on first use; in tests, each fresh Pinia
-  // re-runs the setup factory and would otherwise pile up dangling
-  // handlers from prior test cases. Call in beforeEach to reset.
+  // Test-only: tear down every handler. Each fresh Pinia re-runs the store
+  // setup factory and would otherwise pile up dangling handlers across test
+  // cases. Call in beforeEach.
   clear(): void {
     this.handlers.clear();
     this.fallbackHandlers.clear();
   }
 }
 
-// Single global instance — one per browser tab, shared across every
-// store that wants to listen.
+// Single global instance — one per browser tab.
 export const liveBus = new LiveEventBus();
 
-// All event names the backend emits. Keep in sync with
-// LiveEventMap in api/client.ts.
+// All event names the backend emits. Keep in sync with LiveEventMap in
+// api/client.ts.
 const EVENT_NAMES: readonly LiveEventName[] = [
   'tick.commits.complete',
   'tick.prs.complete',
@@ -118,15 +107,14 @@ export interface LiveStreamHandle {
   connectionState: Ref<LiveConnectionState>;
 }
 
-// Mount at App.vue level. Opens the EventSource, wires the polling
-// fallback, exposes `connectionState` for any UI surface (e.g., the
-// "reconnecting…" pill in the header) that wants to react.
+// Mount at App.vue level. Opens the EventSource, wires the polling fallback,
+// exposes `connectionState` for any UI surface (e.g. the reconnect pill).
 export function useLiveStream(): LiveStreamHandle {
   const connectionState = ref<LiveConnectionState>('connecting');
   let eventSource: EventSource | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
-  // Wall-clock of the last activity (event arrival OR open). Used by
-  // the poll-check loop to decide when push has gone stale.
+  // Wall-clock of the last activity (event arrival OR open); the poll-check
+  // loop uses it to decide when push has gone stale.
   let lastActivityMs = Date.now();
 
   function recordActivity(): void {
@@ -134,11 +122,9 @@ export function useLiveStream(): LiveStreamHandle {
   }
 
   function open(): void {
-    // Mirror api/client.ts: dev environment runs the frontend at
-    // :5173 and the backend at :8443, so we need the absolute URL.
-    // VITE_API_BASE_URL is set in .env at the repo root and resolved
-    // at build time. Production builds typically leave it empty so
-    // the EventSource hits the same origin as the deployed app.
+    // Dev runs the frontend (:5173) cross-origin to the backend (:8443), so
+    // VITE_API_BASE_URL (baked at build time) gives the absolute URL.
+    // Production leaves it empty so the EventSource hits the same origin.
     const baseUrl = import.meta.env.VITE_API_BASE_URL ?? '';
     eventSource = new EventSource(`${baseUrl}/api/live`);
     eventSource.onopen = () => {
@@ -146,15 +132,13 @@ export function useLiveStream(): LiveStreamHandle {
       recordActivity();
     };
     eventSource.onerror = () => {
-      // EventSource auto-reconnects per the backend's `retry: 5000`
-      // directive — we just surface the in-flight state to any UI
-      // that's watching.
+      // EventSource auto-reconnects per the backend's `retry: 5000` — just
+      // surface the in-flight state.
       connectionState.value = 'connecting';
     };
-    // Register one listener per known event name. EventSource dispatch
-    // is keyed by the `event:` line in each frame; without explicit
-    // listeners, frames land on the generic onmessage which is keyed
-    // to the default 'message' event.
+    // One listener per event name: EventSource dispatch is keyed by the
+    // `event:` line, so without explicit listeners frames land on the
+    // default 'message' channel instead.
     for (const name of EVENT_NAMES) {
       eventSource.addEventListener(name, ((e: Event) => {
         const msg = e as MessageEvent;

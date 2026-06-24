@@ -1,13 +1,11 @@
 <script setup lang="ts">
 // Renders the unified commits + PRs timeline from /api/activity. Props
 // scope the feed to a single actor / repo / project (omit all for the
-// org-wide view). IntersectionObserver-driven infinite scroll: the
-// sentinel below the list fires loadMore when it scrolls into view.
+// org-wide view). IntersectionObserver-driven infinite scroll.
 //
-// The store keys its cache by the serialized filter triple, so mounting
-// the same component with different props doesn't blow the cache —
-// switching between repositories on a project page, for example, keeps
-// the previous repo's pages around for instant return.
+// The store keys its cache by the serialized filter triple, so switching
+// props (e.g. between repositories on a project page) keeps the previous
+// filter's pages around for instant return.
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { MAX_ENTRIES_PER_FILTER, useActivityStore, type ActivityFilters } from '@/stores/activity';
@@ -16,20 +14,16 @@ import ActivityRow from './ActivityRow.vue';
 import CommitDetailModal from './CommitDetailModal.vue';
 
 const props = defineProps<{
-  // Phase 5: an actor scopes the feed to one user OR one person (which
-  // expands server-side to all the person's aliases). Omit for an
-  // unscoped feed.
+  // An actor scopes the feed to one user OR one person (expanded server-side
+  // to all the person's aliases). Omit for an unscoped feed.
   actor?: ActivityActor;
   repo?: string;
   project?: string;
   // Optional fixed CSS height (e.g., '24rem'). When set, the list scrolls
-  // inside the component at exactly this height — the container does NOT
-  // shrink to fit short content. Fixed (vs. max-height) so callers like
+  // inside the component at exactly this height (fixed, not max-height) so
   // tabbed dashboards can swap panels without surrounding components
-  // reflowing. The IntersectionObserver uses the scroll container as its
-  // root so paging still fires as the sentinel scrolls into the inner
-  // viewport. Omit (e.g., a future full-page activity view) for natural
-  // page-flow height.
+  // reflowing; the IntersectionObserver uses the scroll container as its
+  // root. Omit for natural page-flow height.
   height?: string;
 }>();
 
@@ -48,20 +42,17 @@ const entries = computed<ActivityEntry[]>(() => store.byKey[filterKey.value] ?? 
 const isLoading = computed(() => store.loading[filterKey.value] === true);
 const errMsg = computed(() => store.error[filterKey.value] ?? null);
 const isExhausted = computed(() => store.exhausted[filterKey.value] === true);
-// Front-end cap independent of server pagination: once the per-filter array
-// hits MAX_ENTRIES_PER_FILTER the IntersectionObserver stops firing
-// loadMore and the footer surfaces a "narrow your filter" hint instead of
-// the "No more activity" message.
+// Front-end cap independent of server pagination: at MAX_ENTRIES_PER_FILTER
+// the observer stops firing loadMore and the footer shows a "narrow your
+// filter" hint instead of "No more activity".
 const isCapped = computed(() => entries.value.length >= MAX_ENTRIES_PER_FILTER);
 
 onMounted(() => void store.load(filters.value));
 watch(filterKey, () => void store.load(filters.value));
 
-// IntersectionObserver wiring. The sentinel below the list fires loadMore
-// when it becomes visible. When `height` is set the list scrolls inside
-// `scrollContainer` — we hand that element to the observer's `root` so the
-// sentinel becomes "intersecting" relative to the inner viewport, not the
-// outer page. With no height `root: null` falls back to the page viewport.
+// When `height` is set the list scrolls inside `scrollContainer`, so it
+// becomes the observer's `root` (sentinel intersects relative to the inner
+// viewport). With no height `root: null` falls back to the page viewport.
 const sentinel = ref<HTMLElement | null>(null);
 const scrollContainer = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
@@ -85,17 +76,14 @@ onUnmounted(() => {
 
 function entryKey(e: ActivityEntry): string {
   if (e.kind === 'commit') return `c-${e.sha}`;
-  // PR can resurface at multiple positions over its lifetime as updated_on
-  // advances — include occurredAt so the Vue list key is unique per
-  // appearance.
+  // A PR can resurface at multiple positions as updated_on advances — include
+  // occurredAt so the list key is unique per appearance.
   return `p-${e.repository.fullName}-${e.prId}-${e.occurredAt}`;
 }
 
-// Commit detail modal — clicking a commit's title / sha opens a centered
-// dialog with the full message, stats, and prev/next navigation through
-// commits in the currently-loaded feed. PR entries are deliberately
-// out of scope; they have their own BB URL conventions and a different
-// detail shape.
+// Commit detail modal with prev/next navigation through commits in the
+// currently-loaded feed. PR entries are deliberately out of scope — they
+// have a different detail shape.
 const commitEntries = computed<ActivityCommit[]>(() =>
   entries.value.filter((e): e is ActivityCommit => e.kind === 'commit'),
 );
@@ -144,8 +132,8 @@ function nextCommit(): void {
         No activity yet for this view.
       </p>
 
-      <!-- Infinite-scroll sentinel + status row. Sentinel must exist in the DOM
-           even when entries are empty so the first scroll into view can fire. -->
+      <!-- Sentinel must exist in the DOM even when entries are empty so the
+           first scroll into view can fire. -->
       <div ref="sentinel" class="h-px" />
       <p v-if="isLoading" class="px-4 py-2 text-center text-xs text-slate-400">Loading…</p>
       <p v-else-if="isCapped" class="border-t border-slate-100 px-4 py-2 text-center text-xs text-slate-500">
@@ -159,11 +147,8 @@ function nextCommit(): void {
       </p>
     </div>
 
-    <!-- Optional footer slot — used by the Dashboard to drop a "More →"
-         link below the scrolling region. Other callers (User / Repo /
-         Project pages) don't provide a footer; the slot is silently
-         empty in that case. Sits outside `scrollContainer` so it stays
-         visible while the list scrolls underneath. -->
+    <!-- Sits outside `scrollContainer` so it stays visible while the list
+         scrolls underneath. Used by the Dashboard for a "More →" link. -->
     <slot name="footer" />
 
     <CommitDetailModal

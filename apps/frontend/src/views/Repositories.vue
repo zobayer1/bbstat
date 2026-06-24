@@ -1,19 +1,6 @@
 <script setup lang="ts">
-// /repositories index page.
-//
-// Operator-leaning sibling to /projects: every tracked repo with
-// sortable columns, project + sync-status filters, and a sync-health
-// donut up top so a glance answers "is the pipeline healthy?". The
-// row count is workspace-bounded (~30–50 repos in practice), so 25
-// per page handles the bulk in one visit while leaving paginator
-// affordances for outliers.
-//
-// Sections, top to bottom:
-//   1. Header (breadcrumb, title, subtitle)
-//   2. Sync-health donut (full-width card)
-//   3. Search + project filter + status pill toggle + count
-//   4. Sortable repo table (25/page, full-row click)
-//   5. Activity feed with "See all activities →" footer
+// /repositories index — every tracked repo with sortable columns, project +
+// sync-status filters, a sync-health donut, and an activity feed.
 
 import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
@@ -32,25 +19,17 @@ const stats = useStatsStore();
 const route = useRoute();
 const router = useRouter();
 
-// Workspace for the "View on BitBucket" header link. Derived from
-// the first tracked repo — the app is single-workspace by design,
-// so any row's workspace is canonical. Empty until stats land,
-// which hides the link via v-if rather than rendering a broken URL.
+// Workspace for the "View on BitBucket" header link. Single-workspace
+// deployment, so any row's workspace is canonical; empty until stats land.
 const workspace = computed(() => stats.repositories[0]?.workspace ?? '');
 
-// Re-fetch on mount so a deep link into /repositories doesn't depend
-// on a prior dashboard visit. The stats store already wires its own
-// SSE subscriptions for the table + chart data — both surfaces read
-// from `stats.repositories`, so nothing extra is needed at the view.
+// Re-fetch on mount so a deep link doesn't depend on a prior dashboard
+// visit (the stats store wires its own SSE subscriptions).
 onMounted(() => {
   void stats.fetchOverview();
 });
 
-// ---------------------------------------------------------------------------
-// URL <-> filter state. Search + project + status all live in
-// `route.query` so deep links and the Back button work.
-// ---------------------------------------------------------------------------
-
+// Search + project + status all live in `route.query` (deep links + Back).
 function setQueryParam(key: string, value: string | undefined): void {
   const next = { ...route.query };
   if (value === undefined || value === '') delete next[key];
@@ -76,8 +55,7 @@ const statusFilter = computed<StatusFilter>({
   set: (v) => setQueryParam('status', v === 'all' ? undefined : v),
 });
 
-// 30-day cutoff for the "See all activities →" footer — matches the
-// detail-page footers so /activity lands with the [Last 30 days] chip.
+// 30-day cutoff for the "See all activities →" footer.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -87,11 +65,9 @@ function localDateString(d: Date): string {
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
-// Activity-feed filters (project / repo / contributor), mirroring the
-// Projects page. These are SEPARATE controls from the repositories
-// table filter above, so they use prefixed query keys (`aproject` /
-// `arepo`) to avoid colliding with the table's own `?project`. The
-// contributor axis is the shared person-aware ActorPicker on `?actor`.
+// Activity-feed filters — SEPARATE from the table filter above, so they use
+// prefixed query keys (`aproject` / `arepo`) to avoid colliding with the
+// table's own `?project`.
 const filterActor = useActorFilter();
 const {
   projectModel: activityProject,
@@ -113,19 +89,14 @@ function clearActivityFilters(): void {
   void router.replace({ query: next });
 }
 
-// ---------------------------------------------------------------------------
-// Derived data
-// ---------------------------------------------------------------------------
-
 const projectOptions = computed<string[]>(() => {
   const set = new Set<string>();
   for (const r of stats.repositories) if (r.project !== null) set.add(r.project);
   return Array.from(set).sort();
 });
 
-// Sync-health donut. Buckets are mutually exclusive so the slices sum
-// to total repo count. Colours mirror the SyncStateIcon palette so
-// the chart and the per-row icons share a visual language.
+// Sync-health donut. Buckets are mutually exclusive (slices sum to total).
+// Colours mirror the SyncStateIcon palette.
 const SYNC_COLORS: Record<RepoSyncStatus, string> = {
   ok: '#10b981', // emerald-500
   error: '#f59e0b', // amber-500
@@ -146,13 +117,9 @@ const syncBuckets = computed<ActivityBucket[]>(() => {
   ];
 });
 
-// Compound bar chart input — top 5 repos by 30-day commit volume.
-// Bar length is scaled by commits; the bar's internal green/red split
-// encodes the adds:dels ratio for that repo. Two scales co-existing
-// in one bar gives the row a single visual unit conveying both
-// "throughput" and "change shape". Capped at 5 because the chart now
-// shares the panel row with the donut + legend — fewer rows lets the
-// remaining bars stay tall enough to read.
+// Compound bar chart — top 5 repos by 30-day commits. Bar length scales by
+// commits; the internal green/red split encodes the adds:dels ratio, so one
+// bar conveys both throughput and change shape.
 interface BarRow {
   workspace: string;
   slug: string;
@@ -161,11 +128,9 @@ interface BarRow {
   commits30d: number;
   additions30d: number;
   deletions30d: number;
-  // Length of the bar relative to the busiest repo in the top 10
-  // (percent). Lets the user see, at a glance, who's outsized.
+  // Bar length relative to the busiest repo (percent).
   widthPct: number;
-  // Internal split. Falls back to 50/50 on repos with no diff stats
-  // yet so the bar still renders something distinct from a gap.
+  // Internal split; falls back to 50/50 on repos with no diff stats yet.
   addPct: number;
   delPct: number;
 }
@@ -192,10 +157,7 @@ const topReposByCommits = computed<BarRow[]>(() => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Sort + filter + paginate (all client-side; the list is small)
-// ---------------------------------------------------------------------------
-
+// Sort + filter + paginate, all client-side (the list is small).
 type SortKey = 'slug' | 'project' | 'commits30d' | 'contributors30d' | 'lastCommitAt' | 'syncStatus';
 type SortDir = 'asc' | 'desc';
 const sortKey = ref<SortKey>('commits30d');
@@ -218,11 +180,9 @@ const filtered = computed<TrackedRepositorySummary[]>(() => {
   return stats.repositories.filter((r) => {
     if (projectScope !== undefined && r.project !== projectScope) return false;
     if (statusScope === 'active' && (r.syncStatus !== 'ok' || r.archived)) return false;
-    // Issues tab surfaces repos that aren't cleanly syncing: error / excluded
-    // (red/amber, need attention) plus empty (benign gray — listed so empty
-    // tracked repos are easy to find and triage / archive). Archived repos are
-    // excluded here regardless of their flags — they live in the Archived tab,
-    // which retains their issue icon — so an archived repo isn't double-listed.
+    // Issues tab: error / excluded (need attention) plus empty (benign, but
+    // listed so empty repos are easy to triage). Archived repos are excluded
+    // regardless of flags so they aren't double-listed (they live in Archived).
     if (
       statusScope === 'issues' &&
       (r.archived || (r.syncStatus !== 'error' && r.syncStatus !== 'excluded' && r.syncStatus !== 'empty'))
@@ -267,8 +227,7 @@ const paged = computed<TrackedRepositorySummary[]>(() => {
   return sorted.value.slice(start, start + PAGE_SIZE);
 });
 
-// Reset to page 1 whenever any filter changes — a search match of
-// three rows shouldn't strand the user on page 3 of nothing.
+// Reset to page 1 whenever any filter changes.
 watch([search, projectFilter, statusFilter], () => {
   page.value = 1;
 });
@@ -289,11 +248,6 @@ function openRepo(r: TrackedRepositorySummary): void {
   void router.push({ name: 'repository', params: { workspace: r.workspace, slug: r.slug } });
 }
 
-// ---------------------------------------------------------------------------
-// Project filter clear hook — useful when status pills + project filter
-// combine to an empty result and the user wants out fast.
-// ---------------------------------------------------------------------------
-
 const filtersActive = computed(
   () => search.value.trim() !== '' || projectFilter.value !== undefined || statusFilter.value !== 'all',
 );
@@ -312,9 +266,7 @@ function clearFilters(): void {
       <Breadcrumb :items="[{ label: 'Repositories', icon: GLYPHS.folder }]" />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">Repositories</h1>
-        <!-- Thin external link to BB's workspace-wide repository list.
-             Hidden until stats land so the URL is never built from an
-             empty workspace string. -->
+        <!-- BB repository list link; hidden until workspace is known. -->
         <a
           v-if="workspace"
           :href="`https://bitbucket.org/${workspace}/workspace/repositories`"
@@ -331,33 +283,17 @@ function clearFilters(): void {
       </p>
     </header>
 
-    <!-- Twin-chart panel: sync health on the left answers "anything
-         red that needs attention?"; the sunburst on the right answers
-         "where do commits land and who's driving them?". One shared
-         bordered card; a vertical divider (lg:divide-x) splits the
-         two halves on wide viewports, falling back to a horizontal
-         divider on narrow ones via divide-y. -->
+    <!-- Twin-chart panel: top-5 bar chart + sync-health donut in one
+         shared bordered card, split by a divider that flips horizontal
+         on narrow viewports. -->
     <section class="mb-6">
       <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-        <!-- 50/50 split on wide viewports — donut + its compact
-             legend land in the left half, bar chart on the right.
-             The donut takes meaningful horizontal real estate so the
-             bar list gets the matching half rather than the wider
-             allocation it had as a sibling-only component. Stacks on
-             narrow viewports via grid-cols-1 with a horizontal
-             divider via divide-y. -->
         <div class="grid grid-cols-1 divide-y divide-slate-100 lg:grid-cols-[3fr_2fr] lg:divide-x lg:divide-y-0">
           <div class="flex flex-col p-6">
             <h2 class="mb-4 text-xs font-medium uppercase tracking-wider text-slate-500">
               Top 5 repos by commits · last 30 days
             </h2>
-            <!-- Compound bar chart. Each row is one repo. The bar's
-                 length is the repo's commit count scaled against the
-                 busiest in the top-10 (so the leader is 100% wide).
-                 Inside the bar, a green segment for additions and a
-                 red segment for deletions are sized by their share of
-                 the repo's 30-day non-merge churn — the row encodes
-                 both throughput AND change shape at a glance. -->
+            <!-- Compound bar chart; see topReposByCommits. -->
             <ul v-if="topReposByCommits.length > 0" class="space-y-2">
               <li v-for="(r, i) in topReposByCommits" :key="r.fullName" class="text-xs">
                 <div class="mb-1 flex items-baseline justify-between gap-2">
@@ -394,10 +330,6 @@ function clearFilters(): void {
           </div>
           <div class="flex flex-col px-6 pb-6 pt-3">
             <h2 class="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">Sync health</h2>
-            <!-- Inside the right cell: legend reads first on the
-                 left, donut anchors the outer right edge. Percent
-                 column dropped — the donut centre's "Repos / N"
-                 already carries that summary. -->
             <ActivityStatusDonut
               :buckets="syncBuckets"
               center-label="Repos"
@@ -412,9 +344,6 @@ function clearFilters(): void {
       </div>
     </section>
 
-    <!-- Filter row: search · project · status pills · count. Same
-         layout idiom as the other index pages so the page feels
-         familiar after Members / Projects / Activity. -->
     <section class="mb-3 flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-3">
         <div class="relative">
@@ -517,9 +446,8 @@ function clearFilters(): void {
       </span>
     </section>
 
-    <!-- Repo table. Full row is clickable (cursor-pointer + @click on
-         the <tr>); the slug cell keeps its <RouterLink> for native
-         middle-click / Cmd-click open-in-new-tab support. -->
+    <!-- Full-row click; the slug cell keeps its RouterLink for native
+         middle/Cmd-click open-in-new-tab. -->
     <section class="mb-8 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <table v-if="paged.length > 0" class="min-w-full divide-y divide-slate-100 text-sm">
         <thead class="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
@@ -600,10 +528,7 @@ function clearFilters(): void {
               <span v-else>—</span>
             </td>
             <td class="px-2 py-2 text-center align-middle">
-              <!-- External BB link. `@click.stop` keeps the row-click
-                   handler from also firing (which would navigate to
-                   the in-app detail page on top of opening BB).
-                   `rel=noopener` is standard for target=_blank. -->
+              <!-- `@click.stop` so the row-click nav doesn't also fire. -->
               <a
                 :href="`https://bitbucket.org/${r.workspace}/${r.slug}`"
                 target="_blank"
@@ -682,10 +607,8 @@ function clearFilters(): void {
       </div>
     </section>
 
-    <!-- Activity feed with project / repo / contributor filters,
-         mirroring the Projects page. These are independent of the
-         repositories table filter above (prefixed query keys), so
-         narrowing the feed doesn't disturb the table. -->
+    <!-- Activity feed filters — independent of the table filter above
+         (prefixed query keys), so narrowing the feed doesn't disturb it. -->
     <section class="mb-4">
       <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
         <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
@@ -745,12 +668,9 @@ function clearFilters(): void {
 </template>
 
 <style scoped>
-/* Wave sheen on the compound bars — a translucent highlight band
-   sweeps left-to-right across each colored bar on a staggered loop,
-   so the top-5 list reads as alive rather than static. The overlay
-   only covers the colored portion (the fill div, not the grey
-   track), so quiet repos with short bars get a proportionally
-   shorter sweep. Disabled under prefers-reduced-motion. */
+/* Wave sheen on the compound bars — a translucent band sweeps across each
+   colored fill on a staggered loop. Covers only the fill (not the grey
+   track). Disabled under prefers-reduced-motion. */
 .wave-fill {
   position: relative;
   overflow: hidden;

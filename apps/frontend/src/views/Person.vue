@@ -23,8 +23,6 @@ const loading = computed(() => store.loading[personId.value] === true);
 const error = computed(() => store.error[personId.value] ?? null);
 
 // All attached aliases' git-author emails, de-duped, comma-separated.
-// A merged person can carry several (one per account); the header
-// marquees them so none are hidden.
 const emails = computed(() => {
   if (summary.value === undefined) return '';
   const seen = new Set<string>();
@@ -38,19 +36,14 @@ const emails = computed(() => {
   return list.join(', ');
 });
 
-// Email marquee — a left↔right *bounce*, not a rotating loop. We measure
-// how far the text overflows its capped-width container; if it fits,
-// nothing animates (static, left-aligned). If it overflows, the CSS
-// animation pauses at the start, scrolls left until the last character
-// reaches the right edge (`--email-shift` = -overflow px), pauses, then
-// scrolls back. A single copy means no second block ever peeks in.
+// Email marquee — a left↔right bounce (single copy), only when the text
+// overflows its capped-width container. `--email-shift` is the measured
+// overflow; static and left-aligned when it fits.
 const emailContainer = ref<HTMLElement | null>(null);
 const emailText = ref<HTMLElement | null>(null);
 const shiftPx = ref(0);
 const overflowing = computed(() => shiftPx.value > 0);
-// Scroll phases occupy ~38% of the cycle each (see keyframes); scale the
-// duration with the distance so the scroll speed stays roughly constant
-// regardless of how long the email list is.
+// Scale duration with distance so scroll speed stays roughly constant.
 const durationSec = computed(() => Math.max(8, Math.round(shiftPx.value / 18)));
 
 function measureMarquee(): void {
@@ -61,26 +54,21 @@ function measureMarquee(): void {
 
 onMounted(() => {
   void store.fetch(personId.value);
-  // The repo list powers the project + repo activity-filter dropdowns;
-  // a deep link into /people/:id won't have the dashboard's prior fetch.
+  // Repo list powers the filter dropdowns; a deep link won't have a prior fetch.
   void stats.fetchOverview();
   void nextTick(measureMarquee);
   window.addEventListener('resize', measureMarquee);
 });
 onUnmounted(() => window.removeEventListener('resize', measureMarquee));
 watch(personId, (next) => void store.fetch(next));
-// Re-measure once the email text actually changes / lands (async fetch,
-// or navigating between people).
+// Re-measure when the email text changes / lands.
 watch(emails, () => void nextTick(measureMarquee));
 
-// The feed actor is the person itself — the backend expands it to every
-// attached alias, so the feed shows the merged contributor's full
-// commit + PR stream across all their accounts.
+// Person actor — the backend expands it to every attached alias.
 const personActor = computed<ActivityActor>(() => ({ kind: 'person', id: personId.value }));
 
-// Project + repo filters narrow the person's feed. The person is pinned
-// (page subject), so there's no contributor dropdown. The composable
-// owns the URL sync + project↔repo interlock.
+// Project + repo filters narrow the person's feed (person is pinned, so no
+// contributor dropdown). The composable owns the project↔repo interlock.
 const {
   projectModel: filterProject,
   repoModel: filterRepo,
@@ -94,8 +82,8 @@ const projectOptions = computed<string[]>(() => {
   return Array.from(set).sort();
 });
 
-// 30-day cutoff for the "See all activities →" link; matches the
-// Activity page's range-preset detection so its title chip lights up.
+// 30-day cutoff for the "See all activities →" link; matches the Activity
+// page's preset detection so its title chip lights up.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -105,8 +93,7 @@ function localDateString(d: Date): string {
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
-// Compact "time ago" for the attached-accounts table's Last active column
-// (mirrors the Members table formatter). "—" when the alias has no commits.
+// Compact "time ago" for the attached-accounts Last active column; "—" when none.
 function relativeTime(iso: string | null): string {
   if (iso === null) return '—';
   const diffSec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -143,8 +130,6 @@ function relativeTime(iso: string | null): string {
           :badge="summary.person.badge"
           :tier="summary.person.badgeTier"
         />
-        <!-- Merged-identity marker, after the badge so the persona reads
-             first. -->
         <span
           v-if="summary"
           class="inline-block rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700"
@@ -153,9 +138,7 @@ function relativeTime(iso: string | null): string {
           merged ×{{ summary.attachedUsers.length }}
         </span>
       </div>
-      <!-- Every alias's git-author email, comma-separated. Capped width;
-           a single copy that bounces left↔right only when it overflows
-           (static otherwise). Full string is in the title tooltip. -->
+      <!-- Email marquee; full string in the title tooltip. -->
       <div v-if="emails" ref="emailContainer" class="mt-1 max-w-md overflow-hidden" :title="emails">
         <div
           ref="emailText"
@@ -235,12 +218,9 @@ function relativeTime(iso: string | null): string {
         </div>
       </section>
 
-      <!-- Attached accounts — the underlying BB aliases this person was
-           merged from. Each links to its per-alias /users/:id page,
-           which keeps its own single-account history view. The primary
-           alias (supplies the person's avatar / email defaults) is
-           flagged. Last active is per-alias; the person's own last-active
-           (shown in the Members table) is the max across these rows. -->
+      <!-- Attached accounts — the BB aliases this person was merged from,
+           each linking to its per-alias /users/:id page. Last active is
+           per-alias (the person's own is the max across these rows). -->
       <section class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Attached accounts</h2>
         <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -290,11 +270,8 @@ function relativeTime(iso: string | null): string {
       <section class="mt-8">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
           <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
-          <!-- Project + repo filters scoped to this person. The person is
-               pinned via `:actor` on the feed below (the backend expands
-               it to all attached aliases), so there's no contributor
-               dropdown here. The composable wires the project↔repo
-               interlock. -->
+          <!-- Project + repo filters; person pinned via `:actor` below
+               (no contributor dropdown). -->
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <label for="person-filter-project" class="flex items-center gap-1">
               <span class="text-slate-500">Project:</span>
@@ -326,8 +303,7 @@ function relativeTime(iso: string | null): string {
         </div>
         <ActivityFeed :actor="personActor" :project="filterProject" :repo="filterRepo" height="24rem">
           <template #footer>
-            <!-- "See all activities →" pre-applies this person so the
-                 dedicated /activity page lands on the same merged scope. -->
+            <!-- Pre-applies this person (merged scope) on /activity. -->
             <RouterLink
               :to="{
                 name: 'activity',
@@ -345,14 +321,9 @@ function relativeTime(iso: string | null): string {
 </template>
 
 <style scoped>
-/* Email bounce: a single text copy ping-pongs only when it overflows.
-   Pause at the start (0–12%), scroll left until the end reaches the
-   right edge (`--email-shift` px, set inline from the measured
-   overflow) by 50%, pause there (50–62%), then scroll back to the
-   start by 100%. `linear` keeps a constant scroll speed; the duration
-   (`--email-dur`) scales with the distance so speed is stable across
-   email-list lengths. No class is applied when the text fits, so it
-   stays static and left-aligned. */
+/* Email bounce: pause, scroll left to `--email-shift`, pause, scroll back.
+   `--email-shift` / `--email-dur` are set inline from the measured overflow;
+   the class is only applied when the text overflows. */
 .email-bounce {
   animation: email-bounce var(--email-dur, 12s) linear infinite;
 }

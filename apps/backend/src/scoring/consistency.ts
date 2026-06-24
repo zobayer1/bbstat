@@ -5,12 +5,9 @@ const MS_PER_DAY = 86_400_000;
 export interface ConsistencyResult {
   // regularity * paceFactor; the value displayed in the leaderboard column.
   consistency: number;
-  // 1 / (1 + cv_gap) — rewards predictable inter-active-day spacing.
-  // High for both daily committers and every-10-days bursters whose
-  // spacing is uniform; the badge classifier reads this directly for
-  // batch_betty so it's exposed alongside the combined value.
+  // 1 / (1 + cv_gap). High for both daily committers and uniformly-spaced
+  // every-10-days bursters; batch_betty reads this directly (ignores pace).
   regularity: number;
-  // (active_days / window)^BETA — small penalty for low activity rate.
   paceFactor: number;
 }
 
@@ -22,10 +19,9 @@ export interface ConsistencyResult {
 //   pace_factor  = (active_days / window) ^ beta          ∈ [0, 1]
 //   consistency  = regularity * pace_factor
 //
-// Caller passes any Date set — dedup + sort + day-key normalisation
-// happens here so the function is total. Inputs are interpreted at
-// day granularity (toISOString().slice(0, 10) keys), so two Dates on
-// the same calendar UTC day collapse to one active day.
+// Inputs are interpreted at UTC-day granularity (toISOString().slice(0, 10)
+// keys), so two Dates on the same calendar day collapse to one active day;
+// dedup + sort happen here so the function is total.
 export function computeConsistency(
   activeDays: ReadonlyArray<Date>,
   windowDays: number = CONSISTENCY_WINDOW_DAYS,

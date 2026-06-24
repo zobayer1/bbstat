@@ -4,12 +4,10 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   BACKEND_HOST: z.string().default('bbstat.localhost'),
   BACKEND_PORT: z.coerce.number().int().positive().default(8443),
-  // TLS toggle. In local dev the backend terminates HTTPS itself against the
-  // self-signed cert under etc/tls/. In containerized deployments TLS is
-  // terminated upstream (Traefik in dev-stack, the production reverse proxy
-  // in prod), and the backend listens on plain HTTP behind it. Set 'off' in
-  // those environments. When 'on' (the default), TLS_KEY_PATH / TLS_CERT_PATH
-  // must resolve to readable files.
+  // TLS toggle. 'on' (default): backend terminates HTTPS itself against the
+  // self-signed cert under etc/tls/ (TLS_KEY_PATH / TLS_CERT_PATH must be
+  // readable). 'off': TLS terminated upstream (Traefik / prod reverse proxy),
+  // backend listens on plain HTTP behind it.
   BACKEND_TLS: z.enum(['on', 'off']).default('on'),
   TLS_KEY_PATH: z.string().default('etc/tls/server.key'),
   TLS_CERT_PATH: z.string().default('etc/tls/server.crt'),
@@ -19,40 +17,33 @@ const envSchema = z.object({
   BITBUCKET_WORKSPACE: z.string().optional(),
   BITBUCKET_AUTH_EMAIL: z.string().optional(),
   BITBUCKET_AUTH_TOKEN: z.string().optional(),
-  // Soft cap on outbound BitBucket calls per rolling hour, enforced inside
-  // BitbucketClient. BB Cloud's documented per-identity limit is ~1000/hr;
-  // we run at the full cap by default since the gate is conservative (BB's
-  // rolling window is generous) and we'd rather use the headroom. See
-  // memory/bitbucket_rate_limit_headers.md.
+  // Soft cap on outbound BitBucket calls per rolling hour. BB Cloud's
+  // documented per-identity limit is ~1000/hr; we run at the full cap since
+  // the gate is conservative. See memory/bitbucket_rate_limit_headers.md.
   BITBUCKET_HOURLY_CALL_BUDGET: z.coerce.number().int().positive().default(1000),
-  // Minimum wall-clock interval between successive BB calls from this
-  // client. BB's documented 1000/hr cap hides a sub-second burst limiter
-  // that 429s when we issue calls faster than ~2-3 per second. 400ms
-  // (≈ 2.5 calls/sec) keeps us comfortably under that without dragging out
-  // single-call admin endpoints. Set to 0 to disable in test envs.
+  // Minimum wall-clock interval between successive BB calls. BB's documented
+  // 1000/hr cap hides a sub-second burst limiter that 429s above ~2-3
+  // calls/sec. 400ms (≈ 2.5/sec) stays under that without dragging out
+  // single-call admin endpoints. 0 disables (test envs).
   BITBUCKET_MIN_CALL_INTERVAL_MS: z.coerce.number().int().nonnegative().default(400),
-  // Hard ceiling for adaptive pacing. Each observed 429 doubles the
-  // current interval (400 → 800 → 1600 → 3200 by default), capped here.
-  // When the cap is reached and 429s persist, the BB client's retry
-  // budget exhausts and `BitbucketRateLimitError` propagates — which the
-  // tick orchestrators (commits + deepen) treat as a stop signal,
-  // deferring remaining repos to the next cron tick.
+  // Hard ceiling for adaptive pacing. Each 429 doubles the current interval
+  // (400 → 800 → 1600 → 3200), capped here. When capped and 429s persist,
+  // the retry budget exhausts and `BitbucketRateLimitError` propagates — the
+  // tick orchestrators treat that as a stop signal and defer remaining repos.
   BITBUCKET_MAX_CALL_INTERVAL_MS: z.coerce.number().int().nonnegative().default(3200),
 
-  // Path to the curated tracked-repository seed file (YAML). Resolved against
-  // the repo root if relative. If unset, defaults to `tracked-repos.yaml` at
-  // the repo root — and a missing default file is a no-op (admins add repos
-  // via POST /api/admin/repositories instead). If explicitly set, the file
-  // must exist or startup fails loud.
+  // Path to the curated tracked-repository seed file (YAML), resolved against
+  // the repo root if relative. Unset defaults to `tracked-repos.yaml` and a
+  // missing default file is a no-op (admins add repos via POST
+  // /api/admin/repositories). If explicitly set, the file must exist or
+  // startup fails loud.
   SEED_REPO_FILE_PATH: z.string().optional(),
 
   // Cron schedules. Defaults are tight to make crons easy to observe during
   // dev; lengthen them in production once we trust the runner.
   SYNC_MEMBERS_CRON: z.string().default('*/10 * * * *'),
   SYNC_REPOS_CRON: z.string().default('*/5 * * * *'),
-  // Commit cron also drives the piggybacked deepen-backfill step (see
-  // `DEEPEN_BUDGET_THRESHOLD` below). 5-minute cadence is comfortable
-  // under the hourly call budget for a curated tracked set of ~30 repos.
+  // Commit cron also drives the piggybacked deepen-backfill step.
   SYNC_COMMITS_CRON: z.string().default('*/5 * * * *'),
 
   // First-run cap on commit backfill per repo: stop after N pages of 100, or
@@ -88,77 +79,60 @@ const envSchema = z.object({
   SYNC_BACKOFF_MAX_INTERVAL_MIN: z.coerce.number().int().positive().default(1440),
 
   // Cold-repo admission cap for the commit + PR sync ticks. A "cold" repo
-  // has never been synced (`last_synced_at` / `pr_last_synced_at` IS NULL),
-  // so backoff can't apply (no activity signal yet) and it sorts to the head
-  // of the NULLS-FIRST queue. A bulk discovery sweep can dump hundreds of
-  // cold (old, inactive) repos at once — without a cap they monopolize the
-  // head of the queue and the BB-call budget every tick, starving the warm
-  // active rotation. The fix: warm (already-synced) repos are serviced first
-  // and in full; only this many cold repos are admitted per tick, so a
-  // discovery backlog backfills gradually in the leftover budget instead of
-  // preempting steady-state freshness. Set 0 to pause cold first-syncs
-  // entirely; raise to drain a backlog faster at the cost of warm headroom.
+  // has never been synced, so backoff can't apply (no activity signal) and it
+  // sorts to the head of the NULLS-FIRST queue. A bulk discovery sweep can
+  // dump hundreds of cold repos at once; without a cap they monopolize the
+  // queue and budget every tick, starving the warm active rotation. Warm
+  // repos are serviced first and in full; only this many cold repos are
+  // admitted per tick, so a discovery backlog backfills gradually in leftover
+  // budget. Set 0 to pause cold first-syncs; raise to drain a backlog faster.
   SYNC_MAX_COLD_REPOS_PER_TICK: z.coerce.number().int().nonnegative().default(5),
 
   // Per-commit diff-stat ingest (1 BB call per file-page of a commit's
   // /diffstat). Two parallel paths share the inner walker:
   //
-  //   * Inline-eager (forward) — runs inside the per-repo commit sync
-  //     against the commits *just inserted* on this tick.
-  //     `DIFF_STATS_BUDGET_THRESHOLD` is the headroom below the hourly
-  //     cap before the loop bails. Lower than the commit-tick threshold
-  //     because this runs after the commit batch has already consumed
-  //     budget.
+  //   * Inline-eager (forward) — runs inside the per-repo commit sync against
+  //     commits just inserted this tick. `DIFF_STATS_BUDGET_THRESHOLD` is the
+  //     headroom below the hourly cap before the loop bails — lower than the
+  //     commit-tick threshold because the commit batch already consumed budget.
   //
-  //   * Backfill (backward) — own tick after deepen + is-merge. Uses a
-  //     global newest-first pickup across every non-archived
-  //     non-excluded repo (no per-repo iteration; freshness rules).
-  //     `MAX_COMMITS_PER_TICK` caps total work per tick (was
-  //     per-repo before the 2026-05 rewrite). `BUDGET_THRESHOLD` is
-  //     the safety margin against running to zero — slightly above
-  //     the commit-tick threshold so we never starve the next cron
-  //     tick's commit ingest.
+  //   * Backfill (backward) — own tick after deepen + is-merge. Global
+  //     newest-first pickup across every non-archived non-excluded repo.
+  //     `MAX_COMMITS_PER_TICK` caps total work per tick. `BUDGET_THRESHOLD`
+  //     sits slightly above the commit-tick threshold so we never starve the
+  //     next cron tick's commit ingest.
   DIFF_STATS_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
   DIFF_STATS_BACKFILL_MAX_COMMITS_PER_TICK: z.coerce.number().int().positive().default(100),
   DIFF_STATS_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 
   // Retroactive is_merge backfill tick. Drains the pre-V1_7 backlog of
-  // `commits.is_merge = false` rows that should have been true (the
-  // migration set the default to false on every already-ingested row).
-  // Runs after deepen and before diff-stats backfill, sharing the same
-  // hourly call budget. MAX_PAGES caps per-repo per-tick work the same
-  // way deepen does. BUDGET_THRESHOLD sits between deepen's (100) and
-  // diff-stats backfill's (20): is-merge gets first crack at the
-  // leftover budget after deepen, but yields to deepen which is the
-  // higher priority (extending unknown history > correcting known
-  // rows).
+  // `commits.is_merge = false` rows that should have been true. Runs after
+  // deepen and before diff-stats backfill, sharing the hourly call budget.
+  // BUDGET_THRESHOLD sits between deepen's (100) and diff-stats backfill's
+  // (20): is-merge gets the leftover budget after deepen but yields to it
+  // (extending unknown history > correcting known rows).
   IS_MERGE_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   IS_MERGE_BACKFILL_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(50),
 
-  // Phase 4 T22: PR ingest. Runs on its own cron (default hourly — PRs
-  // mutate slower than commits, and at 160-repo scale every PR tick is
-  // ~160 BB calls, so spending 30 min cadence on a low-PR-traffic
-  // workspace is wasteful). Cold-mode cap is 5 pages × 100 = 500 PRs per
-  // repo on first sync; subsequent runs walk delta.
+  // PR ingest on its own cron (default hourly — PRs mutate slower than
+  // commits, and at 160-repo scale every PR tick is ~160 BB calls). Cold-mode
+  // cap is 5 pages × 100 = 500 PRs per repo on first sync; then delta.
   //
-  // `SYNC_PRS_ENABLED` is a kill switch on the cron registration only —
-  // the admin manual trigger (`POST /api/admin/sync/prs`) always works,
-  // so an operator can run a one-shot tick without touching env. Default
-  // is `false`: at TigerIT scale the PR backlog has been ingested and
-  // mutations are rare, so the hourly tick burns budget for near-zero
-  // delta. Set to `true` to re-enable scheduled ingest.
+  // `SYNC_PRS_ENABLED` gates the cron registration only — the admin manual
+  // trigger (`POST /api/admin/sync/prs`) always works. Default `false`: the
+  // PR backlog is ingested and mutations are rare, so the hourly tick burns
+  // budget for near-zero delta. Set `true` to re-enable scheduled ingest.
   SYNC_PRS_ENABLED: z
     .string()
     .default('false')
     .transform((v) => v === 'true' || v === '1'),
   SYNC_PRS_CRON: z.string().default('0 * * * *'),
   // Auto-track workspace repos via the discovery sweep
-  // (src/sync/repo-discovery.ts). Default `false`: enabling walks
-  // GET /repositories/{workspace} by updated_on (oldest first, Redis cursor)
-  // and tracks every untracked repo (forks of external repos excluded), which
-  // then ingest through the normal cold / deepen / backoff path. The admin
-  // dry-run preview (`POST /api/admin/sync/discover-repos`) works regardless
-  // of this flag; the flag only gates the cron sweep.
+  // (src/sync/repo-discovery.ts). Default `false`. Gates the cron sweep only —
+  // the admin dry-run preview (`POST /api/admin/sync/discover-repos`) works
+  // regardless. Enabling walks GET /repositories/{workspace} by updated_on
+  // (oldest first, Redis cursor) and tracks every untracked repo (external
+  // forks excluded) through the normal cold / deepen / backoff path.
   REPO_DISCOVERY_ENABLED: z
     .string()
     .default('false')
@@ -167,17 +141,12 @@ const envSchema = z.object({
   PR_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(3),
   PR_SYNC_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(20),
 
-  // Self-queueing deepen-backfill: piggybacks on the commit cron. After
-  // the normal delta tick finishes, if the BB-call budget still has at
-  // least DEEPEN_BUDGET_THRESHOLD headroom, the runner picks ONE repo
-  // whose `sync_state.deepen_complete` is still false and walks one
-  // bounded backfill page (DEEPEN_BACKFILL_MAX_PAGES × 100 commits)
-  // backwards from its oldest known commit. Once BB has nothing older
-  // for a repo, its `deepen_complete` flips true and it leaves the queue.
-  //
-  // Threshold is intentionally higher than the regular commit-tick gate
-  // (20) — deepen yields to delta sync. A reasonable default that still
-  // makes steady progress without crowding the budget.
+  // Self-queueing deepen-backfill, piggybacked on the commit cron. After the
+  // delta tick, if budget headroom ≥ DEEPEN_BUDGET_THRESHOLD, the runner picks
+  // ONE repo whose `deepen_complete` is false and walks one bounded backfill
+  // page backwards from its oldest known commit. Once BB has nothing older,
+  // `deepen_complete` flips true and it leaves the queue. Threshold is higher
+  // than the commit-tick gate (20) so deepen yields to delta sync.
   DEEPEN_BACKFILL_MAX_PAGES: z.coerce.number().int().positive().default(5),
   DEEPEN_BUDGET_THRESHOLD: z.coerce.number().int().nonnegative().default(100),
 
@@ -191,28 +160,21 @@ const envSchema = z.object({
   // Set to 0 to restore the old immediate-exclusion behavior.
   SYNC_EMPTY_GRACE_HOURS: z.coerce.number().nonnegative().default(24),
 
-  // Read-only MCP server (apps/backend/src/mcp) — a separate compose service
-  // on the same backend image (command: dist/mcp/index.js), exposing the
-  // dashboard read surface to LLM agents over streamable-HTTP. These vars are
-  // consumed ONLY by the mcp role; backend / sync / migrate ignore them. Kept
-  // optional so the shared config schema parses for every role — the mcp
-  // entrypoint fail-louds on a missing MCP_TOKEN_SECRET, the others never look.
+  // Read-only MCP server (apps/backend/src/mcp) — separate compose service on
+  // the same backend image. Consumed ONLY by the mcp role; backend / sync /
+  // migrate ignore them. Kept optional so the shared config schema parses for
+  // every role — the mcp entrypoint fail-louds on a missing MCP_TOKEN_SECRET.
   //
-  // TLS follows the SAME toggle as the API: BACKEND_TLS=on (host dev default)
-  // makes the mcp process terminate HTTPS itself using TLS_KEY_PATH /
-  // TLS_CERT_PATH (the shared bbstat.localhost cert), so it's reachable at
-  // https://bbstat.localhost:<MCP_PORT>/mcp — parity with the backend. In the
-  // container the image pins BACKEND_TLS=off, so mcp serves plain HTTP and the
-  // reverse proxy (Traefik in dev, the deployer's proxy in prod) terminates
-  // TLS. MCP_HOST mirrors BACKEND_HOST: defaults to bbstat.localhost for dev
-  // (loopback), and the compose service overrides it to 0.0.0.0 in-container.
+  // TLS follows the BACKEND_TLS toggle: 'on' (host dev) makes mcp terminate
+  // HTTPS itself with the shared cert; 'off' (container) serves plain HTTP
+  // behind the reverse proxy. MCP_HOST mirrors BACKEND_HOST (bbstat.localhost
+  // for dev, overridden to 0.0.0.0 in-container).
   MCP_HOST: z.string().default('bbstat.localhost'),
   MCP_PORT: z.coerce.number().int().positive().default(8090),
-  // HMAC key that signs + verifies consumer access tokens (see src/mcp/auth.ts
-  // and the mint-mcp-token CLI). No default: the server refuses to start
-  // without it, since the endpoint is meant to be exposed publicly. Rotating
-  // this value invalidates every previously minted token (the only revocation
-  // mechanism for now — tokens are stateless, no DB).
+  // HMAC key that signs + verifies consumer access tokens. No default: the
+  // server refuses to start without it. Rotating it invalidates every
+  // previously minted token (the only revocation mechanism — tokens are
+  // stateless, no DB).
   MCP_TOKEN_SECRET: z.string().optional(),
 });
 

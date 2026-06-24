@@ -1,8 +1,7 @@
 <script setup lang="ts">
-// `value` and `hint` are the simple-string contract; callers that need
-// styled / multi-color content (e.g., the repo-detail "Code changes" cards
-// rendering +adds / −dels in green/red) can use the `value` / `hint`
-// slots instead. Slot content wins when provided.
+// `value` / `hint` are the simple-string path; callers needing styled content
+// (e.g. +adds / −dels in green/red) use the `value` / `hint` slots, which win
+// when provided.
 defineProps<{
   label: string;
   value?: string | number;

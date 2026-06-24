@@ -1,21 +1,17 @@
-// Bump this whenever a persisted Pinia store changes shape — field added,
-// renamed, or removed; nested type altered; persisted-state plugin config
-// shifted. On every app boot, `bustStaleCacheIfNeeded` (lib/cache-bust.ts)
-// compares the value below against the sentinel persisted in localStorage
-// and, on mismatch, wipes every `bbstat-` prefixed key so stale shapes
-// can't render against new component code.
+// Bump this whenever a persisted Pinia store changes shape — field
+// added/renamed/removed, nested type altered, or persisted-state plugin config
+// shifted. On boot, `bustStaleCacheIfNeeded` (lib/cache-bust.ts) compares this
+// against the localStorage sentinel and, on mismatch, wipes every `bbstat-`
+// prefixed key so stale shapes can't render against new component code.
 //
-// Why a single global version vs per-store: shared types (`UserSummary`,
-// `WorkspaceMember`, `ActivityEntry`) leak across stores, so changing one
-// type often invalidates multiple stores. One bump is the simpler mental
-// model — the cost of an unnecessary refetch wave is small, the cost of
-// rendering stale shape is a support ticket.
+// Single global version (not per-store) because shared types (`UserSummary`,
+// `WorkspaceMember`, `ActivityEntry`) leak across stores: one bump is simpler,
+// and an unnecessary refetch wave is cheaper than rendering a stale shape.
 //
-// What does NOT live here: the server-side Redis cache. That cache is
-// invalidated manually via `docker compose exec redis redis-cli FLUSHDB`
-// — auto-flushing on every boot would defeat the cache. Treat that as
-// a separate decision documented under "Pair every WorkspaceMember /
-// UserSummary shape change with a Redis bust" in the memory.
+// The server-side Redis cache is separate and invalidated manually (scoped by
+// prefix, never auto-flushed on boot — that would defeat the cache). Pair any
+// WorkspaceMember / UserSummary shape change with a Redis bust.
+//
 // Bumped to 14 for Phase 5: WorkspaceMember switched from `userId` to
 // the `entityKind` / `entityId` / `attachedUserIds` discriminated shape,
 // and UserSummary.user gained the `person` field. New persisted store
@@ -54,12 +50,10 @@
 // shows an "Archived" badge and neutralizes the sync icon for retired repos.
 export const CACHE_VERSION = 22;
 
-// localStorage key holding the integer above as a string. Lives outside
-// the `bbstat-` prefix so the bust function doesn't wipe its own sentinel
-// on the mismatch pass.
+// Holds the version integer as a string. Outside the `bbstat-` prefix so the
+// bust pass doesn't wipe its own sentinel.
 export const VERSION_SENTINEL_KEY = 'bbstat:cache-version';
 
-// Prefix applied to every persisted Pinia store key. Configured globally
-// on the persistedstate plugin in `src/stores/index.ts` so new stores
-// auto-participate — no manual inventory to keep in sync.
+// Applied to every persisted Pinia store key (globally on the persistedstate
+// plugin in `src/stores/index.ts`) so new stores auto-participate.
 export const STORE_KEY_PREFIX = 'bbstat-';

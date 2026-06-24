@@ -1,18 +1,16 @@
 // Convergence point for the sync surface. Multiple entry points so crons can
-// dispatch to a focused operation (cheaper, more granular logs) while admin /
-// future-webhook triggers can run combined flows.
+// dispatch a focused operation while admin / future-webhook triggers run
+// combined flows.
 //
 //   runMembersSync   — workspace members → users
 //   runReposSync     — curated tracked-repo bootstrap
 //   runDiscoverySync — members + repos sequentially (manual admin trigger)
 //   runCommitsSync   — per-repo commit ingest across the curated set
 //
-// All entry points are idempotent and tolerate races (cron + manual at the
-// same time); upserts / cache-hit short-circuits / ON CONFLICT DO NOTHING /
-// stop-on-known-sha all converge.
+// All entry points are idempotent and tolerate cron-vs-manual races.
 //
-// Webhook trigger label is preserved in `SyncTrigger` for forward compat,
-// but the receiver endpoint is deferred — see memory/webhook_deferred.md.
+// The 'webhook' SyncTrigger label is preserved for forward compat; the
+// receiver endpoint is deferred — see memory/webhook_deferred.md.
 
 import { bootstrapTrackedRepositories, syncWorkspaceMembers } from './discovery.js';
 import { isDueForSync, type BackoffOptions } from './backoff.js';
@@ -54,91 +52,57 @@ export interface SyncRunnerDeps {
   store: DiscoveryStore;
   logger: BitbucketLogger;
   workspace: string;
-  // Thunk so each sync invocation re-reads the seed file. Lets operators
-  // edit `tracked-repos.yaml` and have the next `POST /sync/discover` (or
-  // next cron tick) pick up the change with no restart. A malformed file
-  // throws here, surfaced as the sync's error path.
+  // Thunk so each invocation re-reads the seed file — operators can edit
+  // `tracked-repos.yaml` and have the next sync pick it up without restart.
+  // A malformed file throws here, surfaced as the sync's error path.
   seeds: () => RepoSeed[];
   commitStore: CommitStore;
-  // Optional. When present, each per-repo commit sync is wrapped so that a
-  // successful insert triggers a scoped commit_daily recompute. Absent in
-  // tests that don't care about rollups.
+  // When present, each per-repo commit sync is wrapped so a successful
+  // insert triggers a scoped commit_daily recompute.
   rollupStore?: RollupStore;
-  // Optional. When present (alongside rollupStore), summaries for users with
-  // commits in the touched range are DEL'd after the recompute completes.
+  // When present alongside rollupStore, summaries for users in the touched
+  // range are invalidated after the recompute.
   userSummaryCache?: UserSummaryCache;
-  // Defaults applied by runCommitsTick if absent.
   commitTickOptions?: CommitsTickOptions;
-  // Phase 4 T22: PR-ingest store. Required for `runPullRequestsSync`; if
-  // omitted, the PR sync paths simply aren't reachable. All runtime
-  // entrypoints (HTTPS API + cron host) wire it.
+  // Required for runPullRequestsSync. All runtime entrypoints wire it.
   prStore: PrStore;
-  // Defaults applied by runPullRequestsTick if absent.
   prTickOptions?: PrTickOptions;
-  // Self-queueing deepen-backfill. When omitted (e.g., in tests that only
-  // care about delta sync), the piggyback step inside runCommitsSync is
-  // a no-op. All runtime entrypoints wire it.
+  // Self-queueing deepen-backfill. Omitted → the piggyback step is a no-op.
   deepenOptions?: { maxPages: number; budgetThreshold: number; emptyGraceHours?: number };
-  // Retroactive is_merge backfill that runs between deepen and diff-stats
-  // backfill. When omitted, the step is skipped — pre-V1_7 commits keep
-  // their stale `is_merge = false` value until an operator runs the
-  // admin endpoint. All runtime entrypoints wire this in production.
+  // Retroactive is_merge backfill (between deepen and diff-stats). Omitted →
+  // pre-V1_7 commits keep their stale `is_merge = false` until an operator
+  // runs the admin endpoint.
   isMergeBackfillOptions?: IsMergeBackfillOptions;
-  // Diff-stats backfill tick that runs after deepen. When omitted, the
-  // backfill step is skipped — inline-eager forward fetch inside the
-  // commit sync still runs, but pending commits from past ticks won't
-  // be picked up.
+  // Diff-stats backfill (after deepen). Omitted → inline-eager forward fetch
+  // still runs, but past ticks' pending commits aren't picked up.
   diffStatsBackfillOptions?: DiffStatsBackfillTickOptions;
-  // Empty-repo revival sweep — re-probes empty-on-bitbucket excluded
-  // (non-archived) repos and clears the exclusion when BB shows commits, so
-  // a repo that got its first push self-heals back into the rotation. When
-  // omitted the step is skipped (tests, or to disable the sweep).
+  // Empty-repo revival sweep. Omitted → the step is skipped.
   emptyRevivalOptions?: EmptyRevivalOptions;
-  // Adaptive per-repo backoff for the commit + PR cron ticks. When
-  // omitted, every non-archived repo is checked every tick (legacy
-  // behavior). When wired (default in all runtime entrypoints), quiet
-  // repos are skipped per the formula in backoff.ts. Diff-stats
-  // backfill and deepen are NOT affected by this filter.
+  // Adaptive per-repo backoff for the commit + PR ticks. Omitted → every
+  // non-archived repo is checked every tick. Does NOT affect deepen /
+  // diff-stats backfill.
   backoffOptions?: BackoffOptions;
-  // Cold-repo admission cap for the commit + PR ticks. A "cold" repo has
-  // never been synced (NULL last_synced_at / pr_last_synced_at): backoff
-  // can't apply and it sorts to the head of the NULLS-FIRST queue. After a
-  // bulk discovery sweep, hundreds of cold (old, inactive) repos would
-  // otherwise monopolize the queue head and the budget every tick, starving
-  // the warm active rotation. When wired, warm repos are serviced first and
-  // in full; at most this many cold repos are appended per tick so a
-  // discovery backlog backfills gradually. Omitted (tests) → no cap, legacy
-  // NULLS-FIRST ordering. All runtime entrypoints wire it from config.
+  // Cold-repo admission cap. A cold repo (NULL last_synced_at) can't apply
+  // backoff and sorts to the head of the NULLS-FIRST queue; after a bulk
+  // discovery sweep hundreds of cold repos would otherwise monopolize the
+  // budget and starve the warm rotation. Warm repos run first and in full;
+  // at most this many cold repos are appended per tick. Omitted → no cap.
   maxColdReposPerTick?: number;
-  // In-process pub/sub for live updates. When wired, the runner
-  // publishes a `tick.commits.complete` / `tick.prs.complete` event at
-  // the end of each sync entry-point. Auto-trip sites (commits.ts,
-  // deepen-backfill.ts) also publish `repository.sync-excluded`
-  // through this bus. Optional — omit in tests that don't care.
+  // In-process pub/sub for live updates. When wired, the runner publishes
+  // tick.{commits,prs}.complete; auto-trip sites publish
+  // repository.sync-excluded through it too.
   bus?: EventBus;
-  // Raw Redis client — backs the repo-discovery cursor
-  // (`bbstat:repo-discovery-cursor`). Omit to disable the discovery sweep.
+  // Raw Redis client — backs the repo-discovery cursor. Omit to disable the sweep.
   cache?: CacheClient;
-  // Workspace-repo auto-discovery sweep. When wired (REPO_DISCOVERY_ENABLED),
-  // runReposSync / runDiscoverySync walk the workspace and track untracked
-  // repos. Omitted → the step is skipped.
+  // Workspace-repo auto-discovery sweep (REPO_DISCOVERY_ENABLED).
   repoDiscoveryOptions?: RepoDiscoveryOptions;
-  // ShipShow Score rollup (docs/scoring.md phase 3 + Phase 5). When
-  // wired, runs at the end of every successful runCommitsSync — after
-  // all commit-side ingest (delta + deepen + is-merge + diff-stats
-  // backfill) has landed, so the eligible commit set is as fresh as it
-  // gets. Drives both per-alias `user_score` and per-person
-  // `person_score` passes via `recomputeAllScores`. Failures here are
-  // score-freshness blips and never poison the sync result; the next
-  // tick will recompute the same set. Omit in tests that don't care
-  // about scoring.
+  // ShipShow Score rollup. Runs last in runCommitsSync, after every
+  // commit-side ingest path, so the eligible commit set is as fresh as it
+  // gets. Failures are score-freshness blips and never poison the sync.
   recomputeAllScores?: () => Promise<AllScoresRollupResult>;
-  // Phase 5 alias-merge layer (docs/ROADMAP.md). When wired, the
-  // /api/admin/people/* endpoints are reachable; otherwise they 503
-  // with `people_store_not_wired`. The sync runner itself does NOT
-  // call into the people store — it carries the field purely so admin
-  // routes can reach it via opts.syncDeps. Omit in tests that don't
-  // exercise the people endpoints.
+  // Phase 5 alias-merge layer. The runner does NOT call into this — it
+  // carries the field purely so admin /people routes can reach it via
+  // opts.syncDeps. Omitted → those endpoints 503 with people_store_not_wired.
   peopleStore?: PeopleStore;
 }
 
@@ -154,8 +118,7 @@ export interface MembersSyncResult extends BaseResult {
 
 export interface ReposSyncResult extends BaseResult {
   repos: BootstrapReposResult;
-  // Workspace-repo discovery sweep outcome. Null when disabled
-  // (REPO_DISCOVERY_ENABLED=false, or cache not wired).
+  // Null when discovery is disabled or the cache isn't wired.
   repoDiscovery: RepoDiscoveryResult | null;
 }
 
@@ -176,25 +139,14 @@ export interface CommitsSyncSummary {
 
 export interface CommitsSyncResult extends BaseResult {
   commits: CommitsSyncSummary;
-  // Per-repo detail kept separate from the summary so log lines stay terse;
-  // admins / debuggers can drill into the array via the response body.
+  // Per-repo detail kept out of the summary so log lines stay terse.
   repoResults: RepoCommitSyncResult[];
   errors: Array<{ repository: RepositoryHandle; error: string }>;
   deferred: RepositoryHandle[];
-  // Phase 4 follow-up: piggybacked deepen-backfill outcome. Null when the
-  // step is disabled (deepenOptions not wired). Otherwise contains per-repo
-  // results from this tick (zero or more) plus a stoppedReason indicating
-  // whether the budget gate fired or the queue drained.
+  // Each null when its step is disabled (the corresponding option not wired).
   deepen: DeepenTickResult | null;
-  // Retroactive is_merge backfill outcome. Null when the step is
-  // disabled (isMergeBackfillOptions not wired).
   isMergeBackfill: IsMergeBackfillTickResult | null;
-  // Diff-stats backfill tick that runs after is-merge. Uses a global
-  // newest-first pickup across every non-archived non-excluded repo —
-  // see src/sync/diff-stats-tick.ts. Null when the step is disabled.
   diffStatsBackfill: DiffStatsBackfillTickResult | null;
-  // Empty-repo revival sweep outcome. Null when the step is disabled
-  // (emptyRevivalOptions not wired).
   emptyRevival: EmptyRevivalResult | null;
 }
 
@@ -216,8 +168,7 @@ export interface PrsSyncResult extends BaseResult {
 }
 
 export interface PrioritizedDue<T> {
-  // Warm rows first (in their incoming order), then at most `maxCold` cold
-  // rows. Fed to the tick as the scheduling queue.
+  // Warm rows first (incoming order), then at most `maxCold` cold rows.
   ordered: T[];
   warmCount: number;
   coldAdmitted: number;
@@ -225,13 +176,10 @@ export interface PrioritizedDue<T> {
 }
 
 // Keep the warm active rotation from being starved by a cold (never-synced)
-// backlog. `due` arrives in `last_synced_at ASC NULLS FIRST` order, so cold
-// rows lead the list — exactly the rows a bulk discovery sweep dumps in bulk.
-// We split warm from cold, keep warm first (preserving their oldest-synced-
-// first order), and admit at most `maxCold` cold rows per tick. The rest of
-// the cold backlog rolls to later ticks, draining in the budget left over
-// after the warm set is serviced. `maxCold === undefined` (tests) → no cap;
-// the list is returned untouched (legacy NULLS-FIRST ordering).
+// backlog. `due` arrives last_synced_at ASC NULLS FIRST, so cold rows lead —
+// exactly what a bulk discovery sweep dumps. Split warm from cold, keep warm
+// first, and admit at most `maxCold` cold rows per tick; the rest rolls to
+// later ticks. `maxCold === undefined` → no cap, list returned untouched.
 export function prioritizeDue<T>(
   due: T[],
   isCold: (row: T) => boolean,
@@ -261,9 +209,8 @@ export async function runMembersSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
   return { trigger, startedAt, finishedAt, members };
 }
 
-// Shared repo-discovery step for the repos / discovery sync entrypoints. A
-// no-op (returns null) unless both the Redis cache and discovery options are
-// wired (REPO_DISCOVERY_ENABLED). Failure-isolated — a discovery error never
+// Shared repo-discovery step. Returns null unless both the Redis cache and
+// discovery options are wired. Failure-isolated — a discovery error never
 // fails the repos sync.
 async function maybeRunRepoDiscovery(deps: SyncRunnerDeps): Promise<RepoDiscoveryResult | null> {
   if (deps.cache === undefined || deps.repoDiscoveryOptions === undefined) return null;
@@ -306,11 +253,9 @@ export async function runDiscoverySync(deps: SyncRunnerDeps, trigger: SyncTrigge
 export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<CommitsSyncResult> {
   const startedAt = new Date().toISOString();
   const rows = await deps.store.listRepositoriesForSync();
-  // `dueHandles` is the subset whose commit-list interval has elapsed under
-  // the backoff formula, then reordered (warm active repos first, cold repos
-  // capped) and is the only list passed to the commit tick. `rows.length` is
-  // logged as the full-set total. The diff-stats backfill tick does its own
-  // global pickup and consumes no handles list.
+  // dueHandles is the subset whose backoff interval has elapsed, reordered
+  // (warm first, cold capped) — the only list passed to the commit tick. The
+  // diff-stats backfill tick does its own global pickup.
   const toHandle = (r: (typeof rows)[number]): RepositoryHandle => ({
     repositoryId: r.id,
     workspace: r.workspace,
@@ -319,8 +264,7 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     diffStatsExcludePatterns: r.diffStatsExcludePatterns,
   });
   const now = new Date();
-  // Backoff filter (when wired) drops quiet warm repos; cold (never-synced)
-  // repos are always "due" — backoff can't apply without an activity signal.
+  // Backoff (when wired) drops quiet warm repos; cold repos are always due.
   const dueRows =
     deps.backoffOptions === undefined
       ? rows
@@ -332,9 +276,6 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
             now,
           }),
         );
-  // Warm rotation is serviced first and in full; cold repos are admitted at
-  // most `maxColdReposPerTick` per tick so a discovery backlog can't starve
-  // the active set (see prioritizeDue / config SYNC_MAX_COLD_REPOS_PER_TICK).
   const prioritized = prioritizeDue(dueRows, (r) => r.lastSyncedAt === null, deps.maxColdReposPerTick);
   const dueHandles: RepositoryHandle[] = prioritized.ordered.map(toHandle);
   deps.logger.info?.(
@@ -350,11 +291,10 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     'commit sync start',
   );
 
-  // When a rollupStore is wired, decorate the per-repo syncer so each
-  // successful insert triggers a scoped commit_daily recompute (and, if
-  // userSummaryCache is also wired, invalidates affected user-summary
-  // entries). Failures in either never poison commit-sync results — see
-  // rollup-hook.ts.
+  // When rollupStore is wired, decorate the per-repo syncer so each
+  // successful insert triggers a scoped commit_daily recompute (and
+  // user-summary invalidation if that cache is wired too). Failures never
+  // poison commit-sync results — see rollup-hook.ts.
   const syncOne = deps.rollupStore
     ? withRollupRecompute(syncRepositoryCommits, {
         rollupStore: deps.rollupStore,
@@ -386,12 +326,8 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     stoppedEarly: tick.stoppedEarly,
   };
 
-  // Piggyback the deepen-backfill tick. Drains the queue until either the
-  // BB-call budget falls below DEEPEN_BUDGET_THRESHOLD (delta tick burned
-  // through the headroom) or every tracked repo is fully backfilled. Many
-  // repos per tick — at scale (~100+ tracked repos) this is what fills
-  // history in finite time. Errors here never abort the commit-sync
-  // result; the delta tick already succeeded.
+  // Piggyback the deepen-backfill tick on whatever budget the delta tick
+  // left. Errors never abort the commit-sync result.
   let deepen: DeepenTickResult | null = null;
   if (deps.deepenOptions !== undefined) {
     try {
@@ -415,12 +351,10 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Retroactive is_merge backfill — runs between deepen and diff-stats
-  // backfill so per-commit merge correctness lands before any
-  // merge-excluding aggregate consumes the row. Drains the pre-V1_7
-  // backlog of stuck-false is_merge values; once every repo's flag
-  // converges this tick is a single SELECT and exits with 'queue-empty'.
-  // Errors here never abort the commit-sync result.
+  // Retroactive is_merge backfill, between deepen and diff-stats so merge
+  // correctness lands before any merge-excluding aggregate consumes the row.
+  // Once every flag converges this is a single SELECT exiting 'queue-empty'.
+  // Errors never abort the commit-sync result.
   let isMergeBackfill: IsMergeBackfillTickResult | null = null;
   if (deps.isMergeBackfillOptions !== undefined) {
     try {
@@ -440,14 +374,10 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Diff-stats backfill tick — runs last so it consumes whatever
-  // budget is left over. Inline-eager fetch inside the commit sync
-  // already covers stats for commits that landed in this tick; this
-  // step catches up on (a) pending commits whose inline fetch
-  // transiently failed and (b) historical backlog for repos whose
-  // commits pre-date diff-stat ingest. Global newest-first pickup
-  // (no per-repo iteration) — see src/sync/diff-stats-tick.ts.
-  // Errors here never abort the commit-sync result.
+  // Diff-stats backfill — runs last on leftover budget. Inline-eager fetch
+  // already covers this tick's new commits; this catches up on transient
+  // inline failures and the historical backlog. Errors never abort the
+  // commit-sync result.
   let diffStatsBackfill: DiffStatsBackfillTickResult | null = null;
   if (deps.diffStatsBackfillOptions !== undefined) {
     try {
@@ -469,11 +399,8 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Empty-repo revival sweep — re-probes empty-on-bitbucket excluded
-  // (non-archived) repos with one cheap BB call each and clears the exclusion
-  // the moment one has commits, so a repo that got its first push self-heals
-  // back into the rotation (it'll be ingested next tick). Errors never abort
-  // the commit-sync result.
+  // Empty-repo revival sweep — re-probes empty-excluded repos and clears the
+  // exclusion when one gains commits. Errors never abort the commit-sync result.
   let emptyRevival: EmptyRevivalResult | null = null;
   if (deps.emptyRevivalOptions !== undefined) {
     try {
@@ -495,10 +422,8 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     }
   }
 
-  // Score rollup runs last, after every commit-side ingest path has had
-  // its turn. Runs both passes (user_score + person_score) under one
-  // orchestrator. Wrapped in try/catch — a stale leaderboard for one
-  // tick is much less bad than a failed sync, and the next tick
+  // Score rollup last, after every commit-side ingest path. A stale
+  // leaderboard for one tick beats a failed sync, and the next tick
   // recomputes the same set.
   if (deps.recomputeAllScores !== undefined) {
     try {
@@ -530,12 +455,9 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
     errors: tick.errors,
     deferred: tick.deferred,
   };
-  // Slim payload for the SSE wire: drop the per-repo arrays
-  // (repoResults / deepen.repos / isMergeBackfill.repos /
-  // diffStatsBackfill.perRepo). At ~20+ repos × ~500 bytes each
-  // across four sub-ticks the full result can overrun the SSE
-  // response's write buffers; callers in-process still see the full
-  // `result` via the return value.
+  // Slim payload for the SSE wire: drop the per-repo arrays, which across
+  // four sub-ticks can overrun the SSE response's write buffers. In-process
+  // callers still get the full `result` via the return value.
   deps.bus?.publish({
     event: 'tick.commits.complete',
     payload: {
@@ -560,12 +482,9 @@ export async function runCommitsSync(deps: SyncRunnerDeps, trigger: SyncTrigger)
 export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTrigger): Promise<PrsSyncResult> {
   const startedAt = new Date().toISOString();
   const rows = await deps.store.listRepositoriesForSync();
-  // PR sync has no analog of the diff-stats backfill — there's just one
-  // list (the due-for-PR-sync set under the backoff formula). When
-  // backoffOptions is absent we fall back to the full list. Cold here keys
-  // on `pr_last_synced_at` (a repo can be warm for commits but never have
-  // had its PRs synced), so the same admission cap protects the warm PR
-  // rotation from a discovery backlog.
+  // One list (the due-for-PR-sync set under backoff). Cold here keys on
+  // `pr_last_synced_at` — a repo can be warm for commits but never have had
+  // its PRs synced — so the same admission cap protects the warm PR rotation.
   const toHandle = (r: (typeof rows)[number]): RepositoryHandle => ({
     repositoryId: r.id,
     workspace: r.workspace,
@@ -648,8 +567,8 @@ export async function runPullRequestsSync(deps: SyncRunnerDeps, trigger: SyncTri
   return result;
 }
 
-// Build CommitsTickOptions from app config. Both runtime entry points (HTTPS
-// API and the cron host) share this so the same env vars apply everywhere.
+// Both runtime entry points (HTTPS API and cron host) share this so the same
+// env vars apply everywhere.
 export function commitTickOptionsFromConfig(config: AppConfig): CommitsTickOptions {
   const since = config.COMMITS_BACKFILL_SINCE === '' ? undefined : new Date(config.COMMITS_BACKFILL_SINCE);
   return {
@@ -657,9 +576,8 @@ export function commitTickOptionsFromConfig(config: AppConfig): CommitsTickOptio
     ...(since !== undefined ? { firstRunSince: since } : {}),
     concurrency: config.COMMIT_SYNC_CONCURRENCY,
     budgetLowThreshold: config.COMMIT_SYNC_BUDGET_THRESHOLD,
-    // Inline-eager only needs the budget threshold; per-repo cap doesn't
-    // apply here because the input list is bounded by however many
-    // commits the delta tick just inserted.
+    // Inline-eager needs only the budget threshold — the input list is already
+    // bounded by however many commits the delta tick just inserted.
     diffStats: { budgetThreshold: config.DIFF_STATS_BUDGET_THRESHOLD },
   };
 }
@@ -693,19 +611,15 @@ export function diffStatsBackfillOptionsFromConfig(config: AppConfig): DiffStats
 
 export function emptyRevivalOptionsFromConfig(config: AppConfig): EmptyRevivalOptions {
   return {
-    // The empty-excluded set is normally near-empty (newly-tracked repos that
-    // turned out empty), so a modest cap is plenty — it only bounds the
-    // pathological case. Budget gate reuses the deepen threshold; both do BB
-    // history walks.
+    // The empty-excluded set is normally near-empty, so a modest cap only
+    // bounds the pathological case. Budget gate reuses the deepen threshold.
     maxReposPerTick: 25,
     budgetThreshold: config.DEEPEN_BUDGET_THRESHOLD,
   };
 }
 
-// Returns the discovery options only when REPO_DISCOVERY_ENABLED — undefined
-// (sweep skipped) otherwise. One BB page per sweep; a large workspace's
-// backfill spreads over several repos-cron ticks. Budget gate reuses the
-// deepen threshold.
+// undefined (sweep skipped) unless REPO_DISCOVERY_ENABLED. Budget gate reuses
+// the deepen threshold.
 export function repoDiscoveryOptionsFromConfig(config: AppConfig): RepoDiscoveryOptions | undefined {
   if (!config.REPO_DISCOVERY_ENABLED) return undefined;
   return {

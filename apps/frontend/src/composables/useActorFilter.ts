@@ -1,9 +1,6 @@
-// Phase 5 — shared URL-synced activity-actor filter. Reads / writes the
-// `?actor` + `?actorKind` query pair as a single ActivityActor, so every
-// page that filters the activity feed by contributor (Dashboard,
-// Activity, Projects, Project detail, Repo detail) stays in lockstep on
-// the encoding. `actorKind` is omitted for users to keep the common URL
-// compact and backward-compatible with pre-Phase-5 `?actor=5` links.
+// Shared URL-synced activity-actor filter over the `?actor` + `?actorKind`
+// query pair. `actorKind` is omitted for users to keep the common URL
+// compact and backward-compatible with bare `?actor=5` links.
 import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { ActivityActor } from '@/api/client';

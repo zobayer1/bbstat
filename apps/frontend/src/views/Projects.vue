@@ -1,17 +1,7 @@
 <script setup lang="ts">
-// /projects index page.
-//
-// Structurally a sibling of the per-project detail view (/projects/:key)
-// without the 365-day heatmap — projects are small in count, so the
-// page leads with the project list itself (searchable + paginated)
-// followed by workspace-aggregate sections that contextualise where
-// work is happening across the whole roster.
-//
-// Sections, top to bottom:
-//   1. Project list (search + sort + 10/page) ⌗ sunburst (one card)
-//   2. Top 10 repos + Top 10 contributors (side-by-side)
-//   3. Activity feed (latest entries, height-capped, with a
-//      "See all activities →" footer attached to the card)
+// /projects index — searchable + paginated project list (derived from the
+// repos list) plus workspace-aggregate sections: sunburst, top repos / top
+// contributors, and an activity feed.
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
@@ -31,18 +21,13 @@ const stats = useStatsStore();
 const route = useRoute();
 const router = useRouter();
 
-// Workspace for the "View on BitBucket" header link. Derived from
-// the first tracked repo — single-workspace deployment by design,
-// so any row's workspace is canonical. Empty until stats land,
-// which hides the link via v-if.
+// Workspace for the "View on BitBucket" header link. Single-workspace
+// deployment, so any row's workspace is canonical; empty until stats land.
 const workspace = computed(() => stats.repositories[0]?.workspace ?? '');
 
-// Programmatic navigation when the user clicks anywhere on a project
-// row (not just the project-name link). The cell-level `RouterLink`
-// still owns the link semantics — middle-click / Ctrl-click on the
-// name continues to open in a new tab natively. Same-route pushes
-// are noops in vue-router, so the inner link firing followed by
-// this handler doesn't cause double navigation.
+// Full-row click nav. The cell `RouterLink` keeps native middle/Ctrl-click
+// open-in-new-tab; same-route pushes are vue-router noops, so the inner
+// link plus this handler don't double-navigate.
 function openProject(projectKey: string): void {
   void router.push({ name: 'project', params: { projectKey } });
 }
@@ -51,10 +36,8 @@ const breakdown = ref<RepoContributorBreakdown[]>([]);
 const breakdownLoading = ref(false);
 const breakdownError = ref<string | null>(null);
 
-// SSE wiring for the sunburst. The project list + side tables are
-// driven by `stats` (already SSE-subscribed in its store), but the
-// repo-contributor breakdown is fetched view-locally — keep it fresh
-// here so a sync tick doesn't strand stale aggregates on screen.
+// SSE wiring for the sunburst — its breakdown is fetched view-locally
+// (the project list + side tables ride `stats`'s own subscriptions).
 const liveCleanups: Array<() => void> = [];
 
 onMounted(() => {
@@ -82,8 +65,7 @@ async function loadBreakdown(): Promise<void> {
   }
 }
 
-// Computed for "Last 7 days" cutoff used by the See-all-activities
-// link, matching the Dashboard's "More →" footer on the activity tab.
+// "Last 7 days" cutoff for the See-all-activities link.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -93,19 +75,12 @@ function localDateString(d: Date): string {
 }
 const activitySinceSevenDays = computed(() => localDateString(new Date(Date.now() - 7 * DAY_MS)));
 
-// ---------------------------------------------------------------------------
-// Project list — derived client-side from the repos list (same shape
-// the Dashboard uses for its Projects panel). Searchable, sortable,
-// 10-per-page. Anonymous / no-project repos are filtered out.
-// ---------------------------------------------------------------------------
-
+// Project list — derived from the repos list, searchable / sortable /
+// 10-per-page. No-project repos are filtered out.
 interface ProjectRow {
   projectKey: string;
-  // Workspace pulled from the first repo we see in this project — BB
-  // workspace is uniform within a tracked set today (single-workspace
-  // deployment per CLAUDE.md), so picking any one is safe. Captured
-  // here so the external-link icon can build the BB project URL
-  // without an extra lookup.
+  // First repo's workspace (uniform within a tracked set), captured so
+  // the external-link icon can build the BB URL without a lookup.
   workspace: string;
   repoCount: number;
   commits30d: number;
@@ -192,19 +167,13 @@ const sortIndicator = (key: SortKey): string => {
   return sortDir.value === 'asc' ? ' ▲' : ' ▼';
 };
 
-// Split into two helpers so the "Last activity" cell can stack date
-// above time in a smaller font — easier to scan a column of dates
-// when the time stops competing with them for width.
+// Split so the "Last activity" cell can stack date above time.
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
-
-// ---------------------------------------------------------------------------
-// Side-by-side bottom tables
-// ---------------------------------------------------------------------------
 
 const topRepos = computed(() =>
   stats.repositories
@@ -214,13 +183,7 @@ const topRepos = computed(() =>
 );
 const topContributors = computed(() => stats.topContributors.slice(0, 10));
 
-// ---------------------------------------------------------------------------
-// Activity-feed filters. Same set as the Dashboard's activity tab —
-// project + repo (with interlock) + user — so the workspace-wide
-// stream on this page can be narrowed without leaving the project
-// index. URL-synced so deep links work and the Back button behaves.
-// ---------------------------------------------------------------------------
-
+// Activity-feed filters — project + repo (interlocked) + user, URL-synced.
 const filterActor = useActorFilter();
 const {
   projectModel: filterProject,
@@ -251,9 +214,7 @@ function clearFilters(): void {
       <Breadcrumb :items="[{ label: 'Projects', icon: GLYPHS.rectangleStack }]" />
       <div class="mt-1 flex items-baseline justify-between gap-4">
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">Projects</h1>
-        <!-- Thin external link to BB's workspace-wide projects list.
-             Hidden until stats land so the URL is never built from an
-             empty workspace string. -->
+        <!-- BB projects list link; hidden until workspace is known. -->
         <a
           v-if="workspace"
           :href="`https://bitbucket.org/${workspace}/workspace/projects/`"
@@ -268,16 +229,10 @@ function clearFilters(): void {
       <p class="mt-1 text-sm text-slate-500">Every BitBucket project we're tracking, with workspace-wide context.</p>
     </header>
 
-    <!-- Project table + sunburst share a single bordered panel so the
-         chart visually sits on the same surface as the list rather
-         than looking like a separate widget. The outer grid is the
-         "invisible section"; the inner divider line stands in for the
-         column gutter. Heights stretch by default so the chart column
-         fills whatever vertical space the table grew into. -->
+    <!-- Project table + sunburst in one shared bordered panel; the inner
+         divider stands in for the column gutter. -->
     <section class="mb-8 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
       <div class="grid grid-cols-1 lg:grid-cols-2 lg:divide-x lg:divide-slate-100">
-        <!-- LEFT: search row + project table + pagination footer, all
-             inside the shared card -->
         <div class="flex flex-col">
           <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
             <div class="relative">
@@ -372,10 +327,7 @@ function clearFilters(): void {
                     <span v-else>—</span>
                   </td>
                   <td class="px-2 py-2 text-center align-middle">
-                    <!-- External BB project link. `@click.stop` keeps
-                         the row-click handler from also firing (which
-                         would push the in-app project detail on top
-                         of opening BB in a new tab). -->
+                    <!-- `@click.stop` so the row-click nav doesn't also fire. -->
                     <a
                       :href="`https://bitbucket.org/${p.workspace}/workspace/projects/${p.projectKey}`"
                       target="_blank"
@@ -410,9 +362,8 @@ function clearFilters(): void {
             <p v-else class="px-4 py-6 text-center text-sm text-slate-400">No tracked projects yet.</p>
           </div>
 
-          <!-- Pagination pinned to the bottom of the LEFT column. Sits
-             outside the table's stretching wrapper so it never floats
-             mid-column when the chart pushes the row taller. -->
+          <!-- Pagination outside the table's stretching wrapper so it
+               doesn't float mid-column when the chart grows the row. -->
           <div
             v-if="sorted.length > PAGE_SIZE"
             class="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-4 py-2 text-xs text-slate-500"
@@ -458,21 +409,12 @@ function clearFilters(): void {
           </div>
         </div>
 
-        <!-- RIGHT: chart column. No card chrome of its own — the outer
-           panel's bg / border / shadow already wraps it, dropping the
-           inner card avoids the "widget within a widget" feel. A header
-           row mirrors the left column's search/count row (same
-           border-b + py-3) so the "top 15 repos" caption lands on the
-           same baseline as the "X projects" count; the chart centers in
-           the space below it, which sits it a touch lower without
-           growing the shared panel height. -->
+        <!-- Chart column — no card chrome of its own (the outer panel
+             wraps it). Header row mirrors the left column's baseline. -->
         <div class="flex flex-col">
           <div class="border-b border-slate-100 px-4 py-3 text-center">
             <span class="text-xs text-slate-500">Top 15 Repositories</span>
           </div>
-          <!-- Chart top-aligned (not justify-center) so it sits just
-               under the label — the SVG's own MAX_EXPLODE edge whitespace
-               is the only separation. -->
           <div class="flex flex-1 flex-col items-center px-6 pb-2">
             <p v-if="breakdownError" class="mb-3 text-sm text-red-600">
               Could not load breakdown: {{ breakdownError }}
@@ -484,9 +426,7 @@ function clearFilters(): void {
       </div>
     </section>
 
-    <!-- Top 10 repos + contributors side-by-side. Lifted above the
-         activity feed: aggregate context first, then the chronological
-         stream below it. -->
+    <!-- Top 10 repos + contributors side-by-side, above the activity feed. -->
     <section class="mb-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
       <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
         <h2
@@ -509,11 +449,7 @@ function clearFilters(): void {
                 </RouterLink>
                 <span v-if="r.project" class="ml-1 text-xs text-slate-400">{{ r.project }}</span>
               </td>
-              <!-- {commits} ({contributors}) — mirrors the Members
-                   table's `{commits} ({repos})` pattern: primary count
-                   in slate-900, secondary count in parens at half scale
-                   and slate-400 so the breadth metric reads as
-                   supplementary context, not a competing number. -->
+              <!-- {commits} ({contributors}) — secondary count muted as breadth context. -->
               <td class="px-3 py-2 text-right tabular-nums text-slate-900">
                 {{ r.commits30d }}
                 <span class="ml-1 text-xs font-normal text-slate-400">({{ r.contributors30d }})</span>
@@ -544,8 +480,6 @@ function clearFilters(): void {
                   class="flex items-center gap-1.5 font-medium text-slate-900 hover:text-slate-600"
                 >
                   <span class="min-w-0 truncate" :title="c.displayName">{{ c.displayName }}</span>
-                  <!-- Merged-person marker, same as the Dashboard top-
-                       contributors list. -->
                   <span
                     v-if="c.entityKind === 'person' && c.attachedUserIds.length > 1"
                     class="shrink-0 rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700"
@@ -555,13 +489,8 @@ function clearFilters(): void {
                   </span>
                 </RouterLink>
               </td>
-              <!-- Momentum + Consistency, both right-aligned and visually
-                   adjacent — tight inter-column padding (`pr-1` / `pl-1`)
-                   so they read as one combined ranking signal. Momentum
-                   is the primary metric in slate-900; Consistency is
-                   diffused at slate-400, matching the "supplementary
-                   context" treatment used in the {commits}({contributors})
-                   cells in the Top 10 Repositories panel above. -->
+              <!-- Momentum (primary) + Consistency (muted), tight padding
+                   so they read as one combined ranking signal. -->
               <td class="py-2 pl-3 pr-1 text-right tabular-nums text-slate-900">
                 {{ c.momentum === null ? '—' : c.momentum.toFixed(1) }}
               </td>
@@ -575,9 +504,6 @@ function clearFilters(): void {
       </div>
     </section>
 
-    <!-- Activity feed. Filters mirror the Dashboard activity tab —
-         project / repo (interlocked) / user — so the workspace stream
-         can be narrowed inline without bouncing to /activity. -->
     <section class="mb-8">
       <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
         <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
@@ -624,10 +550,6 @@ function clearFilters(): void {
       </div>
       <ActivityFeed :actor="filterActor" :repo="filterRepo" :project="filterProject" height="24rem">
         <template #footer>
-          <!-- "See all activities →" lives inside the feed's footer
-               slot so it visually attaches to the activity card
-               instead of floating loose below it. Mirrors the
-               Dashboard activity tab's "More →" footer treatment. -->
           <RouterLink
             :to="{ name: 'activity', query: { after: activitySinceSevenDays } }"
             class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"

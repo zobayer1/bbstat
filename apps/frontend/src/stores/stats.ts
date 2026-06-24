@@ -4,9 +4,8 @@ import { api } from '@/api/client';
 import type { ContributorWindow, OverviewStats, TopContributorEntity, TrackedRepositorySummary } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
-// Pinia is the client-side cache (per CLAUDE.md). Hydrates from
-// /api/stats/overview + /api/stats/top-contributors + /api/stats/repositories;
-// persisted state keeps the dashboard usable across reloads even when the
+// Dashboard cache: /api/stats/overview + /top-contributors + /repositories.
+// Persisted so the dashboard stays usable across reloads even when the
 // backend is briefly unreachable (offline-first).
 export const useStatsStore = defineStore(
   'stats',
@@ -18,12 +17,10 @@ export const useStatsStore = defineStore(
     const lastSyncedAt = ref<string | null>(null);
     const loading = ref(false);
     const error = ref<string | null>(null);
-    // BB credential health — flips when the sync runner observes a 401/403
-    // from BitBucket. Non-persisted: we always want a fresh value on boot
-    // (a token that expired mid-session shouldn't stay red after the user
-    // rotates and reloads). Initial state is 'ok'; the dashboard fetches
-    // the real value on mount and the SSE `bitbucket.auth-state` event
-    // pushes subsequent transitions.
+    // BB credential health — flips when the sync runner observes a 401/403.
+    // Non-persisted: a rotated token shouldn't stay red after reload, so we
+    // want a fresh value on boot. Dashboard fetches it on mount; the SSE
+    // `bitbucket.auth-state` event pushes subsequent transitions.
     const bitbucketAuthState = ref<'ok' | 'unauthorized'>('ok');
 
     async function fetchOverview() {
@@ -51,8 +48,8 @@ export const useStatsStore = defineStore(
         const { state } = await api.bitbucketAuthState();
         bitbucketAuthState.value = state;
       } catch {
-        // Network error reading the health flag is itself a non-event —
-        // leave the previous value alone (defaults to 'ok' on first boot).
+        // Network error reading the health flag is a non-event — leave the
+        // previous value alone (defaults to 'ok' on first boot).
       }
     }
 
@@ -74,10 +71,8 @@ export const useStatsStore = defineStore(
       error.value = null;
     }
 
-    // Re-fetch the dashboard aggregates when a tick lands or push
-    // goes stale. Skip if nothing has ever been loaded — the next
-    // navigation to the dashboard will trigger the first fetch on
-    // its own. Avoids waking a sleeping tab into network work.
+    // Skip if nothing has ever been loaded — the next dashboard navigation
+    // triggers the first fetch, so a sleeping tab isn't woken into network work.
     async function applyTickComplete(): Promise<void> {
       if (overview.value === null) return;
       await fetchOverview();
@@ -98,9 +93,8 @@ export const useStatsStore = defineStore(
     liveBus.on('repository.deleted', () => {
       void applyTickComplete();
     });
-    // Phase 5 — the dashboard Top Contributors panel is person-aware, so
-    // a merge / detach / dissolve reshapes its rows. Re-fetch on any
-    // person-layer mutation, same as the Members store.
+    // The dashboard Top Contributors panel is person-aware, so any
+    // person-layer mutation reshapes its rows. Re-fetch on all of them.
     liveBus.on('person.created', () => {
       void applyTickComplete();
     });

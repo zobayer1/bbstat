@@ -1,40 +1,18 @@
-// Retroactive `is_merge` backfill tick. Drains the pre-V1_7 backlog of
-// commit rows whose `is_merge` column is stuck at false because the
-// migration set the default to false on already-ingested rows. New
-// commits land with the correct value (forward sync in commits.ts and
-// the deepen-backfill walk both read `parents.length > 1` at insert
-// time), so this tick exists purely to fix history.
+// Retroactive `is_merge` backfill tick. Fixes the pre-V1_7 backlog of rows
+// stuck at is_merge=false because the migration defaulted existing rows that
+// way. New commits land with the correct value, so this tick only fixes
+// history.
 //
-// Priority placement, sharing the same hourly BB-call budget:
+// Runs third in runCommitsSync (commit → deepen → is-merge → diff-stats):
+// above diff-stats (merge correctness gates every merge-excluding aggregate),
+// below deepen (deepen extends unknown history; is-merge only corrects known
+// rows). Each tick picks one incomplete repo round-robin, walks /commits
+// (resuming from the cursor), bulk-updates is_merge, then either marks
+// complete or advances the cursor.
 //
-//   commit tick → deepen tick → IS-MERGE BACKFILL → diff-stats backfill
-//
-// Higher than diff-stats backfill (per-commit merge correctness gates
-// every merge-excluding aggregate, including the diff-stat sums), lower
-// than deepen (deepen extends coverage of unknown history; is-merge
-// only corrects known rows).
-//
-// Per repo, per tick:
-//   * pick one with `is_merge_backfill_complete = false` (round-robin
-//     by `is_merge_last_run_at`)
-//   * walk BB /commits — newest-first if cursor is NULL, else
-//     `include=<cursorSha>` resuming where the last tick stopped
-//   * collect {sha, isMerge} pairs up to maxPages × 100 commits
-//   * bulk-UPDATE `is_merge` via the existing updateIsMergeBatch
-//   * if the paginator exhausted → flip `is_merge_backfill_complete`
-//   * if the page cap fired → advance the cursor to the oldest sha
-//     we just walked; resume next tick
-//
-// Failure modes mirror deepen-backfill:
-//   * BitbucketRateLimitError → tick-wide stop, repo stays incomplete,
-//     remaining queue defers to the next cron firing.
-//   * BB 404 (cursor sha rewritten / repo renamed) → mark complete
-//     and log. Operator can flip the flag back via SQL if they want
-//     to retry after re-resolving the cursor.
-//   * Transient (any other error) → log, return empty result,
-//     `markIsMergeBackfillAttempt` already bumped the rotation so the
-//     next pick rotates to a different repo. Same row will be retried
-//     after the round-robin comes back around.
+// Failure modes mirror deepen-backfill: rate-limit is a tick-wide stop; a
+// 404 on the cursor sha marks complete (give up); any other error returns an
+// empty result and rotation continues.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits, type BitbucketCommit } from '../bitbucket/commits.js';
@@ -42,41 +20,29 @@ import { BitbucketApiError, BitbucketRateLimitError } from '../bitbucket/errors.
 import type { CommitStore } from './commit-store.js';
 
 export interface IsMergeBackfillOptions {
-  // Max pages of 100 commits per tick per repo. Same shape as the
-  // deepen cap so operators have one mental model for both.
+  // Max pages of 100 commits per tick per repo. Mirrors the deepen cap.
   maxPages: number;
-  // Headroom required under BITBUCKET_HOURLY_CALL_BUDGET before the
-  // orchestrator schedules another repo. Higher than the diff-stats
-  // backfill threshold so is-merge gets first crack at leftover budget
-  // after deepen, lower than the deepen threshold itself so deepen
-  // still gets priority.
+  // Headroom required before scheduling another repo. Above the diff-stats
+  // threshold (is-merge gets leftover budget first) but below deepen's.
   budgetThreshold: number;
 }
 
 export interface IsMergeBackfillRepoResult {
   repositoryId: number;
   fullName: string;
-  // Total commits walked this run. ≤ maxPages × 100.
   fetched: number;
-  // Rows whose `is_merge` actually changed (already-correct rows are
-  // no-ops thanks to the `IS DISTINCT FROM` filter in
-  // `updateIsMergeBatch`). Most ticks on a repo whose backlog has
-  // already been worked will be zero.
+  // Rows whose `is_merge` actually changed (the IS DISTINCT FROM filter in
+  // updateIsMergeBatch no-ops already-correct rows). Usually zero on a
+  // worked-through repo.
   updated: number;
-  // True iff BB's paginated walk produced no `next` URL on the final
-  // page — we've verified every commit. `is_merge_backfill_complete`
-  // flips true.
+  // BB's walk produced no `next` URL — verified every commit.
+  // is_merge_backfill_complete flips true.
   reachedRoot: boolean;
-  // True iff the per-tick page cap fired before BB ran out of pages.
-  // Cursor advanced; more work remains for the next tick.
+  // Page cap fired before BB ran out — cursor advanced, more remains.
   hitPageCap: boolean;
-  // True iff the resume cursor 404'd (force-pushed history). Treated
-  // as "give up on this repo" — `is_merge_backfill_complete` is set
-  // so the rotation drops it.
+  // Resume cursor 404'd (force-pushed history). Give up: complete is set.
   seedMissing: boolean;
-  // True iff BB rate-limited us *and* the client exhausted its
-  // in-request retry budget. The tick orchestrator treats this as a
-  // tick-wide signal to stop, mirroring deepen.
+  // BB rate-limited AND retry budget exhausted — tick-wide stop, like deepen.
   rateLimited: boolean;
 }
 
@@ -97,7 +63,7 @@ export async function isMergeBackfillOneRepo(
   if (candidate === null) return null;
 
   // Always bump last_run_at so the round-robin advances even on no-op
-  // outcomes. Failing to do this re-picks the same repo every tick.
+  // outcomes — otherwise we'd re-pick the same repo every tick.
   await deps.store.markIsMergeBackfillAttempt(candidate.repositoryId);
 
   const maxCommits = opts.maxPages * 100;
@@ -148,10 +114,9 @@ export async function isMergeBackfillOneRepo(
       };
     }
     if (err instanceof BitbucketApiError && err.status === 404) {
-      // Either the cursor sha was force-pushed out, or the repo
-      // itself 404'd. Either way, the resume can never succeed —
-      // mark complete and log. The exclusion auto-trip (step 4 in
-      // the plan) will handle the repo-level 404 separately.
+      // Cursor sha force-pushed out, or the repo itself 404'd — the resume
+      // can never succeed, so mark complete. The commit-sync auto-trip
+      // handles the repo-level 404 separately.
       seedMissing = true;
       reachedRoot = true;
       deps.logger?.warn?.(
@@ -212,33 +177,25 @@ export async function isMergeBackfillOneRepo(
 }
 
 export interface IsMergeBackfillTickResult {
-  // Per-repo results in the order processed.
   repos: IsMergeBackfillRepoResult[];
-  // 'queue-empty' = every non-archived non-excluded repo has the flag
-  // set; the per-day aggregates can now safely exclude merges across
-  // the entire tracked set. Other values mean there's still incomplete
-  // work.
+  // 'queue-empty' = every eligible repo has the flag set, so the per-day
+  // aggregates can now safely exclude merges across the whole tracked set.
   stoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete';
   budgetRemainingAtEnd: number;
   totalUpdated: number;
   totalFetched: number;
 }
 
-// Drains the queue until either (a) the call budget falls below
-// `budgetThreshold`, (b) every queue-eligible repo is complete, or
-// (c) BB rate-limits hard enough to exhaust the client's in-request
-// retries. Many repos per tick — at curated-set scale most small
-// repos finish in one tick.
+// Drains the queue until budget falls below threshold, every eligible repo
+// is complete, or BB rate-limits hard. Many repos per tick.
 export async function runIsMergeBackfillTick(
   deps: IsMergeBackfillDeps,
   opts: IsMergeBackfillOptions,
 ): Promise<IsMergeBackfillTickResult> {
   const repos: IsMergeBackfillRepoResult[] = [];
-  // Stop after a full rotation through the incomplete set. Same
-  // protection as deepen — guards against the pathological case where
-  // a transient-error repo keeps reappearing at the head of the queue
-  // because its `last_run_at` keeps getting bumped but no other
-  // progress happens.
+  // Stop after a full rotation — guards the pathological case where a
+  // transient-error repo keeps reappearing at the head because its
+  // last_run_at is bumped but no progress happens. Same as deepen.
   const seen = new Set<number>();
   let stoppedReason: 'budget' | 'queue-empty' | 'rate-limited' | 'rotation-complete';
   for (;;) {

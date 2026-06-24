@@ -2,18 +2,12 @@
 // Exploded sunburst pie for the Projects page.
 //
 //   - Angular wedges = top-N repos by commits in the window.
-//   - Within each wedge, RADIAL bands = top contributors to that repo.
-//     Each band's radial thickness is proportional to that contributor's
-//     share of the repo's commits. The bands together cover the full
-//     [innerRadius, outerRadius] range.
-//   - Band ORDER within a wedge is randomized (seeded on the repo's
-//     fullName so it's stable across renders) so thick arcs aren't
-//     pinned to the centre or perimeter — the chart reads as a mosaic
-//     rather than a sorted gradient, which is what gives the
-//     contributor-weight feel the page was designed around.
-//   - Wedges are pulled outward ("exploded") proportionally to their
-//     share so the heaviest repos visibly burst, mirroring the
-//     concentration encoding used elsewhere.
+//   - Radial bands within a wedge = top contributors, thickness ∝ their share
+//     of the repo's commits, together spanning [innerRadius, outerRadius].
+//   - Band order is shuffled (seeded on fullName, so stable across renders)
+//     so thick arcs aren't pinned to centre/perimeter and the chart reads as
+//     a mosaic rather than a sorted gradient.
+//   - Wedges are "exploded" outward ∝ share so the heaviest repos burst.
 
 import { computed } from 'vue';
 import { RouterLink } from 'vue-router';
@@ -27,29 +21,23 @@ const props = withDefaults(
   }>(),
   {
     outerRadius: 240,
-    // Inner radius sized to host the 3-line centre label
-    // (window · "COMMITS" · total). 50 SVG units = 100-px hole, with
-    // enough vertical room for ~70 px of stacked text plus the band
-    // ring still reads as a chunky annulus, not a thin rim.
+    // Sized to host the 3-line centre label (window · "COMMITS" · total)
+    // while still leaving a chunky annulus, not a thin rim.
     innerRadius: 50,
   },
 );
 
-// Visual gap (in SVG units, ≈ px) between consecutive radial bands
-// inside the same wedge. Each band's slice of the wedge's [innerRadius,
-// outerRadius] range is shrunk to make room for the gap so the bands
-// stay fully inside the annulus — see `bandWidth` derivation below.
+// Gap (SVG units) between consecutive radial bands in a wedge; bands shrink to
+// make room — see `bandWidth` derivation below.
 const BAND_GAP = 6;
 
 const emit = defineEmits<{
   'repo-click': [fullName: string];
 }>();
 
-// Distinct, high-contrast palette. Colors are assigned by PROJECT (not
-// by per-wedge index) — repos inside the same project share a base
-// colour, so the chart reads as "where activity clusters by project"
-// at a glance. Per-contributor bands within a wedge then tint that
-// base colour, keeping adjacent bands distinguishable.
+// Palette assigned by PROJECT (not per-wedge index) so repos in the same
+// project share a base colour and the chart reads as project clusters; bands
+// within a wedge tint that base colour.
 const PROJECT_COLORS = [
   '#06b6d4', // cyan-500
   '#a855f7', // purple-500
@@ -78,10 +66,9 @@ const cx = computed(() => size.value / 2);
 const cy = computed(() => size.value / 2);
 const totalCommits = computed(() => props.data.reduce((s, r) => s + r.commits, 0));
 
-// Project key → palette color, assigned in descending-commit-volume
-// order so the busiest project lands on the first palette slot. The
-// "unassigned" bucket always uses the slate sentinel regardless of
-// where it appears in the volume ranking.
+// Project key → palette color, assigned in descending-commit-volume order so
+// the busiest project lands on the first slot. "Unassigned" always uses the
+// slate sentinel regardless of its volume rank.
 interface ProjectLegendEntry {
   key: string;
   label: string;
@@ -105,8 +92,8 @@ const projectLegend = computed<ProjectLegendEntry[]>(() => {
     repoCount: v.repoCount,
     isUnassigned: v.isUnassigned,
   })).sort((a, b) => b.commits - a.commits);
-  // Reserve palette slots only for assigned projects; unassigned slot
-  // is fixed so palette slot 0 always belongs to a real project.
+  // Reserve palette slots only for assigned projects so slot 0 always belongs
+  // to a real project.
   let paletteIdx = 0;
   return entries.map((e) => ({
     key: e.key,
@@ -122,11 +109,8 @@ const projectColor = computed<Record<string, string>>(() => {
   return m;
 });
 
-// Cheap deterministic shuffle keyed on the repo's fullName so the band
-// order doesn't reshuffle on every render (which would be visually
-// jittery) but still varies between repos so the chart isn't a tidy
-// gradient. Sorts contributors by an index produced from the seed
-// instead of by commit count.
+// Deterministic shuffle keyed on fullName so band order is stable across
+// renders (no jitter) but still varies between repos.
 function seededHash(str: string): number {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
@@ -199,10 +183,8 @@ function arcPath(startAngle: number, endAngle: number, rInner: number, rOuter: n
   ].join(' ');
 }
 
-// Mix a base hex color toward white by `t` (0 = base, 1 = white).
-// Used to give each band a slight tonal shift so neighbouring bands
-// within a wedge are visually distinguishable even though they share
-// the wedge's family colour.
+// Mix a base hex color toward white by `t` (0 = base, 1 = white), so adjacent
+// bands sharing a wedge's family colour stay distinguishable.
 function tint(hex: string, t: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -222,15 +204,13 @@ const wedges = computed<Wedge[]>(() => {
     const endAngle = cursor + sweep;
     cursor = endAngle;
     const fill = projectColor.value[repo.project ?? UNASSIGNED_KEY] ?? UNASSIGNED_COLOR;
-    // Build radial bands within the wedge. Contributors come pre-sorted
-    // by commits desc from the server; the shuffle reorders them so the
-    // thickest band can land anywhere in the wedge.
+    // Contributors arrive sorted by commits desc; the shuffle lets the
+    // thickest band land anywhere in the wedge.
     const order = shuffledIndices(repo.fullName, repo.contributors.length);
     const repoTotal = repo.contributors.reduce((s, c) => s + c.commits, 0);
     const rRange = props.outerRadius - props.innerRadius;
-    // Reserve (n-1)*BAND_GAP of the radial range for inter-band gaps so
-    // a wedge with N contributors still fits cleanly inside [innerR,
-    // outerR]. Bands shrink proportionally; the gap is constant.
+    // Reserve (n-1)*BAND_GAP of the radial range for inter-band gaps; bands
+    // shrink proportionally, the gap is constant.
     const bandSpace = Math.max(0, rRange - Math.max(0, order.length - 1) * BAND_GAP);
     let rCursor = props.innerRadius;
     const explode = explodeFor(share);
@@ -240,8 +220,7 @@ const wedges = computed<Wedge[]>(() => {
       const c = repo.contributors[cIdx]!;
       const bandShare = repoTotal > 0 ? c.commits / repoTotal : 0;
       const bandWidth = bandSpace * bandShare;
-      // `pos` (band's display index within the wedge) drives the tint —
-      // alternating lighter/darker keeps adjacent bands readable.
+      // Tint by display position so adjacent bands alternate lighter/darker.
       const tintAmount = 0.05 + (pos % 3) * 0.18;
       const safeEnd = endAngle - startAngle >= Math.PI * 2 ? endAngle - 0.0001 : endAngle;
       bands.push({
@@ -252,8 +231,7 @@ const wedges = computed<Wedge[]>(() => {
         contributor: c.displayName,
         commits: c.commits,
       });
-      // Skip the gap after the last band so the outermost band can reach
-      // outerRadius exactly when commits are evenly distributed.
+      // No gap after the last band so the outermost band can reach outerRadius.
       rCursor += bandWidth + (pos < order.length - 1 ? BAND_GAP : 0);
     }
     return {
@@ -272,10 +250,8 @@ const wedges = computed<Wedge[]>(() => {
 
 const pct = (n: number): string => (totalCommits.value > 0 ? `${Math.round((n / totalCommits.value) * 100)}%` : '0%');
 
-// Force the legend into exactly two rows regardless of pill widths or
-// viewport. Splitting client-side beats CSS-only approaches here —
-// `flex-wrap` would let row count drift with the container width, and
-// the user wants the visual rhythm pinned to 2.
+// Split client-side into exactly two rows; `flex-wrap` alone would let the row
+// count drift with container width, but the design pins it to 2.
 const legendRows = computed<ProjectLegendEntry[][]>(() => {
   const items = projectLegend.value;
   if (items.length === 0) return [[]];
@@ -285,14 +261,8 @@ const legendRows = computed<ProjectLegendEntry[][]>(() => {
 </script>
 
 <template>
-  <!-- Chart sits on top with the project legend wrapping below as a
-       row of pills. With only a handful of distinct projects in scope
-       this reads better than a vertical legend stuck to the side — the
-       chart gets the full panel width, and the pills naturally flow
-       across however many lines they need. -->
-  <!-- Chart and legend sit flush — the SVG already carries MAX_EXPLODE
-       whitespace around its edge, so a tight gap keeps the legend close
-       without the two actually touching. -->
+  <!-- The SVG already carries MAX_EXPLODE whitespace around its edge, so the
+       tight gap keeps the legend close without the two actually touching. -->
   <div class="flex flex-col items-center gap-1">
     <svg
       :width="size"
@@ -325,9 +295,7 @@ const legendRows = computed<ProjectLegendEntry[][]>(() => {
           <title>{{ band.repoSlug }} · {{ band.contributor }} · {{ band.commits }} commits</title>
         </path>
       </g>
-      <!-- Three-line centre stack: window label · COMMITS overline ·
-           total. Vertical positions are hand-tuned against
-           innerRadius=50 so the block sits centred in the hole. -->
+      <!-- Three-line centre stack; y positions hand-tuned against innerRadius=50. -->
       <text :x="cx" :y="cy - 22" text-anchor="middle" class="fill-slate-400" style="font-size: 11px">30d</text>
       <text
         :x="cx"
@@ -343,9 +311,8 @@ const legendRows = computed<ProjectLegendEntry[][]>(() => {
       </text>
     </svg>
 
-    <!-- Legend pinned to exactly two rows (see `legendRows` for the
-         split). Each row centres its own pills, so an uneven split
-         (e.g., 5 / 4) still reads as balanced. -->
+    <!-- Each row centres its own pills, so an uneven split (5 / 4) still reads
+         as balanced. -->
     <div class="flex flex-col gap-2">
       <ul
         v-for="(row, rowIdx) in legendRows"

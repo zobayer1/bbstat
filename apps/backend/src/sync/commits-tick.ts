@@ -1,14 +1,11 @@
 // Bounded-concurrency, budget-aware orchestrator over a list of tracked
 // repositories. One "tick" = one cron firing (or one manual run). Workers
 // pull from a shared queue; before claiming the next repo each worker checks
-// the client's outbound-call budget — if remaining headroom is below the
-// safety threshold, the worker stops and any unclaimed repos are returned
-// as `deferred` for the next tick.
+// the client's outbound-call budget — below the safety threshold it stops
+// and any unclaimed repos are returned as `deferred` for the next tick.
 //
-// Errors in a single repo never abort the tick; they're collected per-repo
-// so a transient 500 on one repo can't starve the others. Hard failures
-// (caller wants to stop everything) should throw outside the worker by
-// short-circuiting before runCommitsTick is even invoked.
+// A single repo's error never aborts the tick; errors are collected per-repo
+// so a transient 500 can't starve the others.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { BitbucketRateLimitError } from '../bitbucket/errors.js';
@@ -22,26 +19,19 @@ export interface CommitsTickDeps {
   client: BitbucketClient;
   store: CommitStore;
   logger?: BitbucketLogger;
-  // Forwarded into CommitSyncDeps so per-repo syncs can auto-trip
-  // `sync_excluded` on 404 / history-rewrite. Optional in tests; the
-  // runtime wires it.
+  // Lets per-repo syncs auto-trip `sync_excluded` on 404 / history-rewrite.
   discoveryStore?: DiscoveryStore;
-  // Forwarded into CommitSyncDeps so the auto-trip can publish
-  // `repository.sync-excluded` events to SSE subscribers.
+  // Lets the auto-trip publish `repository.sync-excluded` SSE events.
   bus?: EventBus;
-  // Per-repo sync function. Defaults to syncRepositoryCommits; injectable
-  // so the orchestrator can be tested without standing up the full BB
-  // client + store + fetch fixture stack.
+  // Defaults to syncRepositoryCommits; injectable for tests.
   syncOne?: (deps: CommitSyncDeps, repo: RepositoryHandle, opts: CommitSyncOptions) => Promise<RepoCommitSyncResult>;
 }
 
 export interface CommitsTickOptions extends CommitSyncOptions {
-  // Max repos in flight at once. BB Cloud is comfortable with a handful;
-  // bumping past 5 risks bursting the per-second limit even when the
-  // hourly budget has headroom.
+  // Max repos in flight. Past ~5 risks bursting the per-second limit even
+  // when the hourly budget has headroom.
   concurrency?: number;
-  // Safety margin under hourlyCallBudget. When getBudgetRemaining() falls
-  // below this, no new repos are scheduled. Should be >= the worst-case
+  // Safety margin under hourlyCallBudget. Should be >= the worst-case
   // per-repo cost (firstRunMaxPages × concurrency).
   budgetLowThreshold?: number;
 }
@@ -50,17 +40,14 @@ export interface CommitsTickResult {
   attempted: RepoCommitSyncResult[];
   deferred: RepositoryHandle[];
   errors: Array<{ repository: RepositoryHandle; error: string }>;
-  // True iff something stopped the tick before draining `repos` — see
-  // `stopReason` for the cause. Pure "ran out of repos" finishes are
-  // stoppedEarly=false even if `deferred` is empty.
+  // True iff something stopped the tick before draining `repos`. Pure
+  // "ran out of repos" finishes are false even if `deferred` is empty.
   stoppedEarly: boolean;
-  // Why the tick stopped. `null` = drained the queue cleanly. `'budget'` =
-  // the BB-call budget gate fired. `'rate-limited'` = the adaptive pacer
-  // hit its ceiling and a BB call still 429'd, exhausting the client
-  // retry budget; remaining repos roll over to the next cron tick. Their
-  // `last_synced_at` stays put (we never reached `markSyncSuccess`), so
-  // the next tick's `ORDER BY last_synced_at ASC NULLS FIRST` puts them
-  // at the head of the queue.
+  // `null` = drained cleanly. `'budget'` = budget gate fired.
+  // `'rate-limited'` = pacer hit its ceiling and a BB call still 429'd;
+  // remaining repos roll to the next tick. Their `last_synced_at` stays
+  // put (never reached `markSyncSuccess`), so `ORDER BY last_synced_at
+  // ASC NULLS FIRST` puts them at the head of the next queue.
   stopReason: 'budget' | 'rate-limited' | null;
   budgetRemainingAtEnd: number;
 }
@@ -85,7 +72,7 @@ export async function runCommitsTick(
   let stoppedEarly = false;
   let stopReason: 'budget' | 'rate-limited' | null = null;
 
-  // Per-repo deps strip out the tick-only `syncOne` injection.
+  // Per-repo deps strip the tick-only `syncOne` injection.
   const perRepoDeps: CommitSyncDeps = {
     client: deps.client,
     store: deps.store,
@@ -93,9 +80,8 @@ export async function runCommitsTick(
     ...(deps.discoveryStore ? { discoveryStore: deps.discoveryStore } : {}),
     ...(deps.bus ? { bus: deps.bus } : {}),
   };
-  // syncOne sees the same options as the per-repo function — it ignores the
-  // tick-specific knobs (concurrency, budgetLowThreshold) since they have
-  // no meaning at that layer.
+  // Drop the tick-specific knobs (concurrency, budgetLowThreshold) that
+  // have no meaning at the per-repo layer.
   const perRepoOpts: CommitSyncOptions = {
     ...(opts.firstRunMaxPages !== undefined ? { firstRunMaxPages: opts.firstRunMaxPages } : {}),
     ...(opts.firstRunSince !== undefined ? { firstRunSince: opts.firstRunSince } : {}),
@@ -124,11 +110,9 @@ export async function runCommitsTick(
         attempted.push(result);
       } catch (err) {
         if (err instanceof BitbucketRateLimitError) {
-          // Adaptive pacing exhausted — BB still 429s at the cap. Put this
-          // repo back at the head of the queue (it didn't get processed),
-          // flag the tick-wide stop. Other workers will see it on their
-          // next iteration. Logged at warn, not error: this is expected
-          // backpressure that resolves on the next cron tick.
+          // BB still 429s at the pacing cap. Put this unprocessed repo back
+          // at the head of the queue and flag the tick-wide stop. Warn, not
+          // error: expected backpressure that resolves on the next tick.
           queue.unshift(repo);
           stoppedEarly = true;
           stopReason = 'rate-limited';

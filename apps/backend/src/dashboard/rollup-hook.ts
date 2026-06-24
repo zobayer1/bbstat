@@ -1,17 +1,14 @@
-// Wraps the per-repo commit sync with post-success dashboard upkeep:
+// Wraps per-repo commit sync with post-success dashboard upkeep:
 // (1) recompute commit_daily for the touched day range, then
 // (2) invalidate user-summary cache entries for users whose commits landed.
-// Wired into the tick orchestrator via runner.ts → CommitsTickDeps.syncOne.
 //
-// Neither side effect can poison the commit-sync result: the commits already
-// landed in `commits` successfully, and the next sync of this repo will
-// re-aggregate the same day range anyway (since recompute is scoped to the
-// touched window). Failures here are dashboard-freshness blips, not
-// data-integrity issues — log and move on.
+// Neither side effect can poison the commit-sync result: commits already
+// landed and the next sync re-aggregates the same window. Failures here are
+// freshness blips, not data-integrity issues — log and move on.
 //
 // Ordering matters: recompute MUST run before invalidate. Otherwise a
-// concurrent read between invalidate and recompute would refill the cache
-// from a still-stale rollup, holding stale data until the TTL elapses.
+// concurrent read between invalidate and recompute refills the cache from a
+// still-stale rollup, holding stale data until the TTL elapses.
 
 import type { BitbucketLogger } from '../bitbucket/client.js';
 import type { CommitSyncDeps, CommitSyncOptions, RepoCommitSyncResult, RepositoryHandle } from '../sync/commits.js';
@@ -20,9 +17,6 @@ import type { UserSummaryCache } from './user-summary-cache.js';
 
 export interface RollupHookDeps {
   rollupStore: RollupStore;
-  // Optional. When wired, summaries for users with commits in the touched
-  // day range get DEL'd from cache so the next read recomputes from the
-  // fresh rollup. Absent in tests that don't care about cache invalidation.
   userSummaryCache?: UserSummaryCache;
   logger?: BitbucketLogger;
 }
@@ -36,18 +30,11 @@ export type SyncOneFn = (
 export function withRollupRecompute(inner: SyncOneFn, hookDeps: RollupHookDeps): SyncOneFn {
   return async (deps, repo, opts) => {
     const result = await inner(deps, repo, opts);
-    // commit_daily aggregates commit counts AND additions/deletions AND
-    // per-user attribution from `commits`. We refresh the rollup whenever
-    // any of those dimensions changed:
-    //   - new commits landed in `inserted` → insertedRange
-    //   - existing commits' diff stats just landed → diffStatsRange
-    //   - existing commits' author_user_id transitioned NULL → known
-    //     (BB linked a workspace member to a previously anonymous commit)
-    //     → reattributedRange
-    // The merged range is the union of all three. The reattribution case
-    // is the load-bearing one for fixing the stale (day, repo, NULL) row
-    // — without it the new attributed row would coexist with the old
-    // anonymous row and the dashboard would double-count.
+    // Refresh the rollup whenever any dimension changed: new commits landed,
+    // diff stats landed, or author_user_id transitioned NULL→known (BB linked
+    // a member to a previously anonymous commit). The reattribution case is
+    // load-bearing: without it the new attributed row would coexist with the
+    // old anonymous (day, repo, NULL) row and the dashboard would double-count.
     const insertedRange = result.inserted > 0 ? result.insertedRange : null;
     const diffStatsRange = result.diffStatsUpdated > 0 ? result.diffStatsRange : null;
     const reattributedRange = result.reattributedRange;

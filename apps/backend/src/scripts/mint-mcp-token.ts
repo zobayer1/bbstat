@@ -1,25 +1,16 @@
 // CLI: mint a signed access token for an MCP consumer.
 //
-// Tokens are stateless and signed by MCP_TOKEN_SECRET (see src/mcp/auth.ts) —
-// minting needs nothing but that secret, so this script does NOT load the full
-// app config (no DATABASE_URL etc. required). Run it inside any environment
-// that has MCP_TOKEN_SECRET set:
-//
-//   Dev (repo root):  pnpm --filter @bbstat/backend mcp:mint-token analytics-agent
-//   Prod (image):     docker compose -f compose.yaml run --rm mcp \
-//                       dist/scripts/mint-mcp-token.js analytics-agent --days 90
+// Tokens are stateless, signed by MCP_TOKEN_SECRET (see src/mcp/auth.ts), so
+// minting loads only that secret — no full app config (no DATABASE_URL).
 //
 // Usage:
 //   mint-mcp-token <consumer> [--days N | --no-expiry]
 //
-//   <consumer>     required label for who the token is for (audit only)
-//   --days N       token lifetime in days (default 365)
-//   --no-expiry    mint a non-expiring token (exp = 0)
+//   <consumer>     audit-only label for who the token is for
+//   --days N       lifetime in days (default 365)
+//   --no-expiry    non-expiring token (exp = 0)
 //
-// The token is printed to STDOUT (and nothing else), so it pipes cleanly:
-//   pnpm --filter @bbstat/backend --silent mcp:mint-token ci > ci.token
-// Human-readable details go to STDERR.
-//
+// Only the token goes to STDOUT (info → STDERR), so it pipes cleanly.
 // Exits 0 on success, 1 on any usage / config error.
 
 /* eslint-disable no-console -- one-shot CLI; stdout (token) + stderr (info) are the deliverable */

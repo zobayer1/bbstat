@@ -1,27 +1,20 @@
-// Endpoint wrapper for BitBucket Cloud
-// `/repositories/{ws}/{slug}/pullrequests` — typed shape + paginator. Sync
-// orchestration (cursor / cold cap / delta stop / UPSERT) lives in
-// src/sync/pull-requests.ts and consumes this.
+// Endpoint wrapper for `/repositories/{ws}/{slug}/pullrequests` — typed shape
+// + paginator. Sync orchestration lives in src/sync/pull-requests.ts.
 //
-// We filter on all four PR states. BB defaults to OPEN only, so the four
-// `state=` params are required to surface merged/declined/superseded PRs in
-// the same paginated walk. RequestOptions.query only accepts one value per
-// key, so the state filters live inline in the request path; `new URL()`
-// parses them into multi-value searchParams which subsequent set() calls
-// (for fields + pagelen) leave intact.
+// BB defaults to OPEN only, so all four `state=` params are required to
+// surface merged/declined/superseded PRs in one walk. They live inline in the
+// path because RequestOptions.query only accepts one value per key; `new
+// URL()` parses them into multi-value searchParams that later set() calls
+// leave intact.
 //
-// Sort by `-updated_on` so the cursor walk runs newest-first: ingest stops
-// at the first PR with `updated_on < cursor`. PRs share `updated_on` only
-// to per-second resolution, so the cursor pair is (updated_on, id) — the
-// numeric BB id tie-breaks within the same second.
+// Sort `-updated_on` makes the cursor walk newest-first (stop at the first PR
+// with `updated_on < cursor`). `updated_on` is per-second only, so the cursor
+// pair is (updated_on, id) — the numeric BB id tie-breaks within a second.
 
 import type { BitbucketClient } from './client.js';
 
 export type BitbucketPullRequestState = 'OPEN' | 'MERGED' | 'DECLINED' | 'SUPERSEDED';
 
-// Slim BB pull-request shape — only the fields we field-filter for. The full
-// BB payload carries far more (rendered diffs, reviewers, links, etc.) —
-// none of which we ingest.
 export interface BitbucketPullRequest {
   id: number;
   title: string;
@@ -44,8 +37,8 @@ export interface BitbucketPullRequest {
   task_count: number;
 }
 
-// Field filter for /pullrequests. Paginated endpoint, so values.-prefix is
-// required; `next` is appended automatically by client.paginate().
+// Paginated endpoint → `values.` prefix required; `next` is appended by
+// client.paginate().
 export const PR_LIST_FIELDS = [
   'values.id',
   'values.title',
@@ -62,10 +55,8 @@ export const PR_LIST_FIELDS = [
   'values.task_count',
 ];
 
-// Async iterator yielding each PR in BB's natural order (newest by
-// `updated_on` first, thanks to `sort=-updated_on`). Caller decides when to
-// stop — e.g. on hitting `updated_on < cursor` for delta sync, or after N
-// pages on first-run backfill.
+// Yields PRs newest-first by `updated_on` (sort=-updated_on). Caller decides
+// when to stop (`updated_on < cursor` for delta, or N pages for backfill).
 export function paginatePullRequests(
   client: BitbucketClient,
   workspace: string,
@@ -74,11 +65,9 @@ export function paginatePullRequests(
   const path =
     `/repositories/${workspace}/${slug}/pullrequests` +
     `?state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&sort=-updated_on`;
-  // BB Cloud's /pullrequests endpoint caps `pagelen` at 50, unlike
-  // /commits (100). The shared `client.paginate()` default of 100 trips
-  // an "Invalid pagelen" 400 on this endpoint. Override explicitly here;
-  // BB's `next` URL preserves whatever we set, so all subsequent pages
-  // inherit the 50-row limit too.
+  // BB's /pullrequests caps `pagelen` at 50 (vs 100 for /commits); the
+  // paginate() default of 100 trips a 400 here. BB's `next` URL preserves
+  // the override, so subsequent pages inherit it.
   return client.paginate<BitbucketPullRequest>(path, {
     fields: PR_LIST_FIELDS,
     query: { pagelen: 50 },

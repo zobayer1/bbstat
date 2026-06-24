@@ -1,30 +1,17 @@
 // History-rewrite reconciliation. Recovery path for a repo auto-excluded
-// with reason 'history-rewritten' (see commits.ts: the delta walk exhausted
-// BitBucket's history without finding our `last_seen_sha`, because a
-// force-push / rebase rewrote the commit it pointed at).
+// with reason 'history-rewritten' (commits.ts: the delta walk exhausted BB's
+// history without finding `last_seen_sha`, because a force-push / rebase
+// rewrote the commit it pointed at).
 //
-// The naive recovery — `POST .../include`, which nulls the cursor and lets
-// the next tick cold-re-walk the whole repo — re-pages the entire history
-// and is wasteful when (as is typical for a force-push) only the tip
-// diverged. This module does it surgically instead:
+// The naive `POST .../include` recovery cold-re-walks the whole repo, which
+// is wasteful when only the tip diverged. This module does it surgically:
+// walk BB's head until we hit a sha we already store (the common ancestor),
+// delete our orphaned commits above it, re-anchor `last_seen_sha` to the
+// ancestor, clear the exclusion, and let a normal delta sync ingest just the
+// NEW commits — then recompute the affected commit_daily range + scores.
 //
-//   1. Walk BB's head newest-first until we hit a sha we already store —
-//      the COMMON ANCESTOR (the rebase base). Bounded, so a deep rewrite
-//      bails rather than walking forever.
-//   2. ORPHANS = our commits newer than the ancestor that BB no longer has
-//      (the rewritten-away shas). NEW = BB commits above the ancestor we
-//      don't have yet.
-//   3. Delete the orphans, re-anchor `last_seen_sha` to the ancestor, clear
-//      the exclusion, then re-run the normal *delta* commit sync — which
-//      stops at the ancestor and ingests only the handful of NEW commits
-//      (plus their eager diff-stats). No full re-walk, no re-fetch of
-//      existing diff-stats.
-//   4. Recompute the affected `commit_daily` day range + scores so deleted
-//      / inserted commits are reflected.
-//
-// `dryRun` returns the computed plan (ancestor, orphans, new-commit count)
-// without mutating, so an operator can eyeball the orphan list before the
-// irreversible delete.
+// `dryRun` returns the plan without mutating, so an operator can eyeball the
+// orphan list before the irreversible delete.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateCommits } from '../bitbucket/commits.js';
@@ -38,8 +25,7 @@ export interface ReconcileDeps {
   client: BitbucketClient;
   commitStore: CommitStore;
   discoveryStore: DiscoveryStore;
-  // Optional dashboard upkeep — same dependencies the runner wires for the
-  // normal sync. When omitted (tests), the recompute steps are skipped.
+  // Dashboard upkeep — when omitted (tests), the recompute steps are skipped.
   rollupStore?: RollupStore;
   recomputeAllScores?: () => Promise<unknown>;
   bus?: EventBus;
@@ -49,10 +35,8 @@ export interface ReconcileDeps {
 export interface ReconcileOptions {
   // When true, compute and return the plan without mutating anything.
   dryRun: boolean;
-  // Cap on how many of OUR newest commits to consider as the ancestor
-  // search window, and how many BB commits to walk. A force-push rarely
-  // rewrites more than a few; the default tolerates a generous rewrite
-  // while still bounding the work. Default 500.
+  // Cap on both the ancestor search window (our newest commits) and the BB
+  // walk. Bounds the work while tolerating a generous rewrite. Default 500.
   windowSize?: number;
   // Forwarded to the post-anchor delta sync (diff-stats budget etc.).
   commitSyncOptions?: CommitSyncOptions;
@@ -81,15 +65,12 @@ export type ReconcileOutcome =
 
 type DayRange = { sinceDay: string; untilDay: string };
 
-// Pure diff of two newest-first head windows. Exported for unit testing —
-// the orchestrator below feeds it BB's walked shas and our recent rows.
-//
-//   ancestor   = first BB sha (newest-first) that we also store
-//   bbAbove    = BB shas strictly newer than the ancestor (the NEW commits)
-//   orphanShas = our commits strictly newer than the ancestor that aren't
-//                among bbAbove (the rewritten-away commits)
-//
-// Returns null when no common ancestor exists in the supplied windows.
+// Pure diff of two newest-first head windows (exported for unit testing).
+//   ancestor   = first BB sha (newest-first) we also store
+//   bbAbove    = BB shas strictly newer than the ancestor (NEW commits)
+//   orphanShas = our commits newer than the ancestor not among bbAbove
+//                (rewritten-away)
+// Returns null when no common ancestor exists in the windows.
 export function computeReconcilePlan(
   bbNewestFirst: string[],
   ourRecentNewestFirst: ReadonlyArray<{ sha: string; authoredAt: Date }>,
@@ -124,9 +105,9 @@ export async function reconcileHistoryRewrite(
   const ourRecent = await deps.commitStore.listRecentCommitShas(repo.repositoryId, windowSize);
   const ourSet = new Set(ourRecent.map((c) => c.sha));
 
-  // Walk BB newest-first, stopping as soon as we hit a sha we already store
-  // (the ancestor) — for a tip rewrite that's page one. Bounded by the
-  // window so a fully-divergent history doesn't page forever.
+  // Walk BB newest-first until we hit a sha we already store (the ancestor)
+  // — page one for a tip rewrite. Bounded by the window so a fully-divergent
+  // history doesn't page forever.
   const bbNewestFirst: string[] = [];
   let walked = 0;
   let foundAncestor = false;
@@ -163,8 +144,8 @@ export async function reconcileHistoryRewrite(
     return { kind: 'dry-run', plan };
   }
 
-  // Apply. Prune orphans, re-anchor the cursor to the ancestor, lift the
-  // exclusion — then let the proven delta sync ingest the NEW commits.
+  // Prune orphans, re-anchor the cursor to the ancestor, lift the exclusion
+  // — then let the delta sync ingest the NEW commits.
   const orphanDays = collectOrphanDays(ourRecent, plan.orphanShas);
   const orphansDeleted = await deps.commitStore.deleteCommitsByShas(repo.repositoryId, plan.orphanShas);
   await deps.commitStore.setLastSeenSha(repo.repositoryId, plan.ancestorSha);
@@ -183,9 +164,8 @@ export async function reconcileHistoryRewrite(
   );
 
   // Refresh commit_daily over the union of orphan-deletion days and the
-  // inserted range, so both the removals and the additions land in the
-  // dashboard rollup. Score recompute is unconditional but cheap (sub-second
-  // at corpus scale) — simpler than gating on orphan eligibility.
+  // inserted range so both removals and additions land in the rollup. Score
+  // recompute is unconditional but cheap.
   const range = mergeDayRanges(orphanDays, syncResult.insertedRange);
   if (deps.rollupStore && range) {
     try {
@@ -228,9 +208,8 @@ export async function reconcileHistoryRewrite(
   };
 }
 
-// UTC day window covering the orphaned commits (the rows we delete). Null
-// when nothing is orphaned. Day strings are YYYY-MM-DD so lexical compare
-// matches chronological order — same convention as rollup-hook.ts.
+// UTC day window over the orphaned (deleted) commits. YYYY-MM-DD so lexical
+// compare matches chronological order. Null when nothing is orphaned.
 function collectOrphanDays(
   ourRecent: ReadonlyArray<{ sha: string; authoredAt: Date }>,
   orphanShas: string[],

@@ -15,35 +15,25 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
-// All tables / enums / sequences live under the `bbstat` schema, NOT the
-// Postgres default `public`. Production environments are configured with
-// a restricted role that has no CREATE on `public` (organizational policy),
-// so the entire application schema is namespaced explicitly.
+// All tables / enums / sequences live under the `bbstat` schema, NOT
+// `public`: production runs a restricted role with no CREATE on `public`.
 //
-// MAINTAINER NOTE: drizzle-kit emits `CREATE SCHEMA "bbstat";` in the
-// initial migration without `IF NOT EXISTS`. That breaks production
-// installs where the DBA has pre-created the schema before the role has
-// CREATE on the database. After running `make db-generate`, if the
-// generated migration's first statement is plain `CREATE SCHEMA "…"`,
-// patch it to `CREATE SCHEMA IF NOT EXISTS "…"` (and mirror in
-// apps/backend/schema/). Only matters when the initial 0000 is
-// regenerated — incremental migrations on top of an existing schema
-// don't trigger this path.
+// MAINTAINER NOTE: drizzle-kit emits `CREATE SCHEMA "bbstat";` without
+// `IF NOT EXISTS`, which breaks production installs where the DBA pre-created
+// the schema. After `make db-generate`, if the initial migration's first
+// statement is plain `CREATE SCHEMA "…"`, patch it to `CREATE SCHEMA IF NOT
+// EXISTS "…"` (and mirror in apps/backend/schema/). Only the regenerated 0000
+// triggers this — incremental migrations don't.
 export const bbstatSchema = pgSchema('bbstat');
 
-// Postgres `tsvector` — used for the commit message FTS column. We never
-// read this column from TypeScript (it's a derived index target only), so
-// the `data` shape is `unknown`. The column is `GENERATED ALWAYS AS … STORED`
-// in the table definition below, so it's also implicitly read-only.
+// Postgres `tsvector` for the commit-message FTS column. Never read from
+// TypeScript (derived index target only), and GENERATED ALWAYS … STORED, so
+// `data` is `unknown` and the column is read-only.
 const tsvector = customType<{ data: unknown; driverData: string; notNull: false; default: false }>({
   dataType() {
     return 'tsvector';
   },
 });
-
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
 
 export const syncStatusEnum = bbstatSchema.enum('sync_status', ['idle', 'running', 'success', 'failed']);
 
@@ -75,53 +65,30 @@ export const userBadgeEnum = bbstatSchema.enum('user_badge', [
 // live consistency distribution.
 export const userBadgeTierEnum = bbstatSchema.enum('user_badge_tier', ['bronze', 'silver', 'gold']);
 
-// ---------------------------------------------------------------------------
-// Core entities
-// ---------------------------------------------------------------------------
-
-// `email` captures the `<email>` portion of commits.author.raw on first
-// ingest and is then write-once via COALESCE — once set it sticks. This is
-// the contributor's git-configured email, NOT a verified workspace email
-// (BB's `/workspaces/{ws}/members` endpoint never returned email even when
-// it was public). Caveats apply to display: same person can use multiple
-// git emails across machines (corp vs personal), BB synthesizes
-// `noreply@bitbucket.org` for web-merge commits, and a fresh laptop can
-// produce a one-off bogus email. The write-once policy means whatever
-// landed first sticks; we don't keep overwriting because the "last
-// observed" email isn't meaningfully more correct than the first.
-// noreply addresses are filtered out at ingest so they never poison the
-// column. Plumbed in commits.ts forward sync + deepen-backfill.ts via
-// CommitStore.setUserEmailsIfMissing; surfaced in the WorkspaceMember
-// payload + /members table.
-// `is_workspace_member` distinguishes rows discovered via
-// `/workspaces/{ws}/members` (TRUE) from rows auto-created during
-// commit ingest when BB attributed a commit to a UUID we hadn't seen
-// before (FALSE — typically ex-employees, never-members, or external
-// contributors who pushed to a public repo). Member sync forces TRUE on
-// every current member it sees, so a previously-auto-created user who
-// rejoins the workspace flips back to TRUE on the next tick. The UI
-// uses the flag to mute out-of-workspace contributors in member lists
-// and filter "active team" vs "all-time contributors" leaderboards.
-// `person_id` — Phase 5 alias-merge layer. NULL = unattached (the row is
-// its own person). NOT NULL = this row is one alias of the canonical
-// person identified by `people.id`. Multiple `users` rows can share one
-// `person_id`; the leaderboard / scoring rollup collapses aliases through
-// this column. Operator-curated via the /api/admin/people endpoints (no
-// auto-detection). ON DELETE SET NULL — dissolving a person leaves the
-// alias rows intact and unattached. The partial index targets the common
-// "find all aliases of person X" lookup the scoring rollup does on every
-// tick; rows with NULL (most of the table at first) don't pollute it.
+// `email`: the `<email>` from commits.author.raw, write-once via COALESCE
+// (first observed sticks). This is the git-configured email, NOT a verified
+// workspace email (BB's members endpoint never returned email). Same person
+// may use multiple emails across machines; noreply addresses are filtered at
+// ingest so they never poison the column. Plumbed via
+// CommitStore.setUserEmailsIfMissing in commits.ts + deepen-backfill.ts.
 //
-// `is_primary_for_person` designates this alias as the canonical one
-// supplying UI defaults (display_name fallback, username, email-mailto,
-// BB avatar URL) for its `person_id`. At most one alias per person can
-// carry the flag (enforced by `users_one_primary_per_person_idx`); a
-// CHECK pins the flag to NULL out whenever `person_id` is NULL so an
-// unattached alias can't be marked primary. Lives on `users` rather
-// than on `people.primary_user_id` because the latter created a
-// circular FK with `users.person_id` that broke pg_dump --data-only
-// restores once merges exist. Admin endpoints (Phase 5 commit 3) own
-// the atomic-swap when transferring primary between aliases.
+// `is_workspace_member`: TRUE for rows from `/workspaces/{ws}/members`, FALSE
+// for rows auto-created during commit ingest (ex-employees, never-members,
+// external contributors). Member sync forces TRUE on every current member, so
+// a rejoiner flips back. UI mutes out-of-workspace contributors via this flag.
+//
+// `person_id` — Phase 5 alias-merge layer. NULL = unattached. NOT NULL = an
+// alias of canonical `people.id`; the leaderboard / scoring rollup collapses
+// aliases through this column. Operator-curated, no auto-detection. ON DELETE
+// SET NULL — dissolving a person leaves alias rows intact. The partial index
+// targets the "all aliases of person X" lookup; NULL rows don't pollute it.
+//
+// `is_primary_for_person`: the canonical alias supplying UI defaults
+// (display_name fallback, username, mailto, avatar) for its person. ≤1 per
+// person (partial unique index); a CHECK nulls the flag when person_id is
+// NULL. Lives here rather than `people.primary_user_id` because the latter
+// created a circular FK with `users.person_id` that broke pg_dump
+// --data-only restores once merges exist.
 export const users = bbstatSchema.table(
   'users',
   {
@@ -139,34 +106,26 @@ export const users = bbstatSchema.table(
     personIdIdx: index('users_person_id_idx')
       .on(t.personId)
       .where(sql`${t.personId} IS NOT NULL`),
-    // Partial unique index — enforces "≤1 primary alias per person".
-    // Only constrains rows where the flag is set AND the user is
-    // actually attached; the (millions of) NULL-person rows stay out
-    // of the index entirely.
+    // Partial unique index enforcing "≤1 primary alias per person"; NULL-person
+    // rows stay out of the index.
     onePrimaryPerPersonIdx: uniqueIndex('users_one_primary_per_person_idx')
       .on(t.personId)
       .where(sql`${t.isPrimaryForPerson} = true AND ${t.personId} IS NOT NULL`),
   }),
 );
 
-// Operator-curated identity layer above `users`. One `people` row represents
-// one canonical human; multiple `users` rows (each a distinct BB UUID) can
-// attach to one person via `users.person_id`. Built by hand via the
-// `/api/admin/people` endpoints — no auto-detection. See docs/people.md and
-// Phase 5 in docs/ROADMAP.md for the design rationale.
+// Operator-curated identity layer above `users`. One row = one canonical
+// human; multiple `users` rows attach via `users.person_id`. Hand-built via
+// `/api/admin/people` — no auto-detection. See docs/people.md.
 //
-// `display_name` is operator-canonical. NULL means "use the primary alias's
-// display_name in the UI" — the leaderboard view COALESCEs through the
-// primary alias identified by `users.is_primary_for_person = true` for
-// this person_id. Operator sets this when the primary alias's name isn't
-// the right human-facing label (autogenerated usernames, ex-employee
-// names drifting from current preferred name, etc.).
+// `display_name` is operator-canonical. NULL → "use the primary alias's
+// display_name" (the leaderboard view COALESCEs through
+// `users.is_primary_for_person`). Set when the primary alias's name isn't the
+// right human-facing label.
 //
-// No `primary_user_id` column here by design — that direction was tried
-// in an earlier draft of V1_4 and created a circular FK with
-// `users.person_id` that breaks pg_dump --data-only restores. The
-// primary designation lives on the `users` side as a boolean flag with
-// a partial unique index enforcing "≤1 primary per person."
+// No `primary_user_id` column by design — it created a circular FK with
+// `users.person_id` that breaks pg_dump --data-only restores. Primary lives
+// on the `users` side as a flag.
 export const people = bbstatSchema.table('people', {
   id: serial('id').primaryKey(),
   displayName: text('display_name'),
@@ -174,47 +133,27 @@ export const people = bbstatSchema.table('people', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-// `repositories` represents the curated *tracked* set — rows here that
-// are not archived are what sync workers walk. `tracked-repos.yaml` is a
-// **seed file**, not a live config source: it controls which repos get
-// inserted on first discovery, and seeds the initial value of
-// `archived`. Once a row exists, the DB is canonical — admin endpoints
-// / scripts / ad-hoc SQL update the flags, and subsequent discovery
-// syncs do NOT overwrite them from YAML. See docs/ROADMAP.md
-// "Curated list growth".
+// The curated *tracked* set — non-archived rows are what sync workers walk.
+// `tracked-repos.yaml` is a **seed file**, not live config: it controls first-
+// discovery inserts and seeds initial `archived`. Once a row exists the DB is
+// canonical — discovery syncs do NOT overwrite flags from YAML.
 //
-// `archived` — Phase 4 follow-up. Soft-retire flag for repos that
-// should keep their historical data but stop appearing in sync work.
-// `listTrackedRepositories()` filters `archived = false`. Seeded from
-// `{ name, archived: true }` in YAML on initial insert; flipped at
-// runtime via POST /repositories/:ws/:slug/archive (or unarchive). No
-// cascade — commits / sync_state stay intact so the data is still
-// available for dashboards and historical queries.
+// `archived` — soft-retire flag: keep historical data, stop sync work.
+// `listTrackedRepositories()` filters `archived = false`. Seeded from YAML;
+// flipped via POST /repositories/:ws/:slug/archive. No cascade.
 //
-// `sync_excluded` — same effect as `archived` (filtered out of every
-// sync tick), but written by the sync layer itself when it detects a
-// permanently-broken state. `sync_exclude_reason` records WHY so the
-// dashboard and operator can act on it. Three auto-trip causes today:
+// `sync_excluded` — same effect as `archived` but written by the sync layer
+// on a permanently-broken state; `sync_exclude_reason` records WHY. Auto-trip
+// causes: 'repo-404' (commits endpoint 404 — renamed/deleted upstream),
+// 'empty-on-bitbucket' (cold + deepen converged with zero commits),
+// 'history-rewritten' (delta walked full history without finding
+// last_seen_sha — force-push). Distinct from `archived` so the UI surfaces
+// "needs attention" separately and admin recovery has its own lifecycle.
 //
-//   - 'repo-404'           — the commits endpoint returned 404 (the
-//                            repo was renamed or deleted upstream).
-//   - 'empty-on-bitbucket' — cold-mode + deepen converged with zero
-//                            commits ever ingested (BB has nothing).
-//   - 'history-rewritten'  — delta sync walked BB's full history
-//                            without finding our last_seen_sha
-//                            (force-push rewrote the branch).
-//
-// Distinct from `archived` so the UI can surface "needs attention"
-// separately from operator-initiated retirement, and so admin recovery
-// (rename, include-back-into-sync, delete) has its own lifecycle. NULL
-// reason on a non-excluded row, populated string on an excluded row.
-//
-// `diff_stats_enabled` was removed in 2026-05. Diff-stat ingest is no
-// longer per-repo opt-in — every non-archived non-excluded repo
-// participates automatically and the backfill tick uses a global
-// freshness-first pickup across the entire pool. Operator opt-out
-// goes through `archived` (full retirement) or per-file
-// `diff_stats_exclude_patterns` (skip specific paths).
+// `diff_stats_enabled` was removed in 2026-05 — diff-stat ingest is no longer
+// per-repo opt-in; every non-archived non-excluded repo participates and the
+// backfill tick uses a global freshness-first pickup. Opt-out goes through
+// `archived` or per-file `diff_stats_exclude_patterns`.
 export const repositories = bbstatSchema.table('repositories', {
   id: serial('id').primaryKey(),
   bitbucketUuid: text('bitbucket_uuid').notNull().unique(),
@@ -225,15 +164,11 @@ export const repositories = bbstatSchema.table('repositories', {
   archived: boolean('archived').notNull().default(false),
   syncExcluded: boolean('sync_excluded').notNull().default(false),
   syncExcludeReason: text('sync_exclude_reason'),
-  // Per-repo blacklist of file-path globs that the diff-stat aggregator
-  // skips. Picomatch syntax (gitignore-style). Patterns are additive
-  // per repo — no global defaults are layered on, so the operator's
-  // canonical "what counts" view lives entirely in this column.
-  // Empty array = unfiltered (every BB diffstat entry is summed).
-  // Editing this column is cheap (cheap UPDATE); applying the change
-  // to already-ingested commits requires POST /diff-stats/reset which
-  // clears the diff_stats_synced_at stamps and lets the backfill tick
-  // re-fetch with the new filter.
+  // Per-repo file-path globs the diff-stat aggregator skips (picomatch,
+  // gitignore-style; additive per repo, no global defaults). Empty = sum every
+  // entry. Editing is a cheap UPDATE, but applying it to already-ingested
+  // commits requires POST /diff-stats/reset (clears diff_stats_synced_at so
+  // the backfill tick re-fetches with the new filter).
   diffStatsExcludePatterns: text('diff_stats_exclude_patterns')
     .array()
     .notNull()
@@ -241,27 +176,17 @@ export const repositories = bbstatSchema.table('repositories', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-// `diff_stats_synced_at` is the Phase 4 resumability marker for per-commit
-// diff-stat ingest. NULL = "diff stats not fetched yet" (the only state at
-// insertion time). Set to now() once /diffstat/:sha lands and additions /
-// deletions / files_changed are persisted. The partial index
-// commits_pending_diff_stats_idx makes the pickup query (`WHERE
-// repository_id = $1 AND diff_stats_synced_at IS NULL`) cheap regardless of
-// how large `commits` grows.
+// `diff_stats_synced_at` — resumability marker for per-commit diff-stat
+// ingest. NULL until /diffstat/:sha lands; the partial index
+// commits_pending_diff_stats_idx keeps the `… IS NULL` pickup query cheap as
+// `commits` grows.
 //
-// `is_merge` mirrors BB's `parents.length > 1` and is populated at
-// insert time. User-facing addition/deletion/files aggregates default-
-// exclude merges (a single merge inflates per-file stats by the full
-// branch delta, dwarfing real authorship). The flag is captured for every
-// commit regardless of diff-stat opt-in.
+// `is_merge` mirrors BB's `parents.length > 1`, set at insert. User-facing
+// add/del/files aggregates default-exclude merges (a merge inflates per-file
+// stats by the full branch delta, dwarfing real authorship).
 //
-// `files_changed` is the count of file entries in /diffstat/:sha. Filled
-// alongside additions/deletions when the diff-stats step lands. Per-repo
-// opt-in was removed in 2026-05; every non-archived non-excluded repo
-// participates. Until /diffstat lands for a commit, all three columns
-// stay at their defaults (additions=0, deletions=0, files_changed=0,
-// diff_stats_synced_at=NULL) — the partial index keys the backfill
-// pickup on that NULL stamp.
+// `files_changed`, `additions`, `deletions` stay at 0 until /diffstat lands;
+// the partial index keys the backfill pickup on the NULL `diff_stats_synced_at`.
 export const commits = bbstatSchema.table(
   'commits',
   {
@@ -276,48 +201,31 @@ export const commits = bbstatSchema.table(
     additions: integer('additions').notNull().default(0),
     deletions: integer('deletions').notNull().default(0),
     filesChanged: integer('files_changed').notNull().default(0),
-    // Cumulative count of failed `/diffstat/<sha>` fetch attempts for this
-    // commit. Incremented by the diff-stats orchestrator on every caught
-    // error (BB 5xx surfaced from the BB client's exhausted in-tick
-    // retry budget): generic 5xx adds 1, HTTP 555 adds 3 — 555 means
-    // "BB compute timeout on this commit's diff", which is a persistent
-    // property of the commit shape (heavy file count, deep tree,
-    // rename-detection blow-up) rather than transient load. When the
-    // count reaches DIFF_STATS_FAILURE_THRESHOLD (3) the orchestrator
-    // also calls updateCommitDiffStats with zeros — stamping
-    // diff_stats_synced_at = NOW() drops the commit out of the pickup
-    // query for good, so we stop burning BB budget on it. The counter
-    // value survives the stamp so downstream readers (and the activity
-    // feed) can distinguish "we tried 3 times and gave up" from "this
-    // commit genuinely has zero changes". UI: ActivityFeed +
-    // CommitDetailModal swap the +/-/files line for an exclamation
-    // icon when count >= threshold.
+    // Cumulative count of failed `/diffstat/<sha>` fetch attempts. Generic 5xx
+    // adds 1; HTTP 555 adds 3 — 555 is a BB compute timeout, a persistent
+    // property of the commit shape (heavy file count, deep tree) rather than
+    // transient load. At DIFF_STATS_FAILURE_THRESHOLD (3) the orchestrator
+    // stamps zeros + diff_stats_synced_at=NOW() to drop the commit from the
+    // pickup query for good. The counter survives the stamp so readers can tell
+    // "tried 3× and gave up" from "genuinely zero changes" (UI swaps the
+    // +/-/files line for an exclamation icon when count >= threshold).
     diffStatsFailureCount: integer('diff_stats_failure_count').notNull().default(0),
     diffStatsSyncedAt: timestamp('diff_stats_synced_at', { withTimezone: true }),
-    // Author-snapshot columns. Populated at ingest from BB's
-    // `author.raw` + `author.user.display_name`. NULL when BB doesn't
-    // carry enough metadata (e.g. malformed author.raw) — `author_email`
-    // additionally NULL for noreply-filtered addresses (see
-    // parseAuthorEmail). Stored on the commit (not just on `users`) for
-    // three reasons: (1) the value is immutable per commit and shouldn't
-    // drift if the user later renames; (2) anonymous rows (no
-    // author_user_id) can still carry the email/name they were pushed
-    // with, leaving a hook for future reprocessing; (3) the
-    // forthcoming step-2 backfill pulls from `users` for already-
-    // attributed rows without a BB call, so anything keyed on these
-    // columns can stop joining once they're populated. Both columns
-    // are read-only from the application's perspective after ingest.
+    // Author-snapshot columns, populated at ingest from BB's `author.raw` +
+    // `author.user.display_name`. NULL when BB metadata is too thin;
+    // `author_email` also NULL for noreply-filtered addresses (parseAuthorEmail).
+    // Stored on the commit (not just `users`) because the value is immutable
+    // per commit (won't drift on rename) and anonymous rows can still carry the
+    // email/name they were pushed with. Read-only after ingest.
     authorEmail: text('author_email'),
     authorDisplayName: text('author_display_name'),
     authoredAt: timestamp('authored_at', { withTimezone: true }).notNull(),
     syncedAt: timestamp('synced_at', { withTimezone: true }).notNull().defaultNow(),
-    // FTS index target for the dedicated Activity page's commit-message
-    // search. `simple` dictionary (no stemming, no stopword removal) keeps
-    // it predictable across the multilingual / acronym-heavy commit corpus
-    // we see in practice — `to_tsquery('english', 'fixes')` would miss
-    // "fix" / "fixed" / non-English vocabulary. GENERATED STORED so the
-    // column backfills on add and stays in lockstep with `message` on
-    // every insert / update — no application-side write needed.
+    // FTS target for the Activity page's commit-message search. `simple`
+    // dictionary (no stemming/stopwords) is predictable across the
+    // multilingual / acronym-heavy corpus where an 'english' config would miss
+    // non-English vocabulary. GENERATED STORED — stays in lockstep with
+    // `message`, no application write.
     messageTsv: tsvector('message_tsv').generatedAlwaysAs(sql`to_tsvector('simple', message)`),
   },
   (t) => ({
@@ -326,39 +234,27 @@ export const commits = bbstatSchema.table(
     pendingDiffStatsIdx: index('commits_pending_diff_stats_idx')
       .on(t.repositoryId)
       .where(sql`${t.diffStatsSyncedAt} IS NULL`),
-    // GIN index for the FTS column — drives `message_tsv @@ plainto_tsquery(…)`
-    // lookups on the Activity page. Updated automatically with the generated
-    // column so insert paths don't touch it.
     messageTsvIdx: index('commits_message_tsv_idx').using('gin', t.messageTsv),
-    // B-tree on `sha` with the `text_pattern_ops` opclass so the Activity
-    // page's hash-prefix search (`sha LIKE 'abc%'`) is index-driven
-    // instead of a full scan. The existing `commits_sha_repo_unique` index
-    // is on (repository_id, sha) which can't serve a SHA-only prefix scan.
+    // `text_pattern_ops` so the Activity page's hash-prefix search (`sha LIKE
+    // 'abc%'`) is index-driven; `commits_sha_repo_unique` on (repository_id,
+    // sha) can't serve a SHA-only prefix scan.
     shaPrefixIdx: index('commits_sha_prefix_idx').using('btree', sql`${t.sha} text_pattern_ops`),
   }),
 );
 
-// Per-day per-(repo, user) commit rollup. Populated by the sync runner after
-// each successful per-repo commit tick (see dashboard/rollup-store.ts). The
-// dashboard reads from this table instead of re-scanning `commits` on every
-// request, keeping query latency flat as the commit log grows.
+// Per-day per-(repo, user) commit rollup, populated after each commit tick
+// (dashboard/rollup-store.ts). The dashboard reads this instead of re-scanning
+// `commits`, keeping query latency flat.
 //
-// `author_user_id` is nullable: anonymous / unmatched-author commits get a
-// single row per (day, repository_id) thanks to NULLS NOT DISTINCT on the
-// unique index — without it, NULL would compare unequal and we'd accumulate
-// one duplicate per anonymous commit. Postgres ≥ 15 required.
+// `author_user_id` nullable: anonymous commits collapse to one row per (day,
+// repo) via NULLS NOT DISTINCT on the unique index (Postgres ≥ 15 required) —
+// without it we'd accumulate one duplicate per anonymous commit.
 //
-// `commit_count` is **non-merge only** — user-level rollups (per-author
-// counts, the scoring rollup in `user_score`) sum it as-is. `merge_commit_count`
-// is the merge counterpart, and is summed alongside ONLY for repo-level
-// activity displays (where a merge into `main` is a real event for the
-// repo). Splitting the column was load-bearing for the scoring rollup:
-// merges inflate per-author churn (a single merge equals the entire branch
-// delta attributed to whoever clicked the button) and would dominate any
-// user-level metric if counted. `additions` / `deletions` here are already
-// non-merge for the same reason — see commits.is_merge for the underlying
-// flag and the ingest path in sync/commit-store.ts for how the split is
-// enforced at write time.
+// `commit_count` is **non-merge only** (user-level rollups sum it as-is);
+// `merge_commit_count` is summed alongside ONLY for repo-level displays. The
+// split is load-bearing: a merge equals the entire branch delta attributed to
+// whoever clicked the button, so counting merges would dominate per-author
+// metrics. `additions` / `deletions` are likewise non-merge.
 export const commitDaily = bbstatSchema.table(
   'commit_daily',
   {
@@ -374,10 +270,9 @@ export const commitDaily = bbstatSchema.table(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    // UNIQUE constraint (not index) because Drizzle 0.36's `.nullsNotDistinct()`
-    // is exposed on `unique()` but not on `uniqueIndex()`. ON CONFLICT can
-    // still target it by constraint name. NULLS NOT DISTINCT makes anonymous
-    // commits (author_user_id IS NULL) collapse to one row per (day, repo).
+    // UNIQUE constraint (not index) because Drizzle 0.36 exposes
+    // `.nullsNotDistinct()` on `unique()` but not `uniqueIndex()`. ON CONFLICT
+    // targets it by constraint name.
     dayRepoUserUnique: unique('commit_daily_day_repo_user_unique')
       .on(t.day, t.repositoryId, t.authorUserId)
       .nullsNotDistinct(),
@@ -386,34 +281,24 @@ export const commitDaily = bbstatSchema.table(
   }),
 );
 
-// Per-user ShipShow Score rollup. One row per user. Fully recomputed by the
-// nightly scoring rollup (scoring/rollup.ts) — never written incrementally,
-// so streaming-staleness questions don't apply. The leaderboard API reads
-// from this table; nothing runs the scoring math on the request path.
+// Per-user ShipShow Score rollup, one row per user. Fully recomputed by the
+// nightly scoring rollup (scoring/rollup.ts) — never incremental. The
+// leaderboard API reads this; nothing scores on the request path. See
+// docs/scoring.md for formulas, constants, and the corpus calibration.
 //
-// See docs/scoring.md for the formulas, constants (ALPHA=1.2, FLOOR=500,
-// HALF_LIFE=30d, BETA=0.25), eligibility filter, badge cascade, and the
-// 2026-05-21 corpus calibration that picked the thresholds.
+// `score_*` / `volume_*` sum `score_commit = ln(1+capped_adds) +
+// ALPHA*ln(1+capped_dels)` over eligible commits. `score_trending` adds an
+// `exp(-ln(2)*age_days/30)` decay so recent activity dominates; `volume_*` are
+// undecayed with a hard window cutoff (`volume_all` is the unbounded sum).
 //
-// All `score_*` and `volume_*` columns sum `score_commit = ln(1+capped_adds)
-// + ALPHA * ln(1+capped_dels)` over eligible commits. `score_trending`
-// additionally applies an `exp(-ln(2)*age_days/30)` decay weight per commit
-// — un-bounded in time, recent activity dominates. The fixed-window
-// `volume_*` columns apply no decay and a hard cutoff at the window edge.
-// `volume_all` is the un-bounded un-decayed sum.
+// Eligible: `is_merge=false AND diff_stats_synced_at IS NOT NULL AND
+// diff_stats_failure_count < 3 AND author_user_id IS NOT NULL`. The
+// eligible/total ratio is materialized as `coverage_pct` so the UI can flag
+// partial-ingest scores without joining `commits`.
 //
-// Eligible commits: `is_merge=false AND diff_stats_synced_at IS NOT NULL
-// AND diff_stats_failure_count < 3 AND author_user_id IS NOT NULL`. The
-// `commits_eligible / commits_total` ratio is materialized as
-// `coverage_pct` so the UI can flag rows whose score is based on
-// incomplete diff-stat ingest without joining `commits` on the read path.
-//
-// `consistency_90d` is NULL on cold-start (`active_days_90d < 3`); the UI
-// shows "—" and drops these rows to the bottom of a consistency sort.
-// `is_dormant = (active_days_90d = 0)` is the gray-out flag.
-//
-// `badge` is the cascaded persona (NULL = Regular / Dormant). Single
-// writer (the rollup); never edited by the application.
+// `consistency_90d` NULL on cold-start (`active_days_90d < 3`; UI shows "—").
+// `is_dormant = (active_days_90d = 0)`. `badge` is the cascaded persona (NULL =
+// Regular / Dormant); single writer (the rollup).
 export const userScore = bbstatSchema.table(
   'user_score',
   {
@@ -422,16 +307,14 @@ export const userScore = bbstatSchema.table(
       .references(() => users.id, { onDelete: 'cascade' }),
     computedAt: timestamp('computed_at', { withTimezone: true }).notNull().defaultNow(),
 
-    // Coverage — used by the UI to warn when a user's score is based on
-    // partial diff-stat ingest. `commits_total` includes merges and
-    // pending-diff-stat rows so the ratio reflects ingest progress, not
-    // just the scoring filter.
+    // Coverage. `commits_total` includes merges + pending-diff-stat rows so the
+    // ratio reflects ingest progress, not just the scoring filter.
     commitsEligible: integer('commits_eligible').notNull().default(0),
     commitsTotal: integer('commits_total').notNull().default(0),
     coveragePct: doublePrecision('coverage_pct').notNull().default(0),
 
-    // Per-dev p95 of raw_churn clipped against the global FLOOR. The cap
-    // that every per-commit score in this row was computed against.
+    // Per-dev p95 of raw_churn clipped against the global FLOOR — the cap every
+    // per-commit score in this row was computed against.
     p95ChurnCap: integer('p95_churn_cap').notNull().default(0),
 
     // Decayed global score — default sort key on the leaderboard.
@@ -444,70 +327,55 @@ export const userScore = bbstatSchema.table(
     volume365d: doublePrecision('volume_365d').notNull().default(0),
     volumeAll: doublePrecision('volume_all').notNull().default(0),
 
-    // Consistency over a fixed 90d window — NULL when cold-start (<3
-    // active days in window). Decoupled from the volume-window slider on
-    // purpose (working style doesn't slide with the recency dial).
+    // Consistency over a fixed 90d window — NULL on cold-start (<3 active
+    // days). Decoupled from the volume-window slider on purpose (working style
+    // doesn't slide with the recency dial).
     consistency90d: doublePrecision('consistency_90d'),
     activeDays90d: integer('active_days_90d').notNull().default(0),
 
-    // Badge classifier inputs derived from the 90d eligible commit set.
+    // Badge classifier inputs from the 90d eligible commit set.
     medianChurn90d: integer('median_churn_90d').notNull().default(0),
     p95Churn90d: integer('p95_churn_90d').notNull().default(0),
 
-    // Cascade output. NULL = Regular (no persona matched) or Dormant
-    // (see `is_dormant`). UI distinguishes those two from `is_dormant`.
+    // Cascade output. NULL = Regular or Dormant (UI distinguishes via
+    // `is_dormant`).
     badge: userBadgeEnum('badge'),
-    // Within-badge tier (bronze/silver/gold). NULL for badges that don't
-    // tier and for null `badge` itself. Currently only steady_eddie tiers;
-    // surfaced as a colored ring around the badge icon on the leaderboard.
+    // Within-badge tier. NULL for non-tiered badges and null `badge`. Only
+    // steady_eddie tiers today.
     badgeTier: userBadgeTierEnum('badge_tier'),
     isDormant: boolean('is_dormant').notNull().default(false),
 
-    // Tenure — drives the `fresh_meat` badge cascade entry and a
-    // "joined N days ago" hint in the UI. Computed from the oldest
-    // commit's `authored_at` regardless of eligibility (we want the
-    // wall-clock tenure, not the scored tenure).
+    // Tenure — drives the `fresh_meat` cascade entry + a "joined N days ago"
+    // hint. From the oldest commit's `authored_at` regardless of eligibility
+    // (wall-clock tenure, not scored tenure).
     daysSinceFirstCommit: integer('days_since_first_commit').notNull().default(0),
   },
   (t) => ({
-    // Default sort key on the leaderboard. NULLS LAST so any future
-    // never-scored row sinks to the bottom rather than the top.
+    // NULLS LAST so any future never-scored row sinks to the bottom.
     trendingIdx: index('user_score_trending_idx').on(t.scoreTrending.desc().nullsLast()),
-    // The 30d window is what the UI surfaces by default in the table.
-    // Skip indexes for the other windows — 110 rows fits in cache and a
-    // full sort is free at this scale.
+    // 30d is the UI default; other windows skip indexes — 110 rows fits in
+    // cache and a full sort is free at this scale.
     volume30dIdx: index('user_score_volume_30d_idx').on(t.volume30d.desc().nullsLast()),
   }),
 );
 
-// Per-person ShipShow Score rollup — the alias-merge sibling of
-// `user_score`. One row per merged person. Recomputed by the scoring
-// rollup's parallel pass (scoring/rollup.ts) after each commit-sync
-// tick, against the unioned commit set across every alias attached
-// to the person (users WHERE person_id = ps.person_id). Read directly
-// by the `leaderboard_entries` view for the person branch; the per-
-// alias `user_score` rows still drive per-user detail pages, so the
-// two tables are written in parallel — `person_score` is NOT a
-// replacement for `user_score`.
-//
-// Shape mirrors `user_score` column-for-column so the unified view
-// can UNION ALL the two without column shimming. Same scoring
-// constants (ALPHA=1.2, FLOOR=500, HALF_LIFE=30d) and formulas; see
-// docs/scoring.md for derivation.
+// Per-person ShipShow Score rollup — the alias-merge sibling of `user_score`,
+// recomputed against the unioned commit set across every alias of the person.
+// Written in parallel with `user_score` (NOT a replacement); shape mirrors it
+// column-for-column so the `leaderboard_entries` view can UNION ALL without
+// shimming.
 //
 // Composability across aliases:
-//   - score_trending / volume_*: sum across aliases (linear in commits)
-//   - consistency_90d / p95_churn_cap / median_churn_90d /
-//     p95_churn_90d: recomputed against the unioned commit set
-//     (NOT summed — these are distributional, not additive)
+//   - score_trending / volume_*: sum (linear in commits)
+//   - consistency_90d / p95_churn_cap / median_churn_90d / p95_churn_90d:
+//     recomputed against the unioned set (distributional, NOT additive)
 //   - active_days_90d: distinct active-day count across aliases
-//   - is_dormant: AND across aliases (true iff every alias is dormant)
-//   - days_since_first_commit: max across aliases (oldest commit wins)
+//   - is_dormant: AND across aliases
+//   - days_since_first_commit: max across aliases
 //   - badge / badge_tier: recomputed against unioned inputs
 //
-// User-facing workspace-member status at person scope (OR across
-// aliases) is materialized in the `leaderboard_entries` view rather
-// than here — the flag is a property of the alias, not the person.
+// Workspace-member status at person scope (OR across aliases) lives in the
+// `leaderboard_entries` view, not here — it's a property of the alias.
 export const personScore = bbstatSchema.table(
   'person_score',
   {
@@ -595,16 +463,10 @@ export const pullRequests = bbstatSchema.table(
   }),
 );
 
-// ---------------------------------------------------------------------------
-// Sync bookkeeping
-// ---------------------------------------------------------------------------
-
-// One row per tracked repository. Holds the commit-pull cursor + outcome of
-// the last commit-sync attempt (the `last_seen_sha` / `last_sync_*` columns)
-// and, from Phase 4 T22, the PR-pull cursor + counter. Commit and PR ingest
-// run on independent schedules and write disjoint columns, so they don't
-// stomp on each other. Manual, cron, and webhook triggers all converge on
-// the same row — see runSync() in src/sync/runner.ts.
+// One row per tracked repository: commit-pull cursor + last-attempt outcome,
+// plus the PR-pull cursor + counter. Commit and PR ingest run on independent
+// schedules and write disjoint columns. Manual, cron, and webhook triggers all
+// converge on the same row — see runSync() in src/sync/runner.ts.
 export const syncState = bbstatSchema.table('sync_state', {
   repositoryId: integer('repository_id')
     .primaryKey()
@@ -615,63 +477,38 @@ export const syncState = bbstatSchema.table('sync_state', {
   lastSyncStatus: syncStatusEnum('last_sync_status').notNull().default('idle'),
   lastSyncError: text('last_sync_error'),
   totalCommitsSynced: integer('total_commits_synced').notNull().default(0),
-  // Phase 4 T22: PR-sync cursor. PRs are walked newest-first by
-  // `updated_on`; the cursor stores the most-recent `updated_on` we've
-  // ingested and the BB-side numeric PR id for tie-break when multiple PRs
-  // share the same second. NULL on both = cold mode (no prior PR sync).
-  // `pr_last_synced_at` records when the PR sync last ran for this repo
-  // (purely observational — no status enum since PR errors land in the
-  // tick result + logs, not on the row).
+  // PR-sync cursor. PRs walked newest-first by `updated_on`; stores the
+  // most-recent ingested `updated_on` + BB numeric PR id for same-second
+  // tie-break. NULL on both = cold mode. `pr_last_synced_at` is observational
+  // (PR errors land in the tick result + logs, not on the row).
   lastPrUpdatedAt: timestamp('last_pr_updated_at', { withTimezone: true }),
   lastPrId: integer('last_pr_id'),
   prLastSyncedAt: timestamp('pr_last_synced_at', { withTimezone: true }),
   prTotalSynced: integer('pr_total_synced').notNull().default(0),
-  // Self-queueing deepen-backfill (Phase 4 follow-up). `deepen_complete`
-  // flips to true once we've walked the repo's history all the way back to
-  // its first commit (BB returns no `next` URL on the deepen pagination).
-  // Until then the per-tick deepen worker picks one repo at a time —
-  // ORDER BY deepen_last_run_at NULLS FIRST — and runs one bounded
-  // backfill page walking backwards from the oldest known commit. This is
-  // a derived queue: nothing to enqueue / dequeue, just SELECT from
-  // sync_state on each tick.
+  // Self-queueing deepen-backfill. `deepen_complete` flips true once we've
+  // walked back to the repo's first commit (BB returns no `next`). Until then
+  // the per-tick worker picks one repo (ORDER BY deepen_last_run_at NULLS
+  // FIRST) and runs one bounded backfill page backwards. Derived queue — just
+  // a SELECT each tick, nothing to enqueue/dequeue.
   deepenComplete: boolean('deepen_complete').notNull().default(false),
   deepenLastRunAt: timestamp('deepen_last_run_at', { withTimezone: true }),
-  // Retroactive `is_merge` backfill state. The `commits.is_merge` column
-  // was added in migration V1_7 with DEFAULT false, so rows inserted
-  // before that migration are stuck at false regardless of BB's actual
-  // `parents.length`. New commits land with the correct value (both the
-  // forward sync in commits.ts and the deepen-backfill walk in
-  // deepen-backfill.ts read parents at insert time), so this state
-  // exists purely to drain the pre-V1_7 backlog. The is-merge backfill
-  // tick walks BB `/commits` newest-first, resuming from
-  // `is_merge_backfill_cursor_sha` (NULL = start from newest), and
-  // bulk-UPDATEs is_merge by sha via `updateIsMergeBatch`. When the
-  // paginator exhausts without hitting the per-tick page cap, the
-  // backfill is complete and `is_merge_backfill_complete` flips to
-  // true; the repo drops out of the queue. Round-robin rotation via
-  // `is_merge_last_run_at` mirrors the deepen worker. New repos enter
-  // with `is_merge_backfill_complete = false` and converge after one
-  // pass (every walked row already has the correct value, so
-  // `updateIsMergeBatch` is a no-op).
+  // Retroactive `is_merge` backfill state. `commits.is_merge` was added in
+  // V1_7 with DEFAULT false, so pre-V1_7 rows are stuck at false; new commits
+  // land correct, so this exists only to drain that backlog. The tick walks BB
+  // `/commits` newest-first from `is_merge_backfill_cursor_sha` (NULL = newest)
+  // and bulk-UPDATEs by sha via `updateIsMergeBatch`. When the paginator
+  // exhausts without hitting the page cap, `is_merge_backfill_complete` flips
+  // true. Round-robin via `is_merge_last_run_at`, mirroring the deepen worker.
   isMergeBackfillComplete: boolean('is_merge_backfill_complete').notNull().default(false),
   isMergeBackfillCursorSha: text('is_merge_backfill_cursor_sha'),
   isMergeLastRunAt: timestamp('is_merge_last_run_at', { withTimezone: true }),
-  // Anonymous-commit sweep state. Standalone runner (entry point
-  // `apps/backend/src/anonymous-sweep-main.ts`, `make dev-resync`)
-  // walks BB `/commits` per repo to attribute commits whose
-  // `author_user_id IS NULL` — typically ex-employees / never-members
-  // whose UUIDs weren't in our users table at original ingest.
-  // `anonymous_sweep_complete` flips to true once a sweep pass for
-  // a repo attributes zero rows (everything attributable has been
-  // attributed; the residual is structurally anonymous, e.g. BB lacks
-  // a UUID or the email is unparseable). Picker filters out complete
-  // repos via `ORDER BY anonymous_sweep_last_run_at NULLS FIRST` and
-  // `WHERE anonymous_sweep_complete = false`, same shape as the
-  // deepen / is-merge rotation. Independent of `dev-sync`'s cron —
-  // operator runs `make dev-resync` once to drain the backlog and
-  // it exits cleanly when done. To re-arm a repo (e.g. after adding
-  // ex-employee accounts back to the workspace), manually UPDATE
-  // the flag to false.
+  // Anonymous-commit sweep state. The standalone `make dev-resync` runner
+  // walks BB `/commits` per repo to attribute commits with `author_user_id IS
+  // NULL` (ex-employees / never-members not in `users` at original ingest).
+  // `anonymous_sweep_complete` flips true once a pass attributes zero rows (the
+  // residual is structurally anonymous). Picker rotation mirrors deepen /
+  // is-merge (ORDER BY anonymous_sweep_last_run_at NULLS FIRST WHERE complete =
+  // false). Re-arm a repo by manually UPDATEing the flag to false.
   anonymousSweepComplete: boolean('anonymous_sweep_complete').notNull().default(false),
   anonymousSweepLastRunAt: timestamp('anonymous_sweep_last_run_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

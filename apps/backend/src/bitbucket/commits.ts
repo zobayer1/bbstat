@@ -1,10 +1,8 @@
-// Endpoint wrapper for BitBucket Cloud `/repositories/{ws}/{slug}/commits`
-// — typed shape + paginator. Sync orchestration (delta pull, cursor handling,
-// idempotent upserts) lives in src/sync/commits.ts and consumes this.
+// Endpoint wrapper for `/repositories/{ws}/{slug}/commits` — typed shape +
+// paginator. Sync orchestration lives in src/sync/commits.ts.
 
 import type { BitbucketClient } from './client.js';
 
-// Slim BitBucket commit shape — only the fields we field-filter for.
 // `author.user` is absent for anonymous / unmatched authors; downstream sync
 // logic must handle that (commits.author_user_id is nullable).
 export interface BitbucketCommit {
@@ -21,8 +19,8 @@ export interface BitbucketCommit {
   };
 }
 
-// Field filter for /commits. Paginated endpoints require the `values.`
-// prefix; `next` is appended automatically by client.paginate().
+// Paginated endpoint → `values.` prefix required; `next` is appended by
+// client.paginate().
 export const COMMIT_LIST_FIELDS = [
   'values.hash',
   'values.message',
@@ -34,14 +32,12 @@ export const COMMIT_LIST_FIELDS = [
 ];
 
 export interface PaginateCommitsOptions {
-  // A branch name or commit SHA to walk history from. When omitted, BitBucket
-  // returns commits reachable from the repository's main branch.
+  // Branch name or commit SHA to walk history from. Omitted → main branch.
   include?: string;
 }
 
-// Async iterator yielding each commit in BitBucket's natural order (newest
-// first). Caller decides when to stop — e.g., on hitting a known sha for
-// delta sync, or after N pages on first-run backfill.
+// Yields commits in BitBucket's natural order (newest first). Caller decides
+// when to stop (known sha for delta sync, or N pages for first-run backfill).
 export function paginateCommits(
   client: BitbucketClient,
   workspace: string,

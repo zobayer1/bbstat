@@ -1,25 +1,19 @@
-// Dashboard read-side store. Same pattern as DiscoveryStore — interface +
-// Drizzle impl — to keep route tests pure (fake store, no DB) and to keep
-// the Phase 3 rollups + Redis cache pluggable behind the same interface.
+// Dashboard read-side store: interface + Drizzle impl, so route tests can use
+// a fake store with no DB.
 //
-// All commit-aggregation methods now read from `commit_daily` (per-day per
-// repo per author rollup). The aggregation reads use UTC day buckets — the
-// pre-rollup implementation used rolling time windows down to the millisecond,
-// but day buckets are what the dashboard reasonably means by "last 7 days"
-// and match what the rollup table can give us cheaply at any size. The only
-// method still reading per-commit detail from `commits` is
-// `getLatestCommitForRepository`; the unified activity feed reads commits +
-// PRs via the dedicated `getActivity` query.
+// Commit-aggregation methods read from `commit_daily` (per-day per-repo
+// per-author rollup) using UTC day buckets — day buckets are what the
+// dashboard means by "last 7 days" and stay cheap at any size.
+// `getLatestCommitForRepository` is the only method still reading per-commit
+// detail from `commits`; `getActivity` reads commits + PRs directly.
 
 import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { commits, repositories, syncState, users } from '../db/schema.js';
 
 export interface OverviewStats {
-  // Count of distinct users with at least one attributed commit. Matches
-  // the Members page roster — earlier this was a raw `count(*) FROM users`
-  // which also included synced-but-never-committed workspace members and
-  // didn't line up with the Members table total.
+  // Distinct users with at least one attributed commit — matches the Members
+  // page roster (a raw count of `users` would include never-committed members).
   contributors: number;
   repositories: number;
   projects: number;
@@ -36,23 +30,17 @@ export interface LatestCommit {
   authorBitbucketUuid: string | null;
 }
 
-// Phase 5 — the dashboard org-wide Top Contributors panel row, plus the
-// per-repo / per-project contributor lists (RepoContributorEntity is a
-// trimmed variant). Keyed on the merged entity (person or unattached
-// user) rather than a bare user_id, so a merged person appears once
-// instead of as N alias rows. Carries a 30-day commit sparkline +
-// window-scoped adds/dels (commit_daily already excludes merges) and the
-// ShipShow Score fields the Dashboard sorts + renders by.
+// Dashboard org-wide Top Contributors panel row. Keyed on the merged entity
+// (person or unattached user) rather than a bare user_id, so a merged person
+// appears once instead of as N alias rows.
 export interface TopContributorEntity {
   // 'user' → unattached user; entityId is users.id; link to /users/:id.
   // 'person' → merged person; entityId is people.id; link to /people/:id.
   entityKind: 'user' | 'person';
   entityId: number;
-  // Primary-first attached user_ids. Length 1 for user rows. The
-  // dashboard activity-filter dropdown uses attachedUserIds[0] as the
-  // single-actor filter value — persons filter by their primary alias
-  // until multi-actor activity filtering lands (see docs/people.md
-  // "Deferred").
+  // Primary-first attached user_ids. Length 1 for user rows. The dashboard
+  // activity-filter dropdown uses attachedUserIds[0] — persons filter by their
+  // primary alias until multi-actor activity filtering lands.
   attachedUserIds: number[];
   // Primary alias's UUID for person rows; the user's own for user rows.
   bitbucketUuid: string | null;
@@ -72,26 +60,19 @@ export interface UserSummary {
     bitbucketUuid: string;
     displayName: string;
     email: string | null;
-    // ShipShow Score badge + tier — null when the user has no
-    // user_score row yet (between member sync and the next
-    // commits-sync tick), or when the badge classifier returned null
-    // (dormant or no match). Surfaced on the user detail page next
-    // to the name; uses the same BadgeIcon component as the
-    // Members table.
+    // Badge + tier — null when the user has no user_score row yet (between
+    // member sync and the next commits-sync tick), or when the classifier
+    // returned null (dormant or no match).
     badge: UserBadge | null;
     badgeTier: UserBadgeTier | null;
-    // Phase 5 alias merge — when this user is attached to a person,
-    // carries the person's id + canonical display_name. The user
-    // detail page renders a "Part of: <displayName>" header banner
-    // linking to /people/:id. Null when the user is unattached
-    // (their own person). The display_name COALESCEs through the
-    // primary alias the same way the leaderboard_entries view does.
+    // When this user is attached to a person, carries the person's id +
+    // canonical display_name (for the "Part of: <displayName>" banner). Null
+    // when unattached. display_name COALESCEs through the primary alias like
+    // the leaderboard_entries view does.
     person: { id: number; displayName: string } | null;
   };
-  // Phase 5 — sibling aliases merged into the same person, this account
-  // excluded. Empty for an unattached user. Same shape (incl. per-alias
-  // lastActiveAt) as PersonSummary.attachedUsers; drives the "Linked
-  // accounts" table on /users/:id for merged accounts.
+  // Sibling aliases merged into the same person, this account excluded. Empty
+  // for an unattached user. Same shape as PersonSummary.attachedUsers.
   linkedAccounts: Array<{
     id: number;
     bitbucketUuid: string;
@@ -109,14 +90,12 @@ export interface UserSummary {
     deletions7d: number;
     additions30d: number;
     deletions30d: number;
-    // Distinct repositories this user has ever landed a commit in (across
-    // the full history we've ingested — bounded by deepen-backfill
-    // progress). Pairs with `commitsAllTime` on the user detail page.
+    // Distinct repositories this user has ever landed a commit in (bounded by
+    // deepen-backfill progress).
     repositoriesAllTime: number;
   };
-  // Last 365 calendar days, oldest first. Days with zero commits are omitted —
-  // the frontend backfills gaps when rendering (e.g. the contribution
-  // heatmap on the user detail page).
+  // Last 365 calendar days, oldest first; zero-commit days omitted (frontend
+  // backfills gaps when rendering the heatmap).
   dailyCommits: Array<{ date: string; commits: number }>;
   // Top 5 repos this user committed to in the last 30 days.
   topRepos: Array<{
@@ -126,43 +105,32 @@ export interface UserSummary {
     project: string | null;
     commits: number;
     syncStatus: RepoSyncStatus;
-    // This user's last-30-day per-repo code-change footprint, excluding
-    // merge commits. Zero when diff-stats haven't landed yet for any
-    // commits in this window (rare in steady state — the backfill
-    // tick chases freshness first) or when the user genuinely made
-    // no non-merge changes here. File count is intentionally NOT
-    // aggregated — SUM(files_changed) across many commits
-    // double-counts paths edited repeatedly. Per-commit file count
-    // still appears in the activity feed.
+    // This user's last-30-day per-repo code-change footprint, merges excluded.
+    // File count is intentionally NOT aggregated — SUM(files_changed) across
+    // commits double-counts paths edited repeatedly.
     additions30d: number;
     deletions30d: number;
   }>;
 }
 
-// Phase 5 — the Person detail page's read shape. Mirrors UserSummary
-// except (1) the identity carries an `attachedUsers` roster of the
-// underlying aliases (each clickable through to /users/:id), and
-// (2) every aggregate is computed across the unioned commit set of
-// those aliases. Same totals/dailyCommits/topRepos shape so the
-// frontend can share the existing chart components verbatim.
+// The Person detail page's read shape. Mirrors UserSummary except the identity
+// carries an `attachedUsers` roster of the underlying aliases, and every
+// aggregate is computed across the unioned commit set of those aliases (so the
+// frontend can share the existing chart components).
 export interface PersonSummary {
   person: {
     id: number;
     // people.display_name with COALESCE fallback to primary alias's
-    // display_name. The leaderboard_entries view does the same fallback.
+    // display_name (same fallback as leaderboard_entries).
     displayName: string;
     // From the primary alias (NULL when no alias is flagged primary).
     bitbucketUuid: string | null;
     email: string | null;
-    // From person_score. Null when no eligible commits across any
-    // attached alias yet — UI shows "—" in the badge slot.
+    // From person_score. Null when no eligible commits across any alias yet.
     badge: UserBadge | null;
     badgeTier: UserBadgeTier | null;
   };
-  // Every alias attached to this person, primary-first. The Person
-  // detail page's "Attached accounts" panel lists these with their
-  // BB-avatar URLs, emails, and direct links to the per-alias
-  // /users/:id page (which keeps its own per-user history view).
+  // Every alias attached to this person, primary-first.
   attachedUsers: Array<{
     id: number;
     bitbucketUuid: string;
@@ -170,9 +138,9 @@ export interface PersonSummary {
     username: string | null;
     email: string | null;
     isPrimary: boolean;
-    // MAX(commits.authored_at) for this single alias — null if it has no
-    // commits yet. The person's own "last active" is the max across all
-    // aliases (see listWorkspaceMembers); this is the per-account split.
+    // MAX(commits.authored_at) for this single alias — null if no commits yet.
+    // The person's own "last active" is the max across all aliases; this is
+    // the per-account split.
     lastActiveAt: string | null;
   }>;
   totals: {
@@ -187,8 +155,7 @@ export interface PersonSummary {
   };
   // Last 365 days; zero-commit days omitted (heatmap backfills client-side).
   dailyCommits: Array<{ date: string; commits: number }>;
-  // Top 5 repos by last-30-day commit count across the unioned alias
-  // set. Same shape as UserSummary.topRepos.
+  // Top 5 repos by last-30-day commit count across the unioned alias set.
   topRepos: Array<{
     workspace: string;
     slug: string;
@@ -206,29 +173,23 @@ export interface ProjectStats {
   totals: {
     commits7d: number;
     commits30d: number;
-    // Phase 5: distinct contributors over the last 30 days, counted per
-    // ENTITY (a merged person's aliases collapse to one). Matches the
-    // person-aware Members roster + the repo-table contributors30d below.
+    // Distinct contributors over the last 30 days, counted per ENTITY (a
+    // merged person's aliases collapse to one).
     contributorCount30d: number;
     repositoryCount: number;
   };
-  // Last 365 calendar days, oldest first. Zero-commit days omitted —
-  // the frontend backfills gaps when rendering the contribution heatmap.
-  // Aggregates across every repo carrying this project's key.
+  // Last 365 calendar days, oldest first; zero-commit days omitted. Aggregates
+  // across every repo carrying this project's key.
   dailyCommits: Array<{ date: string; commits: number }>;
-  // Project-scoped contributor table — Phase 5 person-aware, same
-  // entity-keyed shape as the per-repo contributor list so the Project
-  // detail page reuses the repo-page row layout verbatim. A person's
-  // aliases that both touched the project collapse into one row.
-  // Aggregates across every repo carrying this project's key.
+  // Entity-keyed contributor table (person-aware), aggregated across every repo
+  // carrying this project's key. A person's aliases collapse into one row.
   topContributors: RepoContributorEntity[];
   repositories: Array<{
     workspace: string;
     slug: string;
     fullName: string;
     commits30d: number;
-    // Phase 5: per-repo distinct contributors, counted per entity (a
-    // merged person counts once even if two aliases touched the repo).
+    // Per-repo distinct contributors, counted per entity.
     contributors30d: number;
     lastCommitAt: string | null;
     syncStatus: RepoSyncStatus;
@@ -240,52 +201,36 @@ export interface RepoActivity {
     workspace: string;
     slug: string;
     fullName: string;
-    // Project key the repo lives under, or null if the repo isn't
-    // assigned to a project. Surfaced so the repo-detail page can
-    // breadcrumb back to its parent project without a separate
-    // lookup against the workspace-wide repository list.
+    // Project key the repo lives under, or null if unassigned. Surfaced so the
+    // repo-detail page can breadcrumb to its parent project without a separate
+    // lookup.
     project: string | null;
     syncStatus: RepoSyncStatus;
   };
-  // Last 365 calendar days, oldest first. Zero-commit days omitted —
-  // the frontend backfills gaps when rendering the contribution heatmap.
+  // Last 365 calendar days, oldest first; zero-commit days omitted.
   dailyCommits: Array<{ date: string; commits: number; additions: number; deletions: number }>;
-  // Per-window code-change summary, excluding merge commits. Day
-  // windows match the commit cards: 7d = last 7 calendar days, 30d =
-  // last 30. Always returned (no longer gated on a per-repo opt-in
-  // flag); reads zero when no diff-stat ingest has landed yet, which
-  // is a transient state the backfill tick chases by freshness-first
-  // global pickup.
+  // Per-window code-change summary, merges excluded (7d/30d = last N calendar
+  // days). Reads zero when no diff-stat ingest has landed yet (transient).
   diffStats: {
     additions7d: number;
     deletions7d: number;
     additions30d: number;
     deletions30d: number;
   };
-  // All contributors active in the last 30 days, ordered by commit count desc.
-  // Phase 5: keyed on the merged ENTITY (person or unattached user) — a
-  // person's aliases that both touched this repo collapse into one row,
-  // so the count + list match the person-aware roster elsewhere.
-  // `last30Days` is repo-scoped (this entity's commits in THIS repo,
-  // day-by-day) so the repo-detail sparkline reflects activity here, not
-  // the workspace-wide pattern. Diff-stat fields are 30-day, exclude
-  // merges, read zero when no diff-stat ingest has landed yet for this
-  // repo (transient — the backfill tick will fill in).
+  // Contributors active in the last 30 days, commit count desc, keyed on the
+  // merged ENTITY (a person's aliases collapse into one row). `last30Days` is
+  // repo-scoped (this entity's commits in THIS repo). Diff-stat fields are
+  // 30-day, exclude merges, read zero before diff-stat ingest lands.
   contributors: RepoContributorEntity[];
 }
 
-// Phase 5 — repo detail "Contributors — last 30 days" row, keyed on the
-// merged entity rather than a bare user_id so a person appears once
-// instead of as N alias rows. Mirrors the dashboard TopContributorEntity
-// identity fields (entityKind / entityId / attachedUserIds → name pattern
-// + person/user link). The repo list doesn't surface scoring or a
-// distinct-repo count (it's one repo by definition), so those fields are
-// omitted vs the dashboard shape.
+// Repo detail "Contributors — last 30 days" row, keyed on the merged entity.
+// Mirrors TopContributorEntity's identity fields but omits scoring and the
+// distinct-repo count (it's one repo by definition).
 export interface RepoContributorEntity {
   entityKind: 'user' | 'person';
   entityId: number;
   // Primary-first attached user_ids; length 1 for unattached users.
-  // Drives the "merged from N accounts" ×N pill in the contributor list.
   attachedUserIds: number[];
   bitbucketUuid: string | null;
   displayName: string;
@@ -315,27 +260,18 @@ export interface ActivityCommit {
   message: string;
   additions: number;
   deletions: number;
-  // Distinct file paths touched by the commit (= rows in BB's /diffstat
-  // response). 0 when diff-stats haven't been fetched yet for the
-  // commit (diff_stats_synced_at IS NULL) — same as additions/deletions
-  // in that case. Rendered alongside the +X/−Y line counts in the
-  // activity feed for context.
+  // Distinct file paths touched (= rows in BB's /diffstat response). 0 when
+  // diff-stats haven't been fetched yet (diff_stats_synced_at IS NULL).
   filesChanged: number;
-  // True when the underlying commit has more than one parent. Surfaced
-  // here so the dashboard can flag merges (their additions/deletions
-  // include the entire merged-branch delta and shouldn't be read as
-  // authorship volume). Future per-user 30d aggregates over adds/dels
-  // will default-exclude rows where `is_merge = true`.
+  // True when the commit has more than one parent. Merges' additions/deletions
+  // include the entire merged-branch delta and shouldn't be read as authorship
+  // volume; per-user adds/dels aggregates default-exclude is_merge rows.
   isMerge: boolean;
-  // True when the diff-stats orchestrator gave up fetching diffs for
-  // this commit (commits.diff_stats_failure_count >= the orchestrator's
-  // threshold). Surfaces in the activity feed as an exclamation icon
-  // in place of the +/-/files row, tooltip "BitBucket compute timeout
-  // (HTTP 555)". `additions` / `deletions` / `filesChanged` will all
-  // read 0 in this case — the stamp-with-zeros pattern that drops the
-  // commit out of the pickup query. Renderers MUST branch on this
-  // flag rather than treating zeros as "small commit", otherwise the
-  // commit looks like a no-op.
+  // True when the diff-stats orchestrator gave up (diff_stats_failure_count >=
+  // threshold). additions/deletions/filesChanged all read 0 here (the
+  // stamp-with-zeros pattern that drops the commit out of the pickup query), so
+  // renderers MUST branch on this flag rather than treating zeros as a small
+  // commit — otherwise the commit looks like a no-op.
   diffStatsUnavailable: boolean;
   repository: ActivityRepository;
   author: ActivityAuthor | null;
@@ -359,11 +295,9 @@ export interface ActivityPullRequest {
 
 export type ActivityEntry = ActivityCommit | ActivityPullRequest;
 
-// Phase 5 — the activity-feed actor filter. A `user` matches that one
-// `users.id`; a `person` expands to every alias attached to the person
-// (`author_user_id IN (SELECT id FROM users WHERE person_id = id)`), so
-// a merged contributor's commits + PRs across all their accounts show
-// up under one filter. Null actor = no actor filter (whole feed).
+// Activity-feed actor filter. A `user` matches that one `users.id`; a `person`
+// expands to every alias attached to the person, so a merged contributor's
+// commits + PRs across all accounts show under one filter.
 export type ActivityActor = { kind: 'user' | 'person'; id: number };
 
 export interface ActivityFilters {
@@ -371,129 +305,95 @@ export interface ActivityFilters {
   actor: ActivityActor | null;
   repo: { workspace: string; slug: string } | null;
   project: string | null;
-  // Cursor / range upper bound — only entries with occurredAt strictly less
-  // than this. Null on the first page; subsequent pages pass the last
-  // entry's occurredAt back. Also used by the Activity page's date-range
-  // upper bound when no further cursor advance has happened.
+  // Cursor / range upper bound — entries with occurredAt strictly less than
+  // this. Null on the first page; later pages pass the last entry's occurredAt.
   before: Date | null;
-  // Date-range lower bound (inclusive). Powers the dedicated Activity
-  // page's range picker. PRs use bitbucket_updated_at against this.
+  // Date-range lower bound (inclusive). PRs use bitbucket_updated_at against it.
   after: Date | null;
-  // Lowercased hex commit-SHA prefix (1–40 chars). When set, the PR
-  // branch is suppressed since PRs don't carry a SHA.
+  // Lowercased hex commit-SHA prefix (1–40 chars). When set, the PR branch is
+  // suppressed since PRs don't carry a SHA.
   hashPrefix: string | null;
   // Free-text search. Commits use Postgres FTS over `message_tsv`
   // (`plainto_tsquery('simple', …)`); PRs use ILIKE on `title`.
   message: string | null;
   // Default 50, max 200 — enforced at the route layer.
   limit: number;
-  // Offset for the Activity page's First/Last navigation. Zero for
-  // the embedded cursor-paginated feed (which uses `before` instead).
+  // Offset for the Activity page's First/Last navigation. Zero for the embedded
+  // cursor-paginated feed (which uses `before` instead).
   offset: number;
 }
 
-// Derived sync health for a tracked repository, surfaced to the dashboard
-// as a small status icon. Maps `repositories.sync_excluded` +
-// `sync_state.last_sync_status`:
-//   - sync_excluded=true                                  → 'excluded' (red — auto-tripped, needs attention)
-//   - last_sync_status='failed'                           → 'error'   (amber — transient / actionable failure)
-//   - last_sync_status='success'/'running' + last_synced_at set → 'ok' (green)
-//   - last_sync_status='idle' + null timestamp            → 'never'   (slate — not synced yet)
-// Kept as a closed-set string (not the raw enum) so the frontend doesn't
-// need to know about 'running' as a separate state — a mid-flight tick is
-// considered healthy here. `excluded` outranks `error` because the
-// underlying cause is durable (rename / empty / force-push) and the
-// recovery is a specific admin action, not a wait-and-retry.
-// 'empty' is a BENIGN exclusion (the repo is empty on BitBucket — nothing
-// to sync, no operator action needed). Kept distinct from 'excluded'
-// (rename / force-push — needs a specific admin fix) so the UI doesn't
-// flag empty repos as problems in the Repositories Issues tab.
+// Derived sync health for a tracked repository, surfaced as a status icon.
+// Maps `repositories.sync_excluded` + `sync_state.last_sync_status`:
+//   - sync_excluded=true                                  → 'excluded'
+//   - last_sync_status='failed'                           → 'error'
+//   - 'success'/'running' + last_synced_at set            → 'ok'
+//   - 'idle' + null timestamp                             → 'never'
+// Closed-set string (not the raw enum) so the frontend needn't know 'running'
+// as a separate state — a mid-flight tick is healthy here. `excluded` outranks
+// `error` because the cause is durable (rename / empty / force-push) and
+// recovery is a specific admin action, not a wait-and-retry. 'empty' is a
+// BENIGN exclusion (nothing to sync), kept distinct from 'excluded' so the UI
+// doesn't flag empty repos as problems in the Repositories Issues tab.
 export type RepoSyncStatus = 'ok' | 'error' | 'never' | 'excluded' | 'empty';
 
-// One row on the /members leaderboard. Each row is either an unattached
-// user (entityKind = 'user', entityId = users.id) or a merged person
-// (entityKind = 'person', entityId = people.id) — the SQL collapses
-// every attached alias into its parent person via leaderboard_entries.
-// Per CLAUDE.md Phase 5, the per-user UserSummary page still exists at
-// /users/:id; this leaderboard view is the merged surface.
+// One row on the /members leaderboard — an unattached user or a merged person,
+// with every attached alias collapsed into its parent person via
+// leaderboard_entries. The per-user UserSummary page still exists at /users/:id.
 //
-// Anonymous / unmatched-author commits are excluded — they have no
-// user to attribute and the page is a roster, not a commit log.
-// Window-zero rows still appear (a quiet week shouldn't empty the
-// list); never-committed entities are filtered out at the SQL level.
+// Anonymous / unmatched-author commits are excluded. Window-zero rows still
+// appear (a quiet week shouldn't empty the list); never-committed entities are
+// filtered out at the SQL level.
 export interface WorkspaceMember {
-  // Discriminator. 'user' means an unattached `users` row whose
-  // `entityId` is the user_id and whose link target is /users/:id.
-  // 'person' means a merged person (`people` row) whose `entityId`
-  // is the person_id and whose link target is /people/:id.
+  // 'user' → unattached `users` row, entityId is user_id, link /users/:id.
+  // 'person' → merged `people` row, entityId is person_id, link /people/:id.
   entityKind: 'user' | 'person';
   entityId: number;
-  // For person rows: the primary alias's `users.bitbucket_uuid` (the
-  // BB avatar URL pattern keys off this). For user rows: that user's
-  // own UUID. Null only when a person has aliases but none is flagged
-  // primary AND no auto-election happened — the LEFT JOIN through
-  // `is_primary_for_person = true` returns NULL columns in that edge
-  // case.
+  // Person rows: primary alias's `users.bitbucket_uuid`. User rows: own UUID.
+  // Null only when a person has aliases but none is flagged primary and no
+  // auto-election happened (the is_primary_for_person LEFT JOIN returns NULL).
   bitbucketUuid: string | null;
-  // For person rows: people.display_name with fallback to the primary
-  // alias's display_name. For user rows: the user's own display_name.
-  // The leaderboard_entries view does the COALESCE.
+  // Person rows: people.display_name COALESCEd to the primary alias's name (via
+  // leaderboard_entries). User rows: the user's own.
   displayName: string;
   username: string | null;
-  // Git-author email captured from commits.author.raw at ingest time,
-  // write-once on the alias. For person rows: comes from the primary
-  // alias. For user rows: the user's own. NOT a verified workspace
-  // email — see the comment on users.email in schema.ts for caveats.
+  // Git-author email captured from commits.author.raw at ingest, write-once on
+  // the alias (primary alias for person rows). NOT a verified workspace email —
+  // see users.email in schema.ts.
   email: string | null;
-  // For person rows: OR across attached aliases (true iff any alias
-  // is a workspace member). For user rows: that user's own flag.
-  // Drives the Members table's muted styling for out-of-workspace
-  // contributors and the "active team only" filter.
+  // Person rows: OR across aliases (true iff any alias is a workspace member).
+  // User rows: own flag. Drives muted styling + the "active team only" filter.
   isWorkspaceMember: boolean;
-  // The user_ids attached to this entity. Length 1 for user rows
-  // (just [entityId]); length ≥1 for person rows, ordered with the
-  // primary alias first. Drives the "merged from N accounts" pill on
-  // person rows and the per-alias SSE-invalidation logic on the
-  // frontend (when a `person.*` event fires, the Members store
-  // re-fetches; per-user-summary stores can use this list to drop
-  // their cached entries too).
+  // user_ids attached to this entity, primary-first. Length 1 for user rows.
+  // Drives the "merged from N accounts" pill and per-alias SSE invalidation on
+  // the frontend.
   attachedUserIds: number[];
-  // Search-only concatenation of EVERY attached alias's display name /
-  // username / email (the displayed identity only carries the primary
-  // alias's). Lets the Members table + ActorPicker find a merged person
-  // by any of its linked accounts' names while still showing the person.
-  // Not rendered anywhere.
+  // Search-only concatenation of EVERY attached alias's name / username / email
+  // (the displayed identity only carries the primary's). Lets the Members table
+  // + ActorPicker find a merged person by any linked account. Not rendered.
   aliasSearch: string;
-  // Per-window commit + distinct-repo aggregates. The Members table
-  // renders both windows side-by-side as `{commits} ({repos})` cells,
-  // so we ship both in one round-trip rather than re-querying when
-  // the user toggles. additions / deletions used to live here too —
-  // they were dropped when the +/- column came off the table; no
-  // other consumer reads them from this endpoint.
+  // Per-window commit + distinct-repo aggregates. Both windows ship in one
+  // round-trip so the table's `{commits} ({repos})` cells don't re-query on
+  // toggle. additions/deletions were dropped when the +/- column came off.
   commits7d: number;
   repos7d: number;
   commits30d: number;
   repos30d: number;
   commitsAllTime: number;
   reposAllTime: number;
-  // MAX(commits.authored_at) across all this member's commits. Null is
-  // theoretically unreachable (the filter requires commitsAllTime > 0) but
-  // typed to match the underlying source.
+  // MAX(commits.authored_at) across this member's commits. Null is unreachable
+  // here (the filter requires commitsAllTime > 0) but typed to match the source.
   lastActiveAt: string | null;
-  // Length 30, oldest-first, zeros for days with no commits. Same shape as
-  // TopContributorEntity.last30Days so the Sparkline component renders
-  // unchanged.
+  // Length 30, oldest-first, zeros for empty days. Same shape as
+  // TopContributorEntity.last30Days.
   last30Days: number[];
-  // ShipShow Score columns (docs/scoring.md). LEFT-JOINed from user_score
-  // so members whose first user_score row hasn't been written yet (between
-  // member sync and the next commits-sync tick) render with null/false
-  // — UI shows "—". `scoreTrending` is the default sort key on the
-  // leaderboard view of this table.
+  // Score columns (docs/scoring.md), LEFT-JOINed from user_score — null/false
+  // when the first user_score row hasn't been written yet. `scoreTrending` is
+  // the default leaderboard sort key.
   scoreTrending: number | null;
   consistency90d: number | null;
   badge: UserBadge | null;
-  // Within-persona tier — currently only `steady_eddie` tiers; null for
-  // every other badge. Drives the colored ring around the badge icon.
+  // Within-persona tier — currently only `steady_eddie`; null otherwise.
   badgeTier: UserBadgeTier | null;
   isDormant: boolean;
 }
@@ -514,22 +414,17 @@ export interface TrackedRepositorySummary {
   // Project key as stored on repositories.project (null for unassigned repos).
   project: string | null;
   commits30d: number;
-  // Distinct non-null author_user_id values active in the last 30 days.
-  // Anonymous / unmatched-author commits don't count toward this — the
-  // dashboard column reflects "developers who landed code", not raw author
-  // identities.
+  // Distinct non-null author_user_id values active in the last 30 days —
+  // "developers who landed code", anonymous authors excluded.
   contributors30d: number;
-  // Code-change volume in the last 30 days, EXCLUDING merge commits —
-  // same predicate the repo-detail page uses, so the two surfaces
-  // agree on per-repo adds/dels totals. Reads zero on repos whose
-  // diff-stat ingest hasn't landed yet (transient state).
+  // Code-change volume over 30 days, merges EXCLUDED (same predicate as the
+  // repo-detail page). Reads zero before diff-stat ingest lands (transient).
   additions30d: number;
   deletions30d: number;
   lastCommitAt: string | null;
   syncStatus: RepoSyncStatus;
-  // True when the repo is soft-retired (repositories.archived). Surfaced so
-  // the UI can badge it — an archived repo's stale/inert sync status then
-  // reads as "retired", not as a live error needing attention.
+  // True when the repo is soft-retired (repositories.archived). Lets the UI
+  // badge it so a stale sync status reads as "retired", not a live error.
   archived: boolean;
 }
 
@@ -538,17 +433,15 @@ export interface StatsStore {
   // Returns null when the repo isn't tracked or has no commits ingested yet.
   // Doesn't distinguish the two — the dashboard treats them the same ("—").
   getLatestCommitForRepository(workspace: string, slug: string): Promise<LatestCommit | null>;
-  // Top N developers by commit count over the trailing window. Anonymous /
-  // unmatched-author commits are excluded — they have no user to attribute.
-  // Each row also carries a 30-day commit-count series for the Dashboard
-  // sparkline rendering.
+  // Top N developers by commit count over the trailing window, anonymous
+  // authors excluded. Each row carries a 30-day commit-count sparkline.
   getTopContributors(windowDays: number, limit?: number): Promise<TopContributorEntity[]>;
 
   // Returns null when the user id doesn't exist. An existing user with no
   // commits returns a populated summary with all-zero totals and empty arrays.
   getUserSummary(userId: number): Promise<UserSummary | null>;
-  // Phase 5 sibling. Aggregates across every alias attached to the
-  // person. Returns null when no `people` row exists with this id.
+  // Aggregates across every alias attached to the person. Returns null when no
+  // `people` row exists with this id.
   getPersonSummary(personId: number): Promise<PersonSummary | null>;
   // Returns null when no repositories carry the given project key. An empty
   // project (no commits across its repos) returns zero totals and empty arrays.
@@ -556,49 +449,36 @@ export interface StatsStore {
   // Returns null when the repo isn't tracked. A tracked repo with no commits
   // returns empty arrays.
   getRepositoryActivity(workspace: string, slug: string): Promise<RepoActivity | null>;
-  // Dashboard list endpoint. All tracked repositories, ordered by most-recent
-  // activity. The dashboard renders this directly as the Repositories panel
-  // and groups by `project` client-side to drive the Projects panel.
+  // All tracked repositories, ordered by most-recent activity. The dashboard
+  // renders this as the Repositories panel and groups by `project` client-side
+  // to drive the Projects panel.
   listTrackedRepositoriesWithStats(): Promise<TrackedRepositorySummary[]>;
-  // Workspace member roster for the /members page. One row per user with at
-  // least one ingested commit (commitsAllTime > 0); rows with zero commits
-  // in both windows still appear so a quiet week doesn't empty the page.
-  // Anonymous / unmatched-author commits are excluded. Ordered server-side
-  // by commits7d DESC, displayName ASC so the default render lands "most-
-  // active first" without a client sort. Pagination + fuzzy-search run on
-  // the frontend over this list (org-scale dataset, full payload fits in
-  // one round-trip). No window parameter — both 7d and 30d aggregates
-  // ship in every row.
+  // Workspace member roster for /members. One row per user with at least one
+  // ingested commit; window-zero rows still appear. Anonymous authors excluded.
+  // Pagination + fuzzy-search run client-side over the full payload (fits one
+  // round-trip). No window parameter — both 7d and 30d aggregates ship per row.
   listWorkspaceMembers(): Promise<WorkspaceMember[]>;
 
-  // Phase 4 T23 — unified activity feed. UNION ALL of commits + PRs with
-  // per-branch filter predicates, ordered by `occurredAt DESC` then by
-  // `kind, id DESC` so ties break deterministically (otherwise pagination
-  // can skip / duplicate). Read directly from Postgres — list endpoints
-  // bypass Redis per CLAUDE.md's "Redis is user-summary only" rule.
+  // Unified activity feed: UNION ALL of commits + PRs, ordered by `occurredAt
+  // DESC` then `kind, id DESC` so ties break deterministically (otherwise
+  // pagination can skip / duplicate). Read directly from Postgres — list
+  // endpoints bypass Redis (Redis is user-summary only).
   getActivity(filters: ActivityFilters): Promise<ActivityEntry[]>;
 
-  // 365-day daily commit aggregate for the Activity page year-grid
-  // heatmap. Returns `{ date, commits }[]` with one row per day that
-  // had at least one commit (zero-commit days are omitted; the frontend
-  // bucket function treats absence as zero). Filterable by actor / repo
-  // / project to match the page's other narrowing controls; date range,
-  // hash search, and message search are intentionally ignored — the
-  // heatmap always answers "what does the last year look like for this
-  // slice?" regardless of which page is currently displayed.
+  // 365-day daily commit aggregate for the Activity page heatmap; zero-commit
+  // days omitted. Filterable by actor / repo / project; date range, hash, and
+  // message search are intentionally ignored — the heatmap always answers
+  // "what does the last year look like for this slice?".
   getActivityDaily(filters: ActivityDailyFilters): Promise<DailyCommitPoint[]>;
 
-  // Total entries matching the given filter set (commits + PRs union).
-  // Powers the Activity page's "Page X of Y" indicator and Last button.
-  // Same filter shape as getActivity but limit / offset are ignored —
-  // count is over the full filtered universe.
+  // Total entries matching the filter set (commits + PRs union), for the
+  // "Page X of Y" indicator. Same filter shape as getActivity but limit /
+  // offset are ignored.
   getActivityCount(filters: ActivityFilters): Promise<number>;
 
-  // Top-N repositories by commits in the trailing window, each with its
-  // top-M contributors. Powers the Projects page sunburst chart
-  // (angular slices = repos, radial bands = contributors per repo).
-  // Reads commit_daily so it stays cheap regardless of how large
-  // `commits` grows.
+  // Top-N repos by commits in the window, each with its top-M contributors.
+  // Powers the Projects page sunburst (slices = repos, bands = contributors).
+  // Reads commit_daily so it stays cheap.
   getRepoContributorBreakdown(opts: RepoContributorBreakdownOptions): Promise<RepoContributorBreakdown[]>;
 }
 
@@ -606,9 +486,8 @@ export interface RepoContributorBreakdownOptions {
   windowDays: number;
   topRepos: number;
   topPerRepo: number;
-  // Optional project scope — when set, only repos under this project
-  // key contribute to the top-N pool. Used by the project detail page
-  // to render the workspace-wide sunburst over a single project.
+  // Optional project scope — when set, only repos under this key contribute to
+  // the top-N pool. Used by the project detail page's sunburst.
   project: string | null;
 }
 
@@ -617,16 +496,13 @@ export interface RepoContributorBreakdown {
   slug: string;
   fullName: string;
   project: string | null;
-  // Total commits in the window across all included contributors.
-  // Anonymous-author commits are excluded (commit_daily.author_user_id
-  // IS NULL is filtered out), so this can be slightly smaller than
-  // `commits30d` in the dashboard repo summary. NOT affected by the
-  // person grouping below — summing commits is invariant to how
+  // Total window commits across included contributors. Anonymous authors are
+  // excluded, so this can be slightly smaller than the dashboard `commits30d`.
+  // Invariant to the person grouping below — summing commits doesn't care how
   // contributors are keyed.
   commits: number;
-  // Phase 5: contributor bands are keyed per ENTITY — a merged person's
-  // aliases that both touch a repo collapse into one band. The sunburst
-  // only renders displayName + commits, so it stays a pure relabel.
+  // Contributor bands keyed per ENTITY — a merged person's aliases collapse
+  // into one band.
   contributors: Array<{
     entityKind: 'user' | 'person';
     entityId: number;
@@ -649,14 +525,9 @@ export interface DailyCommitPoint {
 export function createDrizzleStatsStore(db: Database): StatsStore {
   return {
     async getOverview() {
-      // contributors / repositories / projects are base-table counts and
-      // aren't related to the rollup. totalCommits and commitsLast7Days
-      // read from commit_daily so this endpoint stays cheap regardless
-      // of how large `commits` grows. `contributors` is computed from
-      // commit_daily too — but counted per ENTITY (Phase 5): a merged
-      // person collapses its aliases into one, so the card matches the
-      // person-aware Members roster (the whole reason this field
-      // exists). Unattached users count as themselves.
+      // totalCommits / commitsLast7Days / contributors read from commit_daily
+      // so this stays cheap. `contributors` is counted per ENTITY (a merged
+      // person collapses its aliases into one) to match the Members roster.
       const [contributorsRows, reposRows, projectsRows, totalCommitsRows, recentCommitsRows] = await Promise.all([
         db.execute<{ contributors: number }>(sql`
           SELECT count(*)::int AS contributors FROM (
@@ -721,23 +592,17 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getTopContributors(windowDays, limit = 10) {
-      // Phase 5: keyed on (entity_kind, entity_id) — attached aliases
-      // collapse into their person, unattached users keep their own row.
-      // The JOIN to users (then the entity CASE) excludes anonymous-author
-      // rows the same way the old INNER JOIN to users did. Window is
-      // `windowDays` UTC day buckets ending today.
+      // Keyed on (entity_kind, entity_id) — aliases collapse into their person.
+      // The JOIN to users excludes anonymous-author rows. Window is `windowDays`
+      // UTC day buckets ending today.
       //
-      // The ::int cast on the bound param is load-bearing: without it
-      // Postgres can't infer the type of `current_date - $1` and falls back
-      // to the `date - date` overload (which yields integer), then the
-      // outer comparison `day >= integer` fails to resolve.
+      // The ::int cast on the bound param is load-bearing: without it Postgres
+      // resolves `current_date - $1` via the `date - date` overload (yielding
+      // integer), then `day >= integer` fails to resolve.
       //
-      // Identity + momentum (the sort key) come from leaderboard_entries,
-      // the same view the /members leaderboard reads — user_score for user
-      // rows, person_score for person rows. The `spark` CTE derives the
-      // 30-day sparkline per entity in one pass: cross-join the picked
-      // entities with a 30-day series and LEFT JOIN commit_daily
-      // re-aggregated to the entity key so missing days become zero.
+      // Identity + momentum (the sort key) come from leaderboard_entries. The
+      // `spark` CTE derives the 30-day per-entity sparkline by cross-joining a
+      // 30-day series and LEFT JOINing commit_daily so missing days become zero.
       const rows = await db.execute<{
         entity_kind: 'user' | 'person';
         entity_id: number;
@@ -860,11 +725,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getUserSummary(userId) {
-      // Phase 5: the optional people JOIN surfaces the "Part of:
-      // <person.displayName>" banner on /users/:id. The COALESCE
-      // mirrors the leaderboard_entries view's display_name fallback
-      // — operator override → primary alias's name → null (rare:
-      // person with no display_name and no primary flagged).
+      // The optional people JOIN surfaces the "Part of: <person>" banner. The
+      // COALESCE mirrors leaderboard_entries' display_name fallback: operator
+      // override → primary alias's name → null.
       const userRows = await db.execute<{
         id: number;
         bitbucket_uuid: string;
@@ -911,11 +774,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           userRow.person_id === null ? null : { id: userRow.person_id, displayName: userRow.person_display_name ?? '' },
       };
 
-      // Sibling aliases: the OTHER accounts merged into the same person
-      // (this user excluded). Empty for an unattached account — drives the
-      // "Linked accounts" table on /users/:id. Same shape + per-alias
-      // last-active as the Person page's attachedUsers. Skipped entirely
-      // (resolves empty) when this account isn't merged.
+      // Sibling aliases merged into the same person (this user excluded).
+      // Skipped entirely (resolves empty) when this account isn't merged.
       const linkedAccountsPromise =
         userRow.person_id === null
           ? Promise.resolve({
@@ -947,7 +807,6 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
               ORDER BY u.is_primary_for_person DESC, u.id ASC
             `);
 
-      // Run aggregates in parallel — independent queries against commit_daily.
       const [totalsRows, dailyRows, topRepoRows, linkedAccountsRows] = await Promise.all([
         db.execute<{
           commits_7d: number | null;
@@ -1063,11 +922,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getPersonSummary(personId) {
-      // Identity + badge come from people + person_score; the primary
-      // alias (LEFT JOIN against is_primary_for_person = true) supplies
-      // BB UUID and email fallbacks. The COALESCE for display_name
-      // mirrors leaderboard_entries — operator override beats primary
-      // alias's display_name.
+      // Identity + badge from people + person_score; the primary alias supplies
+      // BB UUID and email fallbacks. display_name COALESCE mirrors
+      // leaderboard_entries (operator override beats the primary alias's name).
       const personRows = await db.execute<{
         id: number;
         display_name: string | null;
@@ -1104,10 +961,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         badgeTier: personRow.badge_tier,
       };
 
-      // Run aggregates in parallel — independent queries scoped to the
-      // alias set of this person. Mirrors getUserSummary's three-pull
-      // shape with `author_user_id IN (...)` swapped in for the
-      // direct equality.
+      // Mirrors getUserSummary's pulls, scoped to this person's alias set via
+      // `author_user_id IN (...)` instead of direct equality.
       const aliasSubquery = sql`SELECT id FROM users WHERE person_id = ${personId}`;
       const [aliasRows, totalsRows, dailyRows, topRepoRows] = await Promise.all([
         db.execute<{
@@ -1240,10 +1095,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async getProjectStats(projectKey) {
-      // Project existence is determined by at least one tracked repo carrying
-      // the key. Empty project key strings would return zero results but we
-      // still treat them as "not found" up at the route layer via the missing
-      // result here.
+      // Project existence = at least one tracked repo carrying the key; a count
+      // of 0 returns null (treated as "not found" at the route layer).
       const [{ repository_count: repositoryCount } = { repository_count: 0 }] = (
         await db.execute<{ repository_count: number }>(sql`
           SELECT count(*)::int AS repository_count FROM repositories WHERE project = ${projectKey}
@@ -1273,9 +1126,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           LEFT JOIN users u ON u.id = cd.author_user_id
           WHERE r.project = ${projectKey}
         `),
-        // 365-day daily aggregate. Mirrors the user/repo dailyCommits shape
-        // so the CommitHeatmap component can render the project's combined
-        // contribution timeline without any client-side reshaping.
+        // 365-day daily aggregate; same shape as user/repo dailyCommits.
         db.execute<{ date: string; commits: number }>(sql`
           SELECT cd.day::text AS date, sum(cd.commit_count)::int AS commits
           FROM commit_daily cd
@@ -1284,11 +1135,9 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY cd.day
           ORDER BY cd.day
         `),
-        // Top contributors — Phase 5 person-aware, same entity-keyed shape
-        // as getRepositoryActivity (30-day sparkline + non-merge diff stats)
-        // but scoped to every repo carrying this project's key. A person's
-        // aliases collapse into one row, identity resolved through
-        // leaderboard_entries.
+        // Top contributors — same entity-keyed shape as getRepositoryActivity
+        // (30-day sparkline + non-merge diff stats) but scoped to every repo
+        // carrying this project's key.
         db.execute<{
           entity_kind: 'user' | 'person';
           entity_id: number;
@@ -1378,10 +1227,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           LIMIT 10
         `),
         // Per-repo last-commit-at comes from `commits` (the rollup doesn't
-        // carry timestamps). Cheap subquery — bounded by repo count per
-        // project. `db.execute` returns timestamps as strings (unlike the
-        // Drizzle query builder which parses to Date), so we accept either
-        // and normalize via `new Date(...).toISOString()` below.
+        // carry timestamps). db.execute returns timestamps as strings (the
+        // query builder parses to Date), so the mapping below normalizes either.
         db.execute<{
           workspace: string;
           slug: string;
@@ -1571,14 +1418,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           GROUP BY day
           ORDER BY day
         `),
-        // Contributors for this repo plus a repo-scoped 30-day sparkline
-        // per contributor. Phase 5: keyed on the merged ENTITY
-        // (person/unattached user) the same way getTopContributors and
-        // listWorkspaceMembers are — a person's aliases that both touched
-        // this repo collapse into one row, identity resolved through
-        // leaderboard_entries (display_name COALESCEd via the primary
-        // alias). Every CTE is scoped to `repository_id = repo.id`, so the
-        // sparkline + adds/dels reflect activity in THIS repo only.
+        // Contributors for this repo with a repo-scoped 30-day sparkline each,
+        // keyed on the merged ENTITY (aliases collapse into one row). Every CTE
+        // is scoped to `repository_id = repo.id`, so the sparkline + adds/dels
+        // reflect THIS repo only.
         db.execute<{
           entity_kind: 'user' | 'person';
           entity_id: number;
@@ -1662,11 +1505,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
             ON diff_summary.entity_kind = t.entity_kind AND diff_summary.entity_id = t.entity_id
           ORDER BY t.commits DESC
         `),
-        // Per-window code-change summary for the repo. Always returned —
-        // the per-repo opt-in flag was removed in 2026-05; every
-        // non-archived non-excluded repo participates in diff-stat
-        // ingest by default. Reads zero on rows whose diff-stats
-        // haven't been ingested yet (transient state).
+        // Per-window code-change summary. Reads zero before diff-stats are
+        // ingested (transient).
         db.execute<{
           additions_7d: number;
           deletions_7d: number;
@@ -1728,37 +1568,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
     },
 
     async listWorkspaceMembers() {
-      // Phase 5: rows are keyed by (entity_kind, entity_id) rather than a
-      // bare user_id. Attached aliases collapse into their parent person;
-      // unattached users keep their own row.
+      // Rows keyed by (entity_kind, entity_id): aliases collapse into their
+      // person, unattached users keep their own row. CTEs:
+      //   entity_commits — relabel each commit_daily row with entity_kind/id.
+      //   base           — per-entity 7d/30d/all-time commit + distinct-repo
+      //                    counts; HAVING sum > 0 drops never-active entities.
+      //   last_active    — MAX(authored_at) per entity from `commits` (the only
+      //                    source with a timestamp; commit_daily has only dates).
+      //   daily / spark  — 30-element per-entity sparkline.
+      // Identity + scoring come from leaderboard_entries.
       //
-      // The pipeline:
-      //   entity_commits — relabel every commit_daily row with its
-      //                    entity_kind/entity_id ('person' iff
-      //                    users.person_id is set, else 'user'). All
-      //                    aggregates below GROUP BY this composite key.
-      //   base           — per-entity 7d / 30d / all-time commit + distinct-
-      //                    repo counts, mirroring the legacy per-user shape.
-      //                    HAVING sum > 0 drops never-active entities.
-      //   last_active    — MAX(authored_at) per entity from `commits` (the
-      //                    one source that has a timestamp; commit_daily
-      //                    only carries the date bucket).
-      //   daily / spark  — last-30-day per-entity commit count series,
-      //                    array_agg'd into a 30-element sparkline matching
-      //                    TopContributorEntity.last30Days.
-      //   identity       — display name / username / email / BB uuid /
-      //                    workspace-member flag / attached_user_ids,
-      //                    pulled straight from leaderboard_entries (the
-      //                    V1_4 view that already encodes the person-vs-
-      //                    user discriminator + COALESCEs display_name
-      //                    through the primary alias). Scoring fields
-      //                    (score_trending / consistency / badge) come
-      //                    from the same view.
-      //
-      // Order: last_active_at DESC NULLS LAST, display_name ASC — same
-      // as before, "most-recently-active first" with never-active rows
-      // at the bottom. Frontend re-sorts client-side when the user picks
-      // a different column.
+      // Order: last_active_at DESC NULLS LAST, display_name ASC. Frontend
+      // re-sorts client-side on column pick.
       const rows = await db.execute<{
         entity_kind: 'user' | 'person';
         entity_id: number;
@@ -1929,22 +1750,19 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
       const beforeIso = before === null ? null : before.toISOString();
       const afterIso = after === null ? null : after.toISOString();
-      // Decompose the actor into two NULL-able int params so the predicate
-      // stays parameterized with plain ints (no array literals). When both
-      // are NULL the actor branch is a no-op (whole feed); a user matches
-      // directly; a person expands to its alias set via the subquery.
+      // Decompose the actor into two NULL-able int params (no array literals).
+      // Both NULL → actor branch is a no-op; a user matches directly; a person
+      // expands to its alias set via the subquery.
       const actorUserId = actor?.kind === 'user' ? actor.id : null;
       const actorPersonId = actor?.kind === 'person' ? actor.id : null;
 
-      // Two-branch UNION ALL with filter predicates pushed into each subquery
-      // (we don't want to pull rows that the outer ORDER BY + LIMIT will
-      // discard). NULL params with explicit casts let one filter shape cover
-      // every combination of provided / omitted axes.
+      // Two-branch UNION ALL with filter predicates pushed into each subquery.
+      // NULL params with explicit casts let one shape cover every combination
+      // of provided / omitted axes.
       //
-      // Tie-break order: occurred_at DESC, then `kind` (commit < pr lexically)
-      // then per-table `id` DESC. Distinct id namespaces between branches
-      // means we don't need a global sequence — pagination just needs the
-      // ordering to be deterministic, which it is.
+      // Tie-break: occurred_at DESC, then `kind` (commit < pr), then per-table
+      // `id` DESC. Distinct id namespaces mean no global sequence is needed —
+      // pagination only needs deterministic ordering.
       const result = await db.execute<{
         kind: 'commit' | 'pr';
         id: number;
@@ -2060,8 +1878,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
 
       return result.rows.map((r): ActivityEntry => {
         const repository: ActivityRepository = { workspace: r.workspace, slug: r.slug, fullName: r.full_name };
-        // db.execute returns timestamps as either Date (when Drizzle parses)
-        // or string (raw pg driver). Normalize either way.
+        // db.execute returns timestamps as Date or string; normalize either way.
         const occurredAt =
           typeof r.occurred_at === 'string' ? new Date(r.occurred_at).toISOString() : r.occurred_at.toISOString();
         const author: ActivityAuthor | null =
@@ -2108,10 +1925,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       const afterIso = after === null ? null : after.toISOString();
       const actorUserId = actor?.kind === 'user' ? actor.id : null;
       const actorPersonId = actor?.kind === 'person' ? actor.id : null;
-      // Two-branch sum — same WHERE predicates as getActivity. PR
-      // branch is suppressed when hashPrefix is set (PRs don't carry
-      // a SHA), matching the feed query exactly so the count never
-      // disagrees with the data.
+      // Two-branch sum — same WHERE predicates as getActivity (incl. PR
+      // suppression when hashPrefix is set) so the count never disagrees.
       const result = await db.execute<{ total: number }>(sql`
         SELECT
           (
@@ -2155,10 +1970,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
       const repoFullName = filters.repo !== null ? `${filters.repo.workspace}/${filters.repo.slug}` : null;
       const actorUserId = actor?.kind === 'user' ? actor.id : null;
       const actorPersonId = actor?.kind === 'person' ? actor.id : null;
-      // Read directly from commit_daily — keeps the query cheap regardless
-      // of how large `commits` grows. JOIN on repositories only when a
-      // repo / project filter is set, but we always need it for the
-      // workspace/slug match, so keep it unconditionally.
+      // Read directly from commit_daily to keep it cheap. The repositories JOIN
+      // is unconditional (needed for the repo / project filters).
       const result = await db.execute<{ date: string; commits: number }>(sql`
         SELECT cd.day::text AS date, sum(cd.commit_count)::int AS commits
         FROM commit_daily cd
@@ -2179,15 +1992,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
 
     async getRepoContributorBreakdown(opts) {
       const { windowDays, topRepos, topPerRepo, project } = opts;
-      // Three-CTE pipeline:
-      //   1. per_user_repo  — sum commit_count per (repo, author) in window
-      //   2. top_repos      — top N repo IDs by total commits (descending)
-      //   3. ranked         — row_number() per repo, contributors sorted by commits
-      // Final SELECT joins repositories / users and clips to top M per
-      // repo. Anonymous-author rows are excluded so the bands sum to the
-      // repo total without an "unknown" slice. When `project` is set,
-      // the per_user_repo seed is restricted to repos under that key —
-      // every downstream CTE inherits the scope through the join chain.
+      // Three-CTE pipeline: per_entity_repo (commits per repo+entity in window)
+      // → top_repos (top N repos by total) → ranked (row_number per repo). The
+      // final SELECT clips to top M per repo. Anonymous authors are excluded so
+      // bands sum to the repo total without an "unknown" slice. A set `project`
+      // restricts the seed; downstream CTEs inherit the scope via the join chain.
       const result = await db.execute<{
         workspace: string;
         slug: string;
@@ -2263,10 +2072,8 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         ORDER BY tr.total_commits DESC, ranked.commits DESC, ranked.entity_kind, ranked.entity_id
       `);
 
-      // Group flat rows into the repo-bucketed shape the chart expects.
-      // Preserve the SQL-side ordering: rows are returned repo-by-repo
-      // (since top_repos is the inner JOIN), so grouping in a single
-      // pass is enough.
+      // Group flat rows into repo buckets. Rows arrive repo-by-repo (top_repos
+      // is the inner JOIN), so a single pass preserves the SQL ordering.
       const byRepo = new Map<string, RepoContributorBreakdown>();
       for (const row of result.rows) {
         let bucket = byRepo.get(row.full_name);
@@ -2293,22 +2100,18 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
   };
 }
 
-// Collapse `sync_excluded` + `last_sync_status` + `last_synced_at` to
-// the 4-state UI signal. A 'running' status is folded into 'ok' — the
-// current tick is in flight, the previous outcome is what matters.
-// `sync_excluded` is checked first; an excluded row's last_sync_status
-// might be anything (commits 404 sets 'failed', empty-on-bb leaves it
-// 'success', history-rewritten sets 'failed') but the exclusion is
-// the operator-actionable signal.
+// Collapse `sync_excluded` + `last_sync_status` + `last_synced_at` to the UI
+// signal. 'running' folds into 'ok'. `sync_excluded` is checked first because
+// an excluded row's last_sync_status varies (404→failed, empty→success,
+// history-rewrite→failed) but the exclusion is the operator-actionable signal.
 function deriveSyncStatus(
   lastSyncStatus: 'idle' | 'running' | 'success' | 'failed' | null,
   lastSyncedAt: string | Date | null,
   syncExcluded: boolean = false,
   syncExcludeReason: string | null = null,
 ): RepoSyncStatus {
-  // 'empty-on-bitbucket' is benign (nothing to sync) — surface it as 'empty'
-  // so it doesn't read as a problem. Every other exclusion reason
-  // (repo-404, history-rewritten) needs an operator and stays 'excluded'.
+  // 'empty-on-bitbucket' is benign → 'empty'; every other reason (repo-404,
+  // history-rewritten) needs an operator and stays 'excluded'.
   if (syncExcluded) return syncExcludeReason === 'empty-on-bitbucket' ? 'empty' : 'excluded';
   if (lastSyncStatus === 'failed') return 'error';
   if (lastSyncedAt === null && (lastSyncStatus === null || lastSyncStatus === 'idle')) return 'never';

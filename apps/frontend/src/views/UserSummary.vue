@@ -23,16 +23,13 @@ const error = computed(() => store.error[userId.value] ?? null);
 
 onMounted(() => {
   void store.fetch(userId.value);
-  // Stats store carries the full repo list, which powers the project +
-  // repo dropdowns below. The Dashboard already fetches this, but a
-  // user landing on /users/:userId via a deep link needs it explicitly.
+  // Repo list powers the filter dropdowns; a deep link won't have a prior fetch.
   void stats.fetchOverview();
 });
 watch(userId, (next) => void store.fetch(next));
 
-// 30-day cutoff as YYYY-MM-DD for the "See all activities →" link
-// below. Matches the Activity page's range-preset detection so the
-// title chip lights up "[Last 30 days]" on landing.
+// 30-day cutoff for the "See all activities →" link; matches the Activity
+// page's preset detection so the "[Last 30 days]" chip lights up.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -42,11 +39,9 @@ function localDateString(d: Date): string {
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
-// "See all activities →" target. When this account is a merged alias,
-// zoom out to the canonical person — the dedicated /activity page then
-// filters across all aliases and resolves the picker + title chip to
-// the person name (a merged alias has no standalone entry in the actor
-// roster, so passing its raw user_id would surface "User #id").
+// "See all activities →" target. For a merged alias, zoom out to the
+// canonical person — a merged alias has no standalone entry in the actor
+// roster, so passing its raw user_id would surface "User #id".
 const seeAllActivityQuery = computed<Record<string, string | number>>(() => {
   const person = summary.value?.user.person;
   const q: Record<string, string | number> = { after: activitySinceThirtyDays.value };
@@ -59,10 +54,8 @@ const seeAllActivityQuery = computed<Record<string, string | number>>(() => {
   return q;
 });
 
-// Project + repo filters narrow this user's activity feed. User is
-// pinned (the page subject), so we don't render a user dropdown. The
-// composable handles the project↔repo interlock — picking either one
-// keeps the other coherent.
+// Project + repo filters; user is pinned (no contributor dropdown). The
+// composable owns the project↔repo interlock.
 const {
   projectModel: filterProject,
   repoModel: filterRepo,
@@ -76,8 +69,7 @@ const projectOptions = computed<string[]>(() => {
   return Array.from(set).sort();
 });
 
-// Compact "time ago" for the Linked-accounts table's Last active column
-// (mirrors the Members + Person tables). "—" when the alias has no commits.
+// Compact "time ago" for the Linked-accounts Last active column; "—" when none.
 function relativeTime(iso: string | null): string {
   if (iso === null) return '—';
   const diffSec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -109,12 +101,8 @@ function relativeTime(iso: string | null): string {
         <h1 class="text-3xl font-bold tracking-tight text-slate-900">
           {{ summary?.user.displayName ?? `User #${userId}` }}
         </h1>
-        <!-- Persona badge from user_score. Hidden until the summary
-             loads so we don't briefly render an empty span. -->
         <BadgeIcon v-if="summary && summary.user.badge" :badge="summary.user.badge" :tier="summary.user.badgeTier" />
-        <!-- Phase 5 — when this account is merged, the canonical person
-             name sits next to the badge in [brackets], clickable through
-             to the person page. -->
+        <!-- When merged, the canonical person name links through to the person page. -->
         <RouterLink
           v-if="summary?.user.person"
           :to="{ name: 'person', params: { personId: summary.user.person.id } }"
@@ -124,11 +112,8 @@ function relativeTime(iso: string | null): string {
           [{{ summary.user.person.displayName }}]
         </RouterLink>
       </div>
-      <!-- Prefer the git-author email when we have one — more useful for
-           humans recognizing / contacting the contributor than the opaque
-           BB UUID. Fall back to the UUID when email is null (user predates
-           the column / no parseable address landed yet). Email runs in the
-           regular font; UUID stays monospaced since it's an identifier. -->
+      <!-- Prefer the git-author email (more recognizable than the UUID),
+           falling back to the monospaced UUID when email is null. -->
       <p v-if="summary?.user.email" class="mt-1 text-xs text-slate-400">{{ summary.user.email }}</p>
       <p v-else-if="summary" class="mt-1 font-mono text-xs text-slate-400">{{ summary.user.bitbucketUuid }}</p>
     </header>
@@ -184,16 +169,10 @@ function relativeTime(iso: string | null): string {
                   </RouterLink>
                   <span v-else class="text-slate-400">—</span>
                 </td>
-                <!-- Adds/Dels columns. Excludes merge commits. Read
-                     zero on rows whose diff-stats haven't been
-                     ingested yet — transient state the backfill tick
-                     chases by freshness-first global pickup. File
-                     count is intentionally NOT surfaced as an
-                     aggregate — SUM(files_changed) across many
-                     commits double-counts the same path edited
-                     repeatedly. Per-commit file count still appears
-                     in the activity feed where it's the actual count
-                     for that single commit. -->
+                <!-- Adds/Dels, merge commits excluded; zero until diff-stats
+                     are ingested. File count is intentionally NOT aggregated
+                     — SUM(files_changed) double-counts a repeatedly-edited
+                     path (per-commit count still shows in the activity feed). -->
                 <td class="w-20 px-1 py-2 text-right text-xs tabular-nums">
                   <span class="text-emerald-700">+{{ r.additions30d.toLocaleString() }}</span>
                 </td>
@@ -210,12 +189,8 @@ function relativeTime(iso: string | null): string {
         </div>
       </section>
 
-      <!-- Linked accounts — only for a merged account. The OTHER aliases
-           of the same canonical person (this account excluded); same
-           table as the Person page's Attached accounts. The footer links
-           through to the person page (the merged-account link, moved here
-           from the old standalone banner) where the combined cross-alias
-           view lives. -->
+      <!-- Linked accounts — the OTHER aliases of the same person (this
+           account excluded); only for a merged account. -->
       <section v-if="summary.user.person" class="mt-8">
         <h2 class="mb-3 text-lg font-semibold text-slate-900">Linked accounts</h2>
         <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -279,9 +254,7 @@ function relativeTime(iso: string | null): string {
       <section class="mt-8">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
           <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
-          <!-- Project + repo filters scoped to this user. User is pinned
-               via `:actor` on the feed below, so it isn't a dropdown
-               here. The composable wires the project↔repo interlock. -->
+          <!-- Project + repo filters; user pinned via `:actor` below (no dropdown). -->
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <label for="user-filter-project" class="flex items-center gap-1">
               <span class="text-slate-500">Project:</span>
@@ -313,9 +286,7 @@ function relativeTime(iso: string | null): string {
         </div>
         <ActivityFeed :actor="{ kind: 'user', id: userId }" :project="filterProject" :repo="filterRepo" height="24rem">
           <template #footer>
-            <!-- "See all activities →" pre-applies this contributor. For
-                 a merged alias it zooms to the person (all aliases); for
-                 an unattached user it's just that user. -->
+            <!-- Pre-applies this contributor (merged alias → the person). -->
             <RouterLink
               :to="{ name: 'activity', query: seeAllActivityQuery }"
               class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"

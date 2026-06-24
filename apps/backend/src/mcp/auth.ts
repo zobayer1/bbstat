@@ -1,32 +1,20 @@
-// Stateless bearer tokens for the read-only MCP server.
-//
-// A token is a compact, signed, self-describing string — JWT-shaped but
-// hand-rolled on node:crypto so it pulls in no dependency:
+// Stateless bearer tokens for the read-only MCP server. JWT-shaped but
+// hand-rolled on node:crypto (no dependency):
 //
 //   v1.<base64url(payload)>.<base64url(HMAC-SHA256(payload))>
 //
-// `payload` is `{ consumer, iat, exp }`. The signature is keyed by
-// MCP_TOKEN_SECRET; verification recomputes it and compares in constant time,
-// so a token can't be forged or altered without the secret. There is NO token
-// store: tokens are minted by the CLI (src/scripts/mint-mcp-token.ts) and
-// verified on every request with nothing but the secret. The only revocation
-// lever is rotating MCP_TOKEN_SECRET, which invalidates every token at once —
-// acceptable while consumers are provisioned by hand. A real per-token revoke
-// list would be a DB-backed follow-up.
-//
-// `exp` is a unix epoch in seconds; `exp === 0` means "never expires" (for a
-// long-lived service token). The mint CLI defaults to a finite TTL.
+// There is NO token store — tokens are minted by the CLI
+// (src/scripts/mint-mcp-token.ts) and verified with nothing but the secret. The
+// only revocation lever is rotating MCP_TOKEN_SECRET, which invalidates every
+// token at once; acceptable while consumers are provisioned by hand.
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const TOKEN_VERSION = 'v1';
 
 export interface TokenPayload {
-  // Human label for who the token was issued to (e.g. "ci-bot",
-  // "analytics-agent"). Carried only for auditing / log context — it grants
-  // nothing beyond the read-only tool surface.
+  // Audit/log label only — grants nothing beyond the read-only tool surface.
   consumer: string;
-  // Issued-at, unix epoch seconds.
   iat: number;
   // Expiry, unix epoch seconds. 0 = no expiry.
   exp: number;
@@ -44,9 +32,8 @@ function sign(secret: string, encodedPayload: string): string {
   return createHmac('sha256', secret).update(encodedPayload).digest('base64url');
 }
 
-// Constant-time string compare that never throws on length mismatch (which
-// timingSafeEqual would). Returns false for differing lengths before the
-// constant-time step.
+// Constant-time compare that returns false on length mismatch rather than
+// throwing (which raw timingSafeEqual would).
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -57,13 +44,11 @@ function safeEqual(a: string, b: string): boolean {
 export interface SignTokenInput {
   consumer: string;
   iat: number;
-  // Seconds until expiry from `iat`. Omit / undefined / 0 → a non-expiring
-  // token (exp = 0).
+  // Seconds until expiry from `iat`. Omit / 0 → non-expiring token (exp = 0).
   ttlSeconds?: number;
 }
 
-// Mint a signed token. `iat` is passed in (not read from the clock here) so
-// callers stay testable and deterministic.
+// `iat` is passed in (not read from the clock) so callers stay deterministic.
 export function signToken(secret: string, input: SignTokenInput): string {
   const exp = input.ttlSeconds && input.ttlSeconds > 0 ? input.iat + input.ttlSeconds : 0;
   const payload: TokenPayload = { consumer: input.consumer, iat: input.iat, exp };
@@ -87,9 +72,8 @@ function parsePayload(encodedPayload: string): TokenPayload | null {
   return { consumer: obj.consumer, iat: obj.iat, exp: obj.exp };
 }
 
-// Verify a token against the secret. `nowSeconds` is injected so callers /
-// tests control the clock. Signature is checked before expiry so a tampered
-// token always reads as 'bad-signature', never leaking expiry state.
+// Signature is checked before expiry so a tampered token always reads as
+// 'bad-signature', never leaking expiry state. `nowSeconds` injected for tests.
 export function verifyToken(secret: string, token: string, nowSeconds: number): VerifyResult {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[0] !== TOKEN_VERSION) return { ok: false, reason: 'malformed' };
@@ -105,8 +89,6 @@ export function verifyToken(secret: string, token: string, nowSeconds: number): 
   return { ok: true, payload };
 }
 
-// Pull a bearer token out of an Authorization header value. Returns null when
-// the header is absent or not a well-formed `Bearer <token>`.
 export function extractBearer(authorization: string | undefined): string | null {
   if (authorization === undefined) return null;
   const match = /^Bearer (.+)$/.exec(authorization.trim());

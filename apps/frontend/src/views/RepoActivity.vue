@@ -22,20 +22,16 @@ const activity = computed(() => store.byFullName[fullName.value]);
 const loading = computed(() => store.loading[fullName.value] === true);
 const error = computed(() => store.error[fullName.value] ?? null);
 
-// Sum over the full 365-day dailyCommits window the backend now ships.
 const commits365d = computed(() => activity.value?.dailyCommits.reduce((acc, d) => acc + d.commits, 0) ?? 0);
 
 onMounted(() => void store.fetch(workspace.value, slug.value));
 watch([workspace, slug], () => void store.fetch(workspace.value, slug.value));
 
-// Repo (and therefore its project) is pinned by the route — only the
-// contributor axis is meaningfully filterable here. The shared
-// ActorPicker offers the full person-aware roster; a selected person
-// filters this repo's feed across all their aliases.
+// Repo (and its project) is pinned by the route — only the contributor
+// axis is filterable. A selected person filters across all their aliases.
 
-// 30-day cutoff as YYYY-MM-DD for the "See all activities →" link.
-// Matches the Activity page's range-preset detection so the title chip
-// lights up "[Last 30 days]" on landing.
+// 30-day cutoff for the "See all activities →" link; matches the Activity
+// page's preset detection so the "[Last 30 days]" chip lights up.
 const DAY_MS = 86_400_000;
 function localDateString(d: Date): string {
   const y = d.getFullYear();
@@ -71,9 +67,7 @@ const filterActor = useActorFilter();
             >Archived</span
           >
         </h1>
-        <!-- Thin external link to the canonical BB repo page. Sits
-             flush right on the title row so it stays out of the way
-             of the slug + sync-icon group on the left. -->
+        <!-- BB repo link. -->
         <a
           :href="`https://bitbucket.org/${workspace}/${slug}`"
           target="_blank"
@@ -85,8 +79,6 @@ const filterActor = useActorFilter();
         </a>
       </div>
       <p v-if="activity" class="mt-1 text-sm text-slate-500">
-        <!-- Parent project breadcrumb. Lives in the subtitle so it
-             stays subdued; full repo title above is the headline. -->
         <template v-if="activity.repository.project">
           <RouterLink
             :to="{ name: 'project', params: { projectKey: activity.repository.project } }"
@@ -131,9 +123,7 @@ const filterActor = useActorFilter();
         <div class="rounded-lg border border-slate-200 bg-white shadow-sm">
           <ul v-if="activity.contributors.length > 0" class="divide-y divide-slate-100">
             <li v-for="(c, i) in activity.contributors" :key="`${c.entityKind}:${c.entityId}`">
-              <!-- Person rows link to /people/:id, user rows to /users/:id.
-                   Name follows the dashboard Top Contributors pattern:
-                   truncate + ×N merged pill when a person has >1 alias. -->
+              <!-- Person rows → /people/:id, user rows → /users/:id. -->
               <RouterLink
                 :to="
                   c.entityKind === 'person'
@@ -156,10 +146,7 @@ const filterActor = useActorFilter();
                   </span>
                 </div>
                 <div class="flex shrink-0 items-center gap-3">
-                  <!-- Sparkline scoped to this repo (last 30 days of commits
-                       this entity landed here). Same hover treatment as the
-                       dashboard's top-contributors list — slate-400 →
-                       blue-600 on row hover. -->
+                  <!-- Sparkline scoped to this repo (last 30 days). -->
                   <Sparkline
                     :points="c.last30Days ?? []"
                     :width="128"
@@ -186,9 +173,8 @@ const filterActor = useActorFilter();
       <section class="mt-8">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
           <h2 class="text-lg font-semibold text-slate-900">Activity</h2>
-          <!-- Repo (and its project) is pinned by the route — only the
-               user axis is meaningfully filterable. Project filter is
-               omitted as it would have a single fixed option. -->
+          <!-- Repo pinned by route → only the user axis is filterable
+               (a project filter would have one fixed option). -->
           <div class="flex flex-wrap items-center gap-2 text-xs">
             <label for="repo-filter-user" class="flex items-center gap-1">
               <span class="text-slate-500">Contributor:</span>
@@ -198,8 +184,7 @@ const filterActor = useActorFilter();
         </div>
         <ActivityFeed :repo="fullName" :actor="filterActor" height="24rem">
           <template #footer>
-            <!-- "See all activities →" pre-applies this repo so the
-                 dedicated /activity page lands on the same scope. -->
+            <!-- Pre-applies this repo on /activity. -->
             <RouterLink
               :to="{ name: 'activity', query: { repo: fullName, after: activitySinceThirtyDays } }"
               class="block border-t border-slate-100 bg-slate-50 px-4 py-2 text-center text-xs font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"

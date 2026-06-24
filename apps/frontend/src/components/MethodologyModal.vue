@@ -1,9 +1,7 @@
 <script setup lang="ts">
 // Methodology modal opened from the Members page header. Explains the
-// ShipShow Score equations + the constants + the current org-wide
-// calibration. Equations render via KaTeX in display mode so the
-// notation is real (Σ, fractions, exponents, etc.) rather than ASCII
-// approximations. Full design rationale lives in docs/scoring.md.
+// ShipShow Score equations, constants, and current calibration; equations
+// render via KaTeX. Full design rationale lives in docs/scoring.md.
 //
 // Keyboard: Esc closes. Closes on backdrop click and the X button.
 
@@ -15,10 +13,9 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-// Static constants — mirrored from apps/backend/src/scoring/constants.ts.
-// Kept here as literal numbers so the modal is self-contained; if the
-// backend constants change, update both. Single-source-of-truth would
-// require an extra API call; not worth it for ~6 numbers.
+// Mirrored from apps/backend/src/scoring/constants.ts — update both. Kept as
+// literals so the modal stays self-contained; an API round-trip isn't worth it
+// for ~6 numbers.
 const STATIC = {
   alpha: 1.2,
   floor: 500,
@@ -29,18 +26,12 @@ const STATIC = {
   steadyEddieSilverPct: 50,
 } as const;
 
-// Render a LaTeX source string to HTML via KaTeX. `displayMode: true`
-// centers the equation and uses larger glyphs (vs inline). `throwOnError:
-// false` falls back to the source string in red on bad syntax instead of
-// crashing the whole render — useful safety net while iterating on
-// formulas.
+// `throwOnError: false` renders bad LaTeX as red source text instead of
+// crashing the whole component — a safety net while iterating on formulas.
 function tex(src: string): string {
   return katex.renderToString(src, { displayMode: true, throwOnError: false });
 }
 
-// Equation sources. Compact symbols (single letters with i subscript)
-// keep the math readable; descriptive labels live in the prose
-// preceding each equation block.
 const eqCommitScore = tex(String.raw`
 \begin{aligned}
 c_i &= a_i + d_i \\
@@ -115,7 +106,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           the other; they're sortable independently.
         </p>
 
-        <!-- ============================================================ -->
         <section>
           <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Per-commit score</h3>
           <p class="mb-2 text-justify">
@@ -152,7 +142,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </p>
         </section>
 
-        <!-- ============================================================ -->
         <section>
           <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
             Momentum (the leaderboard rank)
@@ -184,7 +173,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </p>
         </section>
 
-        <!-- ============================================================ -->
         <section>
           <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
             Consistency ({{ STATIC.consistencyWindowDays }}-day window)
@@ -208,7 +196,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </p>
         </section>
 
-        <!-- ============================================================ -->
         <section>
           <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Badges</h3>
           <p class="mb-2 text-justify">
@@ -260,7 +247,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </p>
         </section>
 
-        <!-- ============================================================ -->
         <section>
           <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Current calibration</h3>
           <div class="grid grid-cols-3 gap-x-6 gap-y-1 text-xs">

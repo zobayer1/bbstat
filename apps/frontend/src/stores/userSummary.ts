@@ -6,8 +6,8 @@ import { liveBus } from '@/lib/live';
 
 // Keyed cache of per-user summaries. Offline-first: components read
 // `byUserId.value[id]` synchronously (may show a stale-but-present entry while
-// `fetch(id)` is in flight). Persisted across reloads via the persisted-state
-// plugin — only the cached payloads, not transient loading/error state.
+// `fetch(id)` is in flight). Only the cached payloads persist, not
+// loading/error state.
 export const useUserSummaryStore = defineStore(
   'userSummary',
   () => {
@@ -32,10 +32,8 @@ export const useUserSummaryStore = defineStore(
       error.value = {};
     }
 
-    // Re-fetch every currently-cached user summary. Cheap when only
-    // one user is in view; if many are cached from prior navigation
-    // they all refresh in parallel. Errors per-user; one failure
-    // doesn't poison the others.
+    // Re-fetch every currently-cached user summary in parallel; per-user
+    // error isolation means one failure doesn't poison the others.
     async function applyTickComplete(): Promise<void> {
       const ids = Object.keys(byUserId.value).map(Number);
       await Promise.all(ids.map((id) => fetch(id)));
@@ -44,11 +42,8 @@ export const useUserSummaryStore = defineStore(
     liveBus.on('tick.commits.complete', () => {
       void applyTickComplete();
     });
-    // Sync-state transitions matter here because the user-detail
-    // "Top repos" table renders the SyncStateIcon — when a repo
-    // auto-trips into the excluded state, the icon's colour should
-    // flip without waiting for a fallback poll. Same on the
-    // operator-driven un-exclude side.
+    // Sync-state transitions flip the SyncStateIcon colour in the
+    // user-detail "Top repos" table; refresh without waiting for a poll.
     liveBus.on('repository.sync-excluded', () => {
       void applyTickComplete();
     });

@@ -1,9 +1,6 @@
-// The read-only MCP tool registry. The server (commit 3) iterates this array
-// and registers each entry with the SDK. Adding a tool = append it here.
-//
-// Ordering is roughly "broad → specific" so a model scanning the list sees
-// the orienting tools (overview, leaderboard, directories) before the
-// drill-in / query tools.
+// The read-only MCP tool registry; the server iterates this array. Ordering is
+// roughly "broad → specific" so a model scanning the list sees orienting tools
+// (overview, leaderboard, directories) before the drill-in / query tools.
 
 import { activityDailyTool, countActivityTool, searchActivityTool } from './activity.js';
 import { contributorSummaryTool, listMembersTool, topContributorsTool } from './contributors.js';

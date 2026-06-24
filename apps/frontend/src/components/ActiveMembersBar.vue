@@ -1,19 +1,12 @@
 <script setup lang="ts">
-// Active-members chart. Renders one horizontal bar per bucket, each
-// sized to its own count — NOT a stacked partition. The caller
-// computes the bucket counts as *cumulative ranges* ("members active
-// within the last 7 / 30 / 365 days") so 7d ≤ 30d ≤ 1y by
-// construction; a stacked bar would double-count under that
-// semantic. With nested ranges, separate bars on a shared baseline
-// is the honest shape: the 7d bar sits visually inside the 30d
-// bar's length, which sits inside the 1y bar's length, and the
-// emerald-shade gradient (darkest = most-active = shortest)
-// reinforces the "tightening recency window" narrative.
+// Active-members chart. One bar per bucket, each sized to its own count —
+// NOT a stacked partition. Buckets are *cumulative ranges* (active within
+// 7 / 30 / 365 days) so 7d ≤ 30d ≤ 1y by construction; a stacked bar would
+// double-count. Separate bars on a shared baseline render the nesting
+// honestly (7d sits inside 30d sits inside 1y).
 //
-// Caller-passed `ActivityBucket` shape is shared with
-// ActivityStatusDonut for type-import compatibility; re-exported
-// here so a future swap can import either component without picking
-// up a separate type.
+// `ActivityBucket` is shared with ActivityStatusDonut and re-exported here
+// so a future swap can import either component without a separate type.
 
 import { computed } from 'vue';
 import type { ActivityBucket } from './ActivityStatusDonut.vue';
@@ -23,15 +16,9 @@ export type { ActivityBucket };
 const props = withDefaults(
   defineProps<{
     buckets: ActivityBucket[];
-    // Height of each individual bar row, in pixels. Total chart
-    // height = N * barHeight + (N-1) * barGap.
     barHeight?: number;
-    // Vertical gap between bar rows.
     barGap?: number;
-    // Width of the left-side label column, in pixels. Right-aligned
-    // so the bars start at a consistent x position.
     labelWidth?: number;
-    // Width of the right-side count column, in pixels.
     countWidth?: number;
   }>(),
   {
@@ -42,12 +29,9 @@ const props = withDefaults(
   },
 );
 
-// Bars are sized proportionally to the LARGEST bucket count, not to
-// any external total. With cumulative buckets the largest is always
-// the widest range (1y), so it ends up at 100% and the shorter
-// ranges fill less. When every bucket is zero (no active members at
-// all), every bar renders at 0% width and the slate-track-only row
-// reads as "empty bucket" without crashing on division by zero.
+// Bars are sized to the LARGEST bucket count, not an external total. With
+// cumulative buckets the widest range (1y) is the max, so it hits 100% and
+// shorter ranges fill less. All-zero guards against division by zero.
 const maxCount = computed(() => {
   if (props.buckets.length === 0) return 0;
   return Math.max(...props.buckets.map((b) => b.count));
@@ -58,9 +42,8 @@ function widthPercent(count: number): string {
   return `${(count / maxCount.value) * 100}%`;
 }
 
-// Strip the "Active · " prefix for the per-row label — the per-row
-// rendering already implies activity, so the suffix ("7d", "30d",
-// "1y") is the load-bearing part.
+// Strip the "Active · " prefix — per-row rendering already implies
+// activity, so the suffix ("7d", "30d", "1y") is the load-bearing part.
 function shortLabel(raw: string): string {
   return raw.replace(/^Active\s*·\s*/i, '');
 }
@@ -81,9 +64,6 @@ function shortLabel(raw: string): string {
       >
         {{ shortLabel(b.label) }}
       </div>
-      <!-- Track + filled bar. Track stays slate-100 for the empty
-           area so the eye sees how much of the max range each bucket
-           covers. Filled bar uses the bucket's color. -->
       <div class="flex-1 overflow-hidden rounded-md bg-slate-100" :style="{ height: `${barHeight}px` }">
         <div
           class="h-full rounded-md transition-[width] duration-200"

@@ -1,7 +1,6 @@
 import { BitbucketApiError, BitbucketRateLimitError } from './errors.js';
 
-// Minimal logger surface — pino-compatible. Optional; used only for warnings on
-// retries and low rate-limit budget. The client never `console.log`s.
+// Minimal pino-compatible logger surface. Optional.
 export interface BitbucketLogger {
   debug?: (obj: object, msg?: string) => void;
   info?: (obj: object, msg?: string) => void;
@@ -20,51 +19,39 @@ export interface BitbucketClientOptions {
   // Soft cap on outbound calls per rolling hour. We count ourselves because
   // BB Cloud omits X-RateLimit-* headers on success — see
   // memory/bitbucket_rate_limit_headers.md. Default 800 leaves a 200-call
-  // buffer below BB's documented ~1000/hr per-identity limit.
+  // buffer below BB's ~1000/hr per-identity limit.
   hourlyCallBudget?: number;
-  // Minimum wall-clock interval between successive outbound calls from this
-  // client. BB Cloud's documented 1000/hr limit hides a finer-grained burst
-  // limiter that 429s well below the hourly count when calls go out faster
-  // than a few per second. Pacing here keeps us under that threshold without
-  // any client knowledge of what the threshold actually is. 0 = disabled
-  // (default in tests; production wires ~400ms via env). Applies to every
-  // attempt including retries — but retry-after / backoff sleeps naturally
-  // satisfy this gate, so no compounding penalty in the 429/5xx path.
+  // Minimum wall-clock interval between successive outbound calls. BB's
+  // documented 1000/hr limit hides a finer-grained burst limiter that 429s
+  // well below the hourly count above a few calls/sec; pacing keeps us under
+  // it. 0 = disabled (tests; prod wires ~400ms). Applies to retries too, but
+  // retry-after / backoff sleeps already satisfy the gate, so no compounding.
   minCallIntervalMs?: number;
-  // Hard ceiling on the adaptive pacing. Every observed 429 doubles the
-  // *current* pacing interval (min → 2× → 4× → ... → max). When the next
-  // retry would push past `maxCallIntervalMs`, the client stays at the cap
-  // and lets the retry budget exhaust normally — which surfaces as a
-  // `BitbucketRateLimitError` for the tick orchestrator to abort on.
-  // 0 disables adaptive bumping entirely (falls back to flat
-  // `minCallIntervalMs` pacing).
+  // Hard ceiling on adaptive pacing. Every 429 doubles the current interval
+  // (min → 2× → ... → max). At the cap the retry budget exhausts normally,
+  // surfacing as `BitbucketRateLimitError` for the tick orchestrator. 0
+  // disables adaptive bumping (flat `minCallIntervalMs` pacing).
   maxCallIntervalMs?: number;
   // After this many consecutive non-429 responses, halve `currentPacingMs`
-  // back toward `minCallIntervalMs` (floor at the min). Lets the client
-  // recover automatically once BB's burst window has rotated. Default 20.
+  // back toward `minCallIntervalMs` (floored). Recovers once BB's burst
+  // window has rotated. Default 20.
   pacingDecaySuccesses?: number;
-  // Injectable for tests; defaults to globalThis.fetch (Node 22 native).
+  // Injectable for tests; defaults to globalThis.fetch.
   fetch?: typeof globalThis.fetch;
   // Injectable for tests of the call-ledger sliding window.
   now?: () => number;
-  // Fires only on edge transitions (ok → unauthorized, unauthorized → ok).
-  // Triggered by 401/403 (→ 'unauthorized') and any 2xx response (→ 'ok').
-  // 429 / 5xx / network errors do NOT change auth state — those signal
-  // upstream availability problems, not credential problems. We don't
-  // fire on first 2xx after boot UNLESS `initialAuthState` was
-  // 'unauthorized', in which case the first 2xx is a genuine
-  // unauthorized → ok transition that must reach the UI.
-  // Hook owners write this to Redis + publish the SSE event so the
-  // dashboard `!!` can flip red when the token expires.
+  // Fires only on edge transitions. 401/403 → 'unauthorized', any 2xx → 'ok';
+  // 429 / 5xx / network errors do NOT change auth state (availability, not
+  // credentials). First 2xx after boot is a no-op UNLESS `initialAuthState`
+  // was 'unauthorized', which is a genuine transition that must reach the UI.
+  // Hook owners write Redis + publish the SSE event so the dashboard `!!`
+  // flips red on token expiry.
   onAuthStateChange?: (state: BitbucketAuthState) => void;
-  // Hydrated from the Redis flag at startup. Defaults to 'ok' — first
-  // 2xx with the default is then a no-op. When the previous process
-  // crashed/restarted while the flag was 'unauthorized' (token rotated
-  // out-of-band, then the new process boots fresh), the operator's
-  // recovery path runs through here: pass 'unauthorized' so the first
-  // 2xx clears Redis and publishes 'ok'. Without this, the dashboard
-  // stays red forever — the client's in-memory dedupe never sees an
-  // edge against the stale Redis flag.
+  // Hydrated from the Redis flag at startup; defaults to 'ok'. When a previous
+  // process crashed/restarted while the flag was 'unauthorized' (token rotated
+  // out-of-band), passing 'unauthorized' lets the first 2xx clear Redis and
+  // publish 'ok'. Without it the dashboard stays red forever — the in-memory
+  // dedupe never sees an edge against the stale Redis flag.
   initialAuthState?: BitbucketAuthState;
 }
 
@@ -84,7 +71,6 @@ export interface RateLimitState {
   resetAt: Date | null;
 }
 
-// Shape of every BitBucket Cloud paginated endpoint.
 export interface PaginatedResponse<T> {
   pagelen: number;
   page?: number;
@@ -117,30 +103,24 @@ export class BitbucketClient {
   private readonly minCallIntervalMs: number;
   private readonly maxCallIntervalMs: number;
   private readonly pacingDecaySuccesses: number;
-  // Adaptive pacing state. `currentPacingMs` starts at `minCallIntervalMs`
-  // and doubles on every observed 429 (capped at `maxCallIntervalMs`).
-  // After `pacingDecaySuccesses` consecutive non-429 responses it halves
-  // back toward the floor. Sticky across ticks — the client instance lives
-  // for the process lifetime, so a 429 storm at minute 5 keeps us paced
-  // conservatively at minute 6 without re-discovering BB's burst limit.
+  // Adaptive pacing state. Doubles on every 429 (capped at maxCallIntervalMs),
+  // halves after pacingDecaySuccesses clean responses. Sticky across ticks —
+  // the instance lives for the process lifetime, so a 429 storm keeps us paced
+  // conservatively without re-discovering BB's burst limit each tick.
   private currentPacingMs: number;
   private consecutiveNon429 = 0;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly now: () => number;
   private readonly onAuthStateChange: ((state: BitbucketAuthState) => void) | undefined;
-  // Last auth state we surfaced to the hook. Defaults to 'ok'; callers
-  // can override via `initialAuthState` to hydrate from a persisted flag
-  // (Redis) so a fresh process recovers a stale 'unauthorized' state
-  // when its first 2xx lands — see the comment on `initialAuthState`.
+  // Last auth state surfaced to the hook. See `initialAuthState`.
   private lastAuthState: BitbucketAuthState;
   private rateLimit: RateLimitState = { limit: null, remaining: null, resetAt: null };
   // Sliding-window ledger of outbound-fetch timestamps. Includes retries —
-  // each network attempt costs one against the BB-side counter, even if it
-  // 429'd or 5xx'd, so it must cost one against ours too.
+  // each attempt costs one against BB's counter even if it 429'd / 5xx'd, so
+  // it must cost one against ours too.
   private callTimestamps: number[] = [];
-  // Wall-clock timestamp of the most recent fetch attempt (any outcome).
-  // Used by the inter-call pacer to throttle bursts under BB's hidden
-  // sub-second limiter. 0 = no prior call.
+  // Wall-clock of the most recent fetch attempt, for the inter-call pacer.
+  // 0 = no prior call.
   private lastCallAt = 0;
 
   constructor(opts: BitbucketClientOptions) {
@@ -186,17 +166,12 @@ export class BitbucketClient {
   }
 
   /**
-   * True when the adaptive pacer has fully ramped up to its ceiling
-   * (`maxCallIntervalMs`). The pacer only reaches this state after
-   * a series of 429s, so when it's true BB is signaling sustained
-   * back-pressure — each subsequent call is paced at the ceiling
-   * (default 3.2 s) and has a high chance of 429ing again. Hot
-   * ingest loops (the per-commit diff-stat walker, in particular)
-   * use this as a pre-emptive yield signal: continuing to call at
-   * this rate burns the rolling-hour budget without much progress;
-   * better to defer remaining work to the next cron firing, by
-   * which time the rolling window has rotated and the pacer has
-   * decayed.
+   * True when the pacer has ramped to its ceiling (`maxCallIntervalMs`),
+   * reached only after a series of 429s — so BB is signaling sustained
+   * back-pressure and each call is likely to 429 again. Hot ingest loops
+   * (the per-commit diff-stat walker) use this as a pre-emptive yield signal:
+   * defer remaining work to the next cron firing, by which time the rolling
+   * window has rotated and the pacer has decayed.
    */
   isPacingSaturated(): boolean {
     return this.maxCallIntervalMs > 0 && this.currentPacingMs >= this.maxCallIntervalMs;
@@ -205,8 +180,6 @@ export class BitbucketClient {
   /** Outbound-fetch attempts made in the last rolling hour. */
   getCallsInLastHour(): number {
     const cutoff = this.now() - HOUR_MS;
-    // Opportunistic trim — the ledger never grows beyond ~budget entries
-    // because callers stop scheduling when remaining hits zero.
     if (this.callTimestamps.length > 0 && this.callTimestamps[0]! < cutoff) {
       this.callTimestamps = this.callTimestamps.filter((t) => t >= cutoff);
     }
@@ -231,21 +204,12 @@ export class BitbucketClient {
   }
 
   /**
-   * Async generator that walks a BitBucket paginated endpoint, yielding each
-   * `values[]` item one at a time. Subsequent pages are fetched by following
-   * the `next` URL returned by the API; opts are applied only to the first
-   * call, since BitBucket's `next` URL preserves the original query string.
+   * Walks a BitBucket paginated endpoint, yielding each `values[]` item. Pages
+   * follow the API's `next` URL; opts apply only to the first call since `next`
+   * preserves the original query string.
    *
-   * Field-filtering note: paginated responses wrap items in `values[]`, so
-   * filters must use the `values.<field>` prefix. This method auto-appends
-   * `next` to the field set if the caller provided one — without it, BitBucket
-   * strips the pagination link and iteration silently stops after page 1.
-   *
-   * @example
-   *   for await (const member of client.paginate<Member>(
-   *     '/workspaces/foo/members',
-   *     { fields: ['values.user.uuid', 'values.user.display_name'] },
-   *   )) { ... }
+   * Auto-appends `next` to the caller's field set — without it BitBucket strips
+   * the pagination link and iteration silently stops after page 1.
    */
   async *paginate<T = unknown>(initialPath: string, opts: RequestOptions = {}): AsyncGenerator<T, void, void> {
     const fieldsWithNext =
@@ -279,15 +243,12 @@ export class BitbucketClient {
     };
 
     let attempt = 0;
-    // Loop until success or unrecoverable error. Bounded by `retries`.
     for (;;) {
       let res: Response;
       // Pace successive calls. Retry-after / backoff sleeps in the catch
-      // branches below have already advanced wall-clock, so this gate is a
-      // no-op on retries — only the initial attempt and back-to-back happy-
-      // path calls actually wait here. `currentPacingMs` is adaptive: it
-      // doubles on each 429 (up to `maxCallIntervalMs`) and decays back
-      // toward the floor on streaks of clean responses.
+      // branches have already advanced wall-clock, so this gate is a no-op on
+      // retries — only the initial attempt and back-to-back happy-path calls
+      // wait here.
       if (this.currentPacingMs > 0 && this.lastCallAt > 0) {
         const elapsed = this.now() - this.lastCallAt;
         if (elapsed < this.currentPacingMs) {
@@ -318,9 +279,8 @@ export class BitbucketClient {
       if (res.status === 429) {
         const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
         this.consecutiveNon429 = 0;
-        // Bump adaptive pacing — sticky for subsequent calls. Capped at
-        // `maxCallIntervalMs`; once capped, additional 429s leave it at the
-        // ceiling and the retry budget exhausts as usual.
+        // Bump adaptive pacing, capped at `maxCallIntervalMs`; once capped,
+        // further 429s leave it at the ceiling and the retry budget exhausts.
         if (this.maxCallIntervalMs > 0 && this.currentPacingMs < this.maxCallIntervalMs) {
           const next = Math.min(
             Math.max(this.currentPacingMs * 2, this.minCallIntervalMs || this.maxCallIntervalMs),
@@ -343,9 +303,8 @@ export class BitbucketClient {
         throw new BitbucketRateLimitError(path, retryAfter);
       }
 
-      // Non-429 from here on — count toward decay. We decay on any
-      // non-429 outcome (including handled 5xx that won't retry, and
-      // non-2xx 4xx) since the burst limiter only cares about 429s.
+      // Non-429 from here on — count toward decay (5xx and other 4xx
+      // included; the burst limiter only cares about 429s).
       this.consecutiveNon429++;
       if (
         this.maxCallIntervalMs > 0 &&
@@ -381,8 +340,7 @@ export class BitbucketClient {
         throw new BitbucketApiError(`BitBucket ${res.status} on ${path}`, res.status, path, body);
       }
 
-      // Any 2xx response clears a prior auth-failure state. Hook fires
-      // only on transitions, so a stable healthy stream is a no-op.
+      // Any 2xx clears a prior auth-failure state (transition-only hook).
       this.notifyAuthState('ok');
       if (res.status === 204) return undefined as T;
       return (await res.json()) as T;

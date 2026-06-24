@@ -1,17 +1,12 @@
-// Fastify plugin wiring the MCP server: a bearer-gated POST <path> that speaks
+// Fastify plugin wiring the MCP server: a bearer-gated <path> speaking
 // streamable-HTTP, plus an unauthenticated /healthz for container probes.
-//
-// Registered via `app.register(mcpPlugin, opts)` (like the dashboard's route
-// plugins) so the plugin sees the default FastifyInstance regardless of how
-// the root app specialised its logger type.
 //
 // Stateless transport: a fresh McpServer + StreamableHTTPServerTransport are
 // created PER REQUEST (sessionIdGenerator: undefined) so concurrent requests
 // can't collide on JSON-RPC ids or share session state. enableJsonResponse
-// makes each call a single JSON body rather than an SSE stream — all a
-// read-only request/response tool surface needs. Fastify has already parsed
-// the JSON body, so we hand it to handleRequest as the pre-parsed body and
-// hijack the reply to let the transport own the raw socket.
+// makes each call a single JSON body rather than an SSE stream. Fastify has
+// already parsed the body, so we pass it to handleRequest pre-parsed and hijack
+// the reply to let the transport own the raw socket.
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -22,17 +17,15 @@ import { buildMcpServer } from './server.js';
 
 export interface McpPluginOptions {
   store: StatsStore;
-  // HMAC key for bearer verification (config.MCP_TOKEN_SECRET, already
-  // guaranteed present by the entrypoint).
+  // HMAC key for bearer verification (config.MCP_TOKEN_SECRET).
   secret: string;
   logger: Logger;
   // Endpoint path. Defaults to '/mcp'.
   path?: string;
 }
 
+// JSON-RPC-shaped error body so MCP clients surface a message alongside the 401.
 function unauthorized(message: string): { jsonrpc: '2.0'; error: { code: number; message: string }; id: null } {
-  // JSON-RPC-shaped error body so MCP clients surface a meaningful message
-  // alongside the 401 status.
   return { jsonrpc: '2.0', error: { code: -32001, message }, id: null };
 }
 
@@ -41,14 +34,11 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (app, opts)
 
   app.get('/healthz', async () => ({ status: 'ok', uptime: process.uptime() }));
 
-  // Shared handler for every method on the MCP endpoint. Streamable-HTTP
-  // clients hit this with POST (JSON-RPC requests), GET (open the server→client
-  // SSE stream), and DELETE (terminate a session). All three must reach the
-  // SDK transport so it returns the protocol-correct response — routing only
-  // POST would make Fastify answer GET/DELETE with a 404, which clients read as
-  // a broken endpoint and refuse to connect. In stateless mode the transport
-  // answers GET/DELETE with 405, which is the right "no standalone stream"
-  // signal.
+  // Shared handler for POST/GET/DELETE on the MCP endpoint. All three must reach
+  // the SDK transport: routing only POST would make Fastify 404 on GET/DELETE,
+  // which clients read as a broken endpoint and refuse to connect. In stateless
+  // mode the transport answers GET/DELETE with 405 (the "no standalone stream"
+  // signal).
   const handle = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const token = extractBearer(request.headers.authorization);
     if (token === null) {
@@ -69,9 +59,9 @@ export const mcpPlugin: FastifyPluginAsync<McpPluginOptions> = async (app, opts)
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
     });
-    // Free both when the client disconnects / the response finishes. Swallow
-    // rejections so a teardown error on an abrupt disconnect never surfaces as
-    // an unhandled rejection (which would crash the process).
+    // Free both on disconnect/finish. Swallow rejections so a teardown error on
+    // an abrupt disconnect doesn't surface as a process-crashing unhandled
+    // rejection.
     reply.raw.on('close', () => {
       transport.close().catch(() => {});
       server.close().catch(() => {});

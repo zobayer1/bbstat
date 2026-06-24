@@ -1,27 +1,17 @@
 // Workspace-repo discovery sweep. Auto-tracks repositories from the BitBucket
 // workspace so the long tail doesn't have to be added by hand.
 //
-// It walks GET /repositories/{workspace} ordered by `updated_on` ASCENDING,
-// keyed off a persisted Redis cursor (`bbstat:repo-discovery-cursor`). Each
-// sweep scans a bounded batch with `updated_on > <cursor>`, inserts any
-// untracked repo (idempotent — ON CONFLICT on bitbucket_uuid), and advances
-// the cursor to the newest `updated_on` it saw. Two behaviours fall out of
-// the ascending order:
-//
-//   * Backfill — from the seed (epoch), the cursor chews through the inactive
-//     tail (oldest updated_on) first, climbing past already-tracked active
-//     repos (re-seen → insert skipped) up to "now".
-//   * Tail-follow — once caught up, `updated_on > cursor` only returns repos
-//     updated since the last sweep: newly created repos or ones that just
-//     became active. New repos get tracked automatically; the rest of the
-//     sync system (cold sync, deepen, backoff, diff-stats, empty-revival)
-//     handles them as usual. Inactive ones self-throttle via the backoff.
+// Walks GET /repositories/{workspace} ordered by `updated_on` ASCENDING,
+// keyed off a persisted Redis cursor. Each sweep scans a bounded batch with
+// `updated_on > <cursor>`, inserts untracked repos (idempotent), and advances
+// the cursor. The ascending order means a fresh cursor backfills the inactive
+// tail first, then once caught up only returns repos touched since the last
+// sweep (tail-follow). The rest of the sync system handles them from there.
 //
 // Forks of repos OUTSIDE the workspace are skipped — a fork inherits its
 // upstream's history, which isn't original org work and would double-count.
 //
-// Detection + insert only; it never archives, excludes, or mutates an
-// already-tracked repo.
+// Detection + insert only; never archives, excludes, or mutates a tracked repo.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginateWorkspaceRepositories } from '../bitbucket/repositories.js';
@@ -34,8 +24,8 @@ import type { DiscoveryStore } from './discovery-store.js';
 export const DISCOVERY_SEED_SINCE = '1970-01-01T00:00:00+00:00';
 
 export interface RepoDiscoveryOptions {
-  // Repos scanned per sweep (one BB page is 100). Bounds the work so a large
-  // workspace's backfill spreads over several ticks rather than one burst.
+  // Repos scanned per sweep. Bounds the work so a large workspace's backfill
+  // spreads over several ticks rather than one burst.
   maxReposPerSweep: number;
   // Skip the sweep when the BB call budget is below this.
   budgetThreshold: number;
@@ -82,16 +72,14 @@ export async function runRepoDiscoverySweep(
   for await (const repo of paginateWorkspaceRepositories(deps.client, deps.workspace, { since })) {
     scanned += 1;
     // Advance the cursor past every scanned repo — including skipped forks —
-    // so we don't re-examine them next sweep. Ascending order means
-    // updated_on is non-decreasing; the guard just defends against ties.
+    // so we don't re-examine them. The guard defends against updated_on ties.
     if (maxUpdatedOn === null || repo.updated_on > maxUpdatedOn) maxUpdatedOn = repo.updated_on;
 
     if (repo.parent && !repo.parent.full_name.startsWith(`${deps.workspace}/`)) {
-      // Fork of a repo outside the workspace — skip.
       skippedForks += 1;
     } else if (dryRun) {
-      // Report only repos that aren't already tracked, so the preview shows
-      // genuine additions rather than the whole workspace.
+      // Report only repos not already tracked, so the preview shows genuine
+      // additions rather than the whole workspace.
       if ((await deps.store.findRepositoryByFullName(repo.full_name)) === null) {
         added.push(repo.full_name);
       }
@@ -117,8 +105,7 @@ export async function runRepoDiscoverySweep(
     }
   }
 
-  // Advance the persisted cursor to the newest updated_on we scanned. Skipped
-  // in dry-run, and when nothing moved (a caught-up workspace is a no-op).
+  // Persist the cursor. Skipped in dry-run and when nothing moved.
   if (!dryRun && maxUpdatedOn !== null && maxUpdatedOn !== since) {
     await repoDiscoveryCursorCache.set(deps.cache, maxUpdatedOn);
   }

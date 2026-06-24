@@ -4,14 +4,12 @@ import { api } from '@/api/client';
 import type { WorkspaceMember } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
-// Client-side cache for the /members page. Hydrates from
-// /api/stats/members and persists across reloads so the page renders
-// instantly with the previous payload while a fresh fetch runs in
-// the background. Fuzzy search, sort, and pagination all run on the
-// frontend over `members.value` — the backend ships the full eligible
-// roster (commitsAllTime > 0) in one round-trip with BOTH 7d and 30d
-// aggregates per row, so the table can render `{commits} ({repos})`
-// cells for each window without any client-side toggling.
+// Client-side cache for the /members page. Persists so the page renders
+// instantly with the previous payload while a fresh fetch runs. Fuzzy
+// search, sort, and pagination all run on the frontend over `members.value` —
+// the backend ships the full eligible roster (commitsAllTime > 0) in one
+// round-trip with BOTH 7d and 30d aggregates per row, so the table renders
+// `{commits} ({repos})` cells for each window without client-side toggling.
 export const useMembersStore = defineStore(
   'members',
   () => {
@@ -39,13 +37,10 @@ export const useMembersStore = defineStore(
       error.value = null;
     }
 
-    // Re-fetch when a sync tick lands or push goes stale. Skip if nothing
-    // has ever been loaded — the next navigation to /members will trigger
-    // the first fetch on its own, no point waking a sleeping tab into
-    // network work. Subscribes to the same events as `useUserSummaryStore`
-    // since both stores derive their numbers from `commit_daily` aggregates
-    // (PR ticks don't move any field in the WorkspaceMember payload, so
-    // we deliberately skip `tick.prs.complete`).
+    // Skip if nothing has ever been loaded — the next /members navigation
+    // triggers the first fetch, no point waking a sleeping tab into network
+    // work. PR ticks don't move any WorkspaceMember field, so we deliberately
+    // skip `tick.prs.complete`.
     async function applyTickComplete(): Promise<void> {
       if (lastFetchedAt.value === null) return;
       await fetch();
@@ -57,11 +52,9 @@ export const useMembersStore = defineStore(
     liveBus.on('repository.deleted', () => {
       void applyTickComplete();
     });
-    // Phase 5 — any person-layer mutation reshapes the leaderboard:
-    // a create / attach collapses rows into one, a detach / dissolve
-    // splits them back out, and a primary swap or display-name edit
-    // changes a row's label. All of them warrant a re-fetch so the
-    // table reflects the new merge state without a manual reload.
+    // Any person-layer mutation reshapes the leaderboard (create/attach
+    // collapses rows, detach/dissolve splits them, primary swap / name edit
+    // relabels), so re-fetch on all of them.
     liveBus.on('person.created', () => {
       void applyTickComplete();
     });

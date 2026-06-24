@@ -4,9 +4,7 @@ import { api } from '@/api/client';
 import type { ProjectStats } from '@/api/client';
 import { liveBus } from '@/lib/live';
 
-// Keyed cache of per-project stats. Same offline-first pattern as
-// userSummary — components render from `byProjectKey.value[key]` and refresh
-// asynchronously via `fetch(key)`.
+// Keyed cache of per-project stats. Same offline-first pattern as userSummary.
 export const useProjectStatsStore = defineStore(
   'projectStats',
   () => {

@@ -1,12 +1,7 @@
 <script setup lang="ts">
 // Dedicated /activity page — full activity stream with filters, hash /
-// message search, date-range picker, three concentration charts above
-// the rows, and explicit Prev/Next pagination (100/page). Mirrors the
-// /members page structure so the two list pages feel like siblings.
-//
-// Filter state is URL-synced via `route.query`, same pattern as the
-// Dashboard activity tab: deep-linking a filtered view works, and the
-// browser back button does what the user expects after a Clear.
+// message search, date-range picker, year heatmap, and explicit
+// pagination. Filter state is URL-synced via `route.query`.
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
@@ -30,20 +25,16 @@ const stats = useStatsStore();
 const members = useMembersStore();
 const store = useActivityPageStore();
 
-// SSE / fallback subscriptions for the year-grid heatmap. The paged
-// row store + dashboard stats wire their own subscriptions in their
-// store bodies — those stay registered for the app lifetime. The
-// heatmap's daily fetch is view-scoped, so its listeners need to come
-// down with the component.
+// SSE / fallback subscriptions for the heatmap's view-scoped daily fetch;
+// torn down on unmount (the paged store + stats wire their own).
 const liveCleanups: Array<() => void> = [];
 
 onMounted(() => {
   // Snapshot the URL filters once on entry so the title chips can
-  // disappear when the user later touches a dropdown. Re-mounts (back
-  // button, fresh deep link) re-snapshot naturally.
+  // disappear when the user later touches a dropdown.
   initialFilters.value = {
-    // Snapshot the actor as a "kind:id" composite so the chip stays
-    // stable whether the URL carries a user or a person actor.
+    // Actor snapshotted as "kind:id" so the chip stays stable for either
+    // a user or a person actor.
     actor:
       typeof route.query.actor === 'string'
         ? `${route.query.actorKind === 'person' ? 'person' : 'user'}:${route.query.actor}`
@@ -60,20 +51,12 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  // Tear down the chart subscriptions so a navigated-away view isn't
-  // still hitting the network on every tick.
   for (const off of liveCleanups) off();
   liveCleanups.length = 0;
-  // Clear the volatile cache on unmount — re-entering the page should
-  // refetch fresh data, not show whatever was last loaded with a stale
-  // filter set.
+  // Clear the volatile cache so re-entering refetches rather than showing
+  // data last loaded under a stale filter set.
   store.clear();
 });
-
-// ---------------------------------------------------------------------------
-// URL <-> filter state. Every filter axis lives in `route.query` so deep
-// links work and the Back button works as expected.
-// ---------------------------------------------------------------------------
 
 function setQueryParam(key: string, value: string | number | undefined): void {
   const next = { ...route.query };
@@ -89,10 +72,6 @@ function clearQueryParams(keys: string[]): void {
 }
 
 const filterActor = useActorFilter();
-// Project + repo go through the shared composable so picking a repo
-// auto-fills its project (and vice-versa, trimming the repo dropdown
-// to the chosen project's repos). `repoFilterOptions` is the trimmed
-// list for the `<select>` below.
 const {
   projectModel: filterProject,
   repoModel: filterRepo,
@@ -101,12 +80,10 @@ const {
   repositories: computed(() => stats.repositories),
 });
 
-// Date range — `<input type="date">` only accepts `YYYY-MM-DD`; anything
-// else (including a perfectly valid ISO timestamp) emits a browser-level
-// "does not conform to the required format" warning, which the project's
-// zero-warning policy treats as a bug. Coerce on read so the input
-// always sees a date-only string while the URL is free to carry either
-// form — `isoFromDateInput` below accepts both at request time.
+// `<input type="date">` only accepts `YYYY-MM-DD`; any other value (even a
+// valid ISO timestamp) emits a browser format warning, which the zero-warning
+// policy treats as a bug. Coerce on read so the input always sees a date-only
+// string while the URL may carry either form (`isoFromDateInput` accepts both).
 function toDateInputValue(raw: unknown): string | undefined {
   if (typeof raw !== 'string' || raw === '') return undefined;
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
@@ -117,10 +94,9 @@ function toDateInputValue(raw: unknown): string | undefined {
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
-// Default for the "To" bound when the URL doesn't carry one — local
-// today, so visiting /activity lands with a sensible upper limit
-// rather than an empty `mm/dd/yyyy` placeholder. Read fresh each time
-// the getter fires so a long-lived session crosses midnight cleanly.
+// Default "To" bound — local today, so /activity lands with a populated
+// upper limit. Read fresh each call so a long-lived session crosses
+// midnight cleanly.
 function todayDateString(): string {
   const d = new Date();
   const y = d.getFullYear();
@@ -137,14 +113,10 @@ const filterBeforeDate = computed<string | undefined>({
   set: (v) => setQueryParam('before', v),
 });
 
-// Period chip in the page title. Lights up when the URL's `?after=`
-// exactly matches one of the Dashboard commit-card shortcuts (7d, 30d,
-// or all-time = no `?after=`); the moment the user picks a custom
-// range, the match fails and the chip silently disappears. Colors
-// mirror the matching stat cards in Dashboard.vue:
-//   yellow-500 = Commits last 7 days
-//   green-500  = Commits last 30 days
-//   red-500    = Commits all-time
+// Period chip in the page title. Lights up when `?after=` exactly matches
+// a Dashboard commit-card shortcut (7d / 30d / all-time = no `?after=`);
+// a custom range fails the match and hides the chip. Colors mirror the
+// matching Dashboard stat cards (yellow 7d / green 30d / red all-time).
 const DAY_MS_LOCAL = 86_400_000;
 function localDateStringFor(d: Date): string {
   const y = d.getFullYear();
@@ -163,15 +135,11 @@ const rangePreset = computed<RangePreset>(() => {
 });
 
 // Title chips for the structural filters (actor / repo / project).
-// Snapshot the URL values at mount so the chips stick around for
-// filters that arrived from a deep link or a "See all activities →"
-// footer; the snapshot is burned (set to undefined) the moment the
-// user diverges from it via the dropdown. Burning rather than
-// equality-comparing means re-picking the original value later
-// doesn't resurrect the chip — once a filter is user-controlled, it
-// stays user-controlled for the rest of this mount. Time-range chip
-// uses preset-matching (yellow / green / red labels aren't tied to
-// any one user pick) and doesn't share this snapshot.
+// Snapshot the URL values at mount so chips stick around for filters that
+// arrived from a deep link / "See all activities →" footer. The snapshot is
+// burned (→ undefined) on first divergence; burning rather than equality-
+// comparing means re-picking the original value later won't resurrect the
+// chip. (The time-range chip uses preset-matching, not this snapshot.)
 interface InitialFilters {
   actor: string | undefined;
   repo: string | undefined;
@@ -179,10 +147,7 @@ interface InitialFilters {
 }
 const initialFilters = ref<InitialFilters>({ actor: undefined, repo: undefined, project: undefined });
 
-// Burn snapshots on first divergence. Watch covers all three axes in
-// one pass — the URL goes through `router.replace` so changes flow
-// through `route.query` deterministically and the watcher fires
-// before the chip computeds re-evaluate.
+// Burn snapshots on first divergence, all three axes in one watch.
 watch(
   () => [route.query.actor, route.query.repo, route.query.project] as const,
   ([nextActor, nextRepo, nextProject]) => {
@@ -201,9 +166,8 @@ watch(
   },
 );
 
-// Each chip carries both the rendered label AND the route target for
-// the detail page it represents, so the chip doubles as a quick-jump
-// link back to the surface that pre-applied the filter.
+// Each chip carries a label plus the route target, so it doubles as a
+// quick-jump link back to the detail page that pre-applied the filter.
 interface Chip {
   label: string;
   to: { name: string; params: Record<string, string | number> };
@@ -223,8 +187,6 @@ const chipActor = computed<Chip | undefined>(() => {
   const current = a === undefined ? undefined : `${a.kind}:${a.id}`;
   return chipFor(current, initialFilters.value.actor, (): Chip | undefined => {
     if (a === undefined) return undefined;
-    // Resolve the label from the full person-aware roster; link a person
-    // to /people/:id and a user to /users/:id.
     const m = members.members.find((x) => x.entityKind === a.kind && x.entityId === a.id);
     const to: Chip['to'] =
       a.kind === 'person' ? { name: 'person', params: { personId: a.id } } : { name: 'user', params: { userId: a.id } };
@@ -250,9 +212,8 @@ const chipProject = computed<Chip | undefined>(() =>
   ),
 );
 
-// Search input is auto-detected: a hex-only string (1–40 chars) → hash
-// mode, anything else → message mode. URL carries them in distinct keys
-// so reloading preserves the mode without re-detecting.
+// Search mode auto-detected: hex-only (1–40 chars) → hash, else message.
+// Stored under distinct URL keys so a reload preserves the mode.
 const filterHash = computed<string | undefined>({
   get: () => (typeof route.query.hash === 'string' ? route.query.hash : undefined),
   set: (v) => setQueryParam('hash', v),
@@ -262,8 +223,7 @@ const filterMessage = computed<string | undefined>({
   set: (v) => setQueryParam('message', v),
 });
 
-// Single text input the user sees. Hydrated from whichever URL key is
-// set (hash takes precedence if both are somehow set).
+// Hydrated from whichever URL key is set (hash wins if both are).
 const searchText = ref<string>(filterHash.value ?? filterMessage.value ?? '');
 
 const HEX_RE = /^[0-9a-f]+$/i;
@@ -274,17 +234,10 @@ const searchMode = computed<'hash' | 'message' | 'empty'>(() => {
   return 'message';
 });
 
-// Server-side bound — must match the zod min on /api/activity's
-// `message` query param. The backend rejects anything shorter with 400,
-// so we hold the request locally until the user types past the bound
-// (still mid-word from the user's perspective; the spinner gives the
-// affordance that we're "typing along" with them).
+// Must match the zod min on /api/activity's `message` param — the backend
+// 400s anything shorter, so hold the request until the user types past it.
 const MESSAGE_MIN_LEN = 2;
 
-// 300ms debounce — server-side FTS is fast but we still don't want to
-// fire a request per keystroke. The "loading" spinner badge inside the
-// input gives the user immediate feedback even before the debounce
-// fires.
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 watch(searchText, (next, prev) => {
   if (next === prev) return;
@@ -296,14 +249,10 @@ watch(searchText, (next, prev) => {
       return;
     }
     if (searchMode.value === 'hash') {
-      // Hash regex (1–40 hex) is the same on both sides — anything that
-      // got `searchMode === 'hash'` is also acceptable to the server.
       clearQueryParams(['message']);
       setQueryParam('hash', trimmed.toLowerCase());
     } else {
-      // Message search needs at least MESSAGE_MIN_LEN chars on the
-      // server side. Below that, drop any stale `message` from the URL
-      // and don't fire — the user is still typing the first word.
+      // Below MESSAGE_MIN_LEN, drop any stale `message` and don't fire.
       if (trimmed.length < MESSAGE_MIN_LEN) {
         clearQueryParams(['hash', 'message']);
         return;
@@ -314,11 +263,9 @@ watch(searchText, (next, prev) => {
   }, 300);
 });
 
-// `filterBeforeDate` always reads as today when the URL is bare (so the
-// `<input type="date">` lands populated), which means it can't drive
-// the "any filter active?" check on its own — that has to gate on the
-// URL key directly so the Clear button stays hidden in the default
-// state and re-appears only after the user explicitly picks a bound.
+// `filterBeforeDate` reads as today when the URL is bare, so it can't drive
+// the active check — gate on the `before` URL key directly, keeping Clear
+// hidden until the user explicitly picks a bound.
 const filtersActive = computed(
   () =>
     filterActor.value !== undefined ||
@@ -335,18 +282,11 @@ function clearFilters(): void {
   clearQueryParams(['actor', 'actorKind', 'repo', 'project', 'after', 'before', 'hash', 'message']);
 }
 
-// ---------------------------------------------------------------------------
-// Filter assembly + reload wiring
-// ---------------------------------------------------------------------------
-
 function isoFromDateInput(d: string, endOfDay: boolean): string | undefined {
-  // The URL can carry either YYYY-MM-DD (typed into the date inputs, or
-  // dropped in by the Dashboard's stat-card links) or a full ISO string
-  // (deep links pasted from elsewhere). Detect ISO by the presence of
-  // `T` and pass it through unchanged; otherwise interpret as a local-
-  // time date boundary. End-of-day rolls forward to start-of-next-day
-  // so the API's exclusive `before` cleanly excludes nothing within
-  // the chosen day.
+  // The URL may carry either YYYY-MM-DD or a full ISO string. ISO (has `T`)
+  // passes through unchanged; otherwise interpret as a local-time date
+  // boundary. End-of-day rolls forward to start-of-next-day so the API's
+  // exclusive `before` excludes nothing within the chosen day.
   if (d.includes('T')) {
     const parsed = new Date(d);
     return Number.isNaN(parsed.getTime()) ? undefined : parsed.toISOString();
@@ -372,9 +312,8 @@ const currentFilters = computed<ActivityPageFilters>(() => {
     const iso = isoFromDateInput(filterBeforeDate.value, true);
     if (iso !== undefined) f.before = iso;
   }
-  // Belt-and-suspenders bounds check — the backend's zod schema would
-  // reject these with 400 anyway, but deep-linking a malformed URL
-  // shouldn't surface a network error in the console.
+  // Re-validate before sending so a malformed deep-link URL doesn't surface
+  // a backend 400 as a console network error.
   if (filterHash.value !== undefined && /^[0-9a-f]{1,40}$/i.test(filterHash.value)) {
     f.hashPrefix = filterHash.value;
   }
@@ -409,13 +348,9 @@ function lastPage(): void {
   void store.last(currentFilters.value);
 }
 
-// ---------------------------------------------------------------------------
-// Heatmap data source — last 365 days, scoped only by project / repo /
-// user. The row list's date / hash / message filters intentionally do
-// NOT narrow it: the heatmap is contextual ("what does the year look
-// like for this slice?"), not a "what's on this page" mirror.
-// ---------------------------------------------------------------------------
-
+// Heatmap source — last 365 days, scoped only by project / repo / user.
+// The row list's date / hash / message filters intentionally do NOT narrow
+// it: the heatmap is contextual, not a mirror of the current page.
 const dailyData = ref<{ date: string; commits: number }[]>([]);
 
 const chartFiltersKey = computed(() =>
@@ -435,7 +370,7 @@ async function loadCharts(): Promise<void> {
     dailyData.value = await api.activityDaily(q);
   } catch {
     // Heatmap is supplementary — fall back to empty rather than blocking
-    // the page. The row list surfaces its own errors via `store.error`.
+    // the page (the row list surfaces its own errors).
     dailyData.value = [];
   }
 }
@@ -444,23 +379,13 @@ watch(chartFiltersKey, () => {
   void loadCharts();
 });
 
-// ---------------------------------------------------------------------------
-// Repository options for the repo dropdown — sorted by recent activity so
-// the most-relevant choices float to the top. Project + user dropdowns
-// pull from the same source as the Dashboard.
-// ---------------------------------------------------------------------------
-
 const projectOptions = computed<string[]>(() => {
   const set = new Set<string>();
   for (const r of stats.repositories) if (r.project !== null) set.add(r.project);
   return Array.from(set).sort();
 });
 
-// ---------------------------------------------------------------------------
-// Commit detail modal — shared with ActivityFeed semantics. Prev/Next
-// walk through commits within the currently loaded page.
-// ---------------------------------------------------------------------------
-
+// Commit detail modal. Prev/Next walk commits within the loaded page.
 const commitEntries = computed<ActivityCommit[]>(() =>
   store.entries.filter((e): e is ActivityCommit => e.kind === 'commit'),
 );
@@ -499,8 +424,7 @@ function nextCommit(): void {
       <Breadcrumb :items="[{ label: 'Commits', icon: GLYPHS.bolt }]" />
       <h1 class="mt-1 flex flex-wrap items-baseline gap-x-2 text-3xl font-bold tracking-tight text-slate-900">
         <span>Commits</span>
-        <!-- Time-range chip (preset-matched against the URL). Resets
-             automatically when the user picks a custom date. -->
+        <!-- Time-range chip — preset-matched against the URL. -->
         <span
           v-if="rangePreset === '7d'"
           class="text-base font-medium text-yellow-600"
@@ -522,12 +446,9 @@ function nextCommit(): void {
         >
           [All time]
         </span>
-        <!-- Structural-filter chips. Each one's gate is initial-vs-
-             current; touching the dropdown drifts the current value
-             away from the snapshot and the chip hides. Colours mirror
-             the matching Dashboard stat-card tones (blue / cyan /
-             fuchsia) for a quick visual link back to the landing
-             surface. -->
+        <!-- Structural-filter chips — gated on initial-vs-current, so
+             touching the dropdown hides them. Colours mirror the
+             Dashboard stat-card tones (blue / cyan / fuchsia). -->
         <RouterLink
           v-if="chipActor !== undefined"
           :to="chipActor.to"
@@ -556,24 +477,16 @@ function nextCommit(): void {
       <p class="mt-1 text-sm text-slate-500">Every commit and pull request across the workspace, freshest first.</p>
     </header>
 
-    <!-- Year-grid heatmap above the filter row. Reflects the last 365
-         days scoped only by project / repo / user — date range / hash /
-         message filters on the row list don't narrow it, which keeps
-         the chart readable as the user searches. -->
+    <!-- Year heatmap — scoped only by project / repo / user; the row
+         list's date / hash / message filters don't narrow it. -->
     <section class="mb-6">
       <h2 class="mb-3 text-xs font-medium uppercase tracking-wider text-slate-500">Activity — last 365 days</h2>
       <CommitHeatmap :data="dailyData" />
     </section>
 
-    <!-- Filter row. Search input on the left, dropdowns + date range on
-         the right. Hidden helper text under the input tells the user
-         what mode (hash / message) we auto-detected. -->
     <section class="mb-3 space-y-2">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="relative">
-          <!-- Magnifying-glass affordance anchored inside the input on
-               the left. The loading spinner takes the matching slot on
-               the right when `store.loading` is true. -->
           <svg
             class="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400"
             xmlns="http://www.w3.org/2000/svg"
@@ -599,10 +512,6 @@ function nextCommit(): void {
             class="w-96 rounded-md border border-slate-200 bg-white py-2 pl-9 pr-10 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400"
             :aria-label="searchMode === 'hash' ? 'Search by commit hash' : 'Search commit messages and PR titles'"
           />
-          <!-- Loading spinner badge — replaces the right padding when a
-               search-driven request is in flight. Stays visible while
-               `store.loading` is true regardless of what triggered the
-               fetch (page change, dropdown filter, search). -->
           <span
             v-if="store.loading"
             class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2"
@@ -623,10 +532,7 @@ function nextCommit(): void {
             </svg>
           </span>
         </div>
-        <!-- Top pagination — mirrors the bottom footer's button set so
-             the user has identical controls whether they're skimming
-             the head of the list or just landed on the page. Wraps to
-             a new row when the viewport gets narrow. -->
+        <!-- Top pagination — mirrors the bottom footer's button set. -->
         <div class="flex flex-wrap items-center gap-3 text-xs text-slate-500">
           <span>
             Page {{ store.page }} of {{ store.pageCount }} ·

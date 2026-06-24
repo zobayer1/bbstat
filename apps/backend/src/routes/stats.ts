@@ -5,10 +5,8 @@ import { createNoopUserSummaryCache, type UserSummaryCache } from '../dashboard/
 
 export interface StatsRouteOptions {
   statsStore: StatsStore;
-  // Optional. When wired (production), GET /users/:id/summary hits Redis
-  // first and writes through on miss. When absent (tests that don't care
-  // about caching), the route reads/writes against an internal noop cache
-  // so the handler body stays uniform.
+  // When absent, the route falls back to a noop cache so the handler body
+  // stays uniform.
   userSummaryCache?: UserSummaryCache<UserSummary>;
 }
 
@@ -32,11 +30,8 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
     },
   );
 
-  // Members route — no window parameter. Every row carries both 7d
-  // and 30d aggregates (commits + distinct repos) plus all-time
-  // totals, so the table can render `{commits} ({repos})` per
-  // window without a query-string toggle. Any ?window= the client
-  // sends is ignored.
+  // Every row carries both 7d and 30d aggregates plus all-time totals, so the
+  // table renders all windows without a query-string toggle.
   app.get('/members', async () => {
     return opts.statsStore.listWorkspaceMembers();
   });
@@ -70,12 +65,11 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
     return summary;
   });
 
-  // Phase 5 — Person detail read. Not Redis-cached (yet): the three
-  // aggregate pulls are cheap at the current scale and merges are rare,
-  // so a read-through cache would add an invalidation surface (every
-  // person.* admin mutation would need to DEL it) for little gain. If
-  // person pages get hot, mirror the user-summary cache pattern here
-  // and DEL from refreshAfterPersonMutation in routes/admin.ts.
+  // Not Redis-cached: aggregate pulls are cheap at current scale and a
+  // read-through cache would add an invalidation surface (every person.* admin
+  // mutation would need to DEL it) for little gain. If person pages get hot,
+  // mirror the user-summary cache and DEL from refreshAfterPersonMutation in
+  // routes/admin.ts.
   app.get<{ Params: { personId: string } }>('/people/:personId/summary', async (request, reply) => {
     const parsed = userIdSchema.safeParse(request.params.personId);
     if (!parsed.success) {
@@ -106,12 +100,8 @@ export const statsRoutes: FastifyPluginAsync<StatsRouteOptions> = async (app, op
     return opts.statsStore.listTrackedRepositoriesWithStats();
   });
 
-  // Per-repo contributor breakdown feeding the Projects page sunburst.
-  // Caps are server-side so a runaway client can't pull every (repo,
-  // user) pair; defaults match what the chart renders cleanly. The
-  // optional `project` filter scopes the breakdown to a single
-  // project — used by the project-detail page to render the same
-  // chart over just that project's repos.
+  // Per-repo contributor breakdown feeding the Projects page sunburst. Caps
+  // are server-side so a runaway client can't pull every (repo, user) pair.
   app.get<{
     Querystring: { windowDays?: string; topRepos?: string; topPerRepo?: string; project?: string };
   }>('/repo-contributors', async (request, reply) => {

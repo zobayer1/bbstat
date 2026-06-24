@@ -20,16 +20,11 @@ const USER_SUMMARY_PREFIX = `${KEY_PREFIX}user-summary:`;
 const BITBUCKET_AUTH_STATE_KEY = `${KEY_PREFIX}bitbucket-auth-state`;
 const REPO_DISCOVERY_CURSOR_KEY = `${KEY_PREFIX}repo-discovery-cursor`;
 
-// Subtle dashboard signal: when BitBucket returns 401/403 (token expired,
-// scopes revoked, or repo access pulled), the `BitbucketClient` fires its
-// `onAuthStateChange` hook and we flip this flag. The next successful 2xx
-// clears it. The dashboard reads this (via SSE event + a one-shot REST
-// fetch on mount) and colors the `!!` glyph red while set. No TTL —
-// presence is the signal; absence (key missing) means healthy.
-//
-// Stored as a plain string `"unauthorized"` rather than a sub-keyed hash
-// so a curious operator can `redis-cli GET bbstat:bitbucket-auth-state`
-// and see the state at a glance.
+// BB credential-health flag. On 401/403 the `BitbucketClient` hook flips this;
+// the next 2xx clears it. The dashboard reads it (SSE + one-shot REST on
+// mount) and colors the `!!` glyph red while set. No TTL — presence is the
+// signal, absence means healthy. Plain string (not a hash) so an operator can
+// `redis-cli GET bbstat:bitbucket-auth-state` at a glance.
 export const bitbucketAuthStateCache = {
   key: BITBUCKET_AUTH_STATE_KEY,
   async get(cache: CacheClient): Promise<'ok' | 'unauthorized'> {
@@ -44,14 +39,12 @@ export const bitbucketAuthStateCache = {
   },
 };
 
-// Workspace-repo discovery cursor: the `updated_on` of the newest repo the
-// discovery sweep (src/sync/repo-discovery.ts) has processed. The sweep walks
+// Discovery cursor: `updated_on` of the newest repo the discovery sweep
+// (src/sync/repo-discovery.ts) has processed. The sweep walks
 // GET /repositories/{ws} ordered by updated_on ASC with `updated_on > <this>`,
-// so it advances monotonically — backfilling the inactive tail first, then
-// following newly updated / created repos. No TTL: the cursor must survive
-// restarts (losing it just re-walks from the seed, which is idempotent but
-// wasteful). Stored as the raw ISO string so an operator can inspect it via
-// `redis-cli GET bbstat:repo-discovery-cursor`.
+// advancing monotonically. No TTL: must survive restarts (losing it re-walks
+// from the seed — idempotent but wasteful). Raw ISO string for operator
+// inspection.
 export const repoDiscoveryCursorCache = {
   key: REPO_DISCOVERY_CURSOR_KEY,
   async get(cache: CacheClient): Promise<string | null> {

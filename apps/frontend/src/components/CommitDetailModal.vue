@@ -1,17 +1,10 @@
 <script setup lang="ts">
-// Modal opened from the activity feed when an operator clicks a commit's
-// title / sha. Shows the full commit message (the feed truncates to the
-// subject line), author, stats, and an external link to the
-// BitBucket commit page. Prev/next buttons walk through commits within
-// the currently-loaded feed entries; PR entries are skipped by the
-// parent so this modal only sees commits.
+// Commit detail modal opened from the activity feed. Shows the full message
+// (the feed truncates to the subject line), author, stats, and a BitBucket
+// link. Prev/next walk through commits in the loaded feed.
 //
-// Keyboard:
-//   Esc        — close
-//   Left/←     — previous (when enabled)
-//   Right/→    — next (when enabled)
-//
-// Closes on overlay click and on the explicit X button.
+// Keyboard: Esc closes, ←/→ navigate (when enabled). Also closes on overlay
+// click and the X button.
 
 import { computed, onMounted, onUnmounted } from 'vue';
 import { RouterLink } from 'vue-router';
@@ -113,12 +106,9 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </span>
           <span v-else class="italic">anonymous</span>
           <span>{{ formattedTime }}</span>
-          <!-- Diff stats unavailable: BB returned HTTP 555 (compute timeout)
-               too many times for this commit's /diffstat. Show an amber
-               warning glyph + tooltip rather than misleading "0 / 0 / 0
-               files" — the numbers are nominally accurate but read as "no
-               change" which is wrong for what's usually a very heavy
-               commit. -->
+          <!-- Diff stats gave up after repeated BB HTTP 555 (compute timeout).
+               Show an amber warning rather than "0 / 0 / 0 files", which reads
+               as "no change" — wrong for what's usually a very heavy commit. -->
           <span
             v-if="commit.diffStatsUnavailable"
             class="inline-flex cursor-help items-center gap-1 text-amber-600 hover:text-amber-700"

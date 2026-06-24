@@ -1,21 +1,12 @@
-// Storage interface for the `commit_daily` rollup. Mirrors the
-// commit-store / discovery-store pattern: domain code (sync hook, future
-// admin re-aggregate trigger) depends on the interface so tests can inject
-// a fake without spinning up Postgres.
+// Storage interface for the `commit_daily` rollup, and its sole writer.
 //
-// Sole writer to commit_daily: this module. The sync runner calls
-// `recomputeCommitDailyForRepo` once per repo per tick (after commits land),
-// scoped to the touched day range. The recompute is authoritative-for-the-
-// window: DELETE every (day, repo, *) row in `[sinceDay, untilDay]`, then
-// INSERT the freshly aggregated GROUP BY result, both inside one
-// transaction. The earlier "INSERT … ON CONFLICT DO UPDATE only" path
-// assumed an inserts-only commits table — that broke once we allowed
-// `author_user_id` to transition NULL → known on re-sync (BB linking a
-// workspace member to a previously anonymous commit). After such a
-// transition the GROUP BY no longer produces a (day, repo, NULL) row,
-// so an UPSERT-only recompute would leave the stale anonymous row in
-// place and double-count the day. The DELETE pass fixes that, at the
-// cost of one extra index scan per repo per tick.
+// `recomputeCommitDailyForRepo` is authoritative-for-the-window: DELETE every
+// (day, repo, *) row in `[sinceDay, untilDay]`, then INSERT the freshly
+// aggregated GROUP BY result, in one transaction. The earlier UPSERT-only path
+// broke once `author_user_id` could transition NULL→known on re-sync: the
+// GROUP BY then no longer produces a (day, repo, NULL) row, so UPSERT-only
+// would leave the stale anonymous row in place and double-count the day. The
+// DELETE pass fixes that, at one extra index scan per repo per tick.
 
 import { sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
@@ -32,45 +23,30 @@ export interface RecomputeResult {
 }
 
 export interface RollupStore {
-  // Re-aggregate `commit_daily` for the given repo across `[sinceDay, untilDay]`.
-  // Pulls the latest counts from `commits`, UPSERTs into `commit_daily` keyed
-  // on (day, repo, author_user_id). Idempotent; safe to call with a wider
-  // range than strictly necessary.
+  // Idempotent; safe to call with a wider range than strictly necessary.
   recomputeCommitDailyForRepo(repositoryId: number, range: DayRange): Promise<RecomputeResult>;
 
-  // Distinct non-null `author_user_id` values for commits in `[sinceDay, untilDay]`
-  // on the given repo. Used by the cache-invalidation hook so we only DEL
-  // Redis entries for users whose summaries actually changed.
+  // Distinct non-null author user IDs in the range — drives cache invalidation
+  // so we only DEL Redis entries for users whose summaries actually changed.
   listAffectedUserIdsForRepo(repositoryId: number, range: DayRange): Promise<number[]>;
 
-  // Full unscoped UPSERT — re-aggregates every (day, repo, user) bucket from
-  // `commits` and writes through to `commit_daily`. Operator escape hatch for
-  // drift; invoked via `make rebuild-rollups`. Does NOT prune orphan rollup
-  // rows whose backing commits were deleted out-of-band; the FK cascade from
-  // `repositories` covers repo removals, leaving only manual `DELETE FROM
-  // commits …` as an unhandled edge.
+  // Full unscoped UPSERT — operator escape hatch for drift, via
+  // `make rebuild-rollups`. Does NOT prune orphan rollup rows whose backing
+  // commits were deleted out-of-band; the FK cascade from `repositories`
+  // covers repo removals, leaving only manual `DELETE FROM commits` unhandled.
   rebuildAll(): Promise<RecomputeResult>;
 }
 
 export function createDrizzleRollupStore(db: Database): RollupStore {
   return {
     async recomputeCommitDailyForRepo(repositoryId, { sinceDay, untilDay }) {
-      // Authoritative rebuild for `[sinceDay, untilDay]`: DELETE the
-      // window, then INSERT the freshly aggregated GROUP BY result.
-      // Both statements run in one transaction so dashboard reads
-      // never see the intermediate "window deleted but not yet
-      // rebuilt" state. The NULLS NOT DISTINCT constraint on
-      // `commit_daily_day_repo_user_unique` collapses anonymous-author
-      // commits to a single (day, repo, NULL) row, same as before.
+      // DELETE the window then INSERT, in one transaction so reads never see
+      // the intermediate "deleted but not yet rebuilt" state.
       //
-      // Merge-commit split: `commit_count` and `additions` / `deletions`
-      // exclude merges (FILTER WHERE NOT is_merge) — user-level
-      // aggregates that read straight from commit_daily (Members
-      // table, top-contributors panel, etc.) should never see merge
-      // churn double-attributed to the click-the-merge-button author.
-      // `merge_commit_count` is the merge counterpart for repo-level
-      // activity displays that DO want to surface "this repo got a
-      // merge today". See schema.ts comment on commit_daily.
+      // Merge-commit split: commit_count / additions / deletions exclude merges
+      // (FILTER WHERE NOT is_merge) so user-level aggregates don't double-
+      // attribute merge churn to the merge author; merge_commit_count is the
+      // counterpart for repo-level displays. See schema.ts on commit_daily.
       return await db.transaction(async (tx) => {
         await tx.execute(sql`
           DELETE FROM commit_daily

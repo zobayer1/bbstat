@@ -3,13 +3,11 @@ import { computed } from 'vue';
 import type { RepoSyncStatus } from '@/api/client';
 
 const props = defineProps<{
-  // Optional, not required. Older cached payloads (pre-syncStatus) won't
-  // carry the field; treating undefined as 'never' lets stale Pinia state
-  // render without crashing. The next backend fetch refreshes it.
+  // Older cached payloads (pre-syncStatus) lack the field; treating undefined
+  // as 'never' lets stale Pinia state render without crashing.
   status: RepoSyncStatus | undefined;
-  // When true (the repo is archived/retired), the icon renders neutral
-  // regardless of `status` — a retired repo never reads as "needs
-  // attention", even if its frozen last-sync status was error/excluded.
+  // Archived repos render neutral regardless of `status` — a retired repo
+  // never reads as "needs attention" even if its frozen status was error.
   archived?: boolean;
 }>();
 
@@ -18,18 +16,15 @@ type Shape = 'check' | 'warn' | 'dash';
 const META: Record<RepoSyncStatus, { label: string; tone: string; shape: Shape }> = {
   ok: { label: 'Synced', tone: 'text-emerald-600', shape: 'check' },
   error: { label: 'Sync error', tone: 'text-amber-600', shape: 'warn' },
-  // Same triangle shape as 'error' but red — the underlying cause is
-  // durable (rename / force-push) and the recovery is a specific admin
-  // action, not a wait-and-retry.
+  // Red (vs amber 'error') — cause is durable (rename / force-push) and needs
+  // a specific admin action, not a wait-and-retry.
   excluded: { label: 'Excluded from sync — needs attention', tone: 'text-red-600', shape: 'warn' },
   never: { label: 'Not synced yet', tone: 'text-slate-400', shape: 'dash' },
-  // Benign: empty on BitBucket, nothing to sync. Neutral dash (not a
-  // warning) so it doesn't read as a problem needing attention.
+  // Benign — empty on BitBucket. Neutral dash so it doesn't read as a problem.
   empty: { label: 'Empty on BitBucket — nothing to sync', tone: 'text-slate-400', shape: 'dash' },
 };
 
-// Archived repos are paused, not broken — show a neutral dash, never a
-// warning triangle, whatever the frozen sync status underneath is.
+// Archived repos are paused, not broken — always a neutral dash.
 const ARCHIVED_META: { label: string; tone: string; shape: Shape } = {
   label: 'Archived — sync paused',
   tone: 'text-slate-400',
@@ -74,10 +69,8 @@ const meta = computed(() => (props.archived ? ARCHIVED_META : META[props.status 
       <path d="M8 7v3" />
       <circle cx="8" cy="12" r="0.6" fill="currentColor" stroke="none" />
     </svg>
-    <!-- 'dash' shape — a literal horizontal dash, visually unambiguous
-         against the check (✓) and the warn triangle. The previous
-         hollow-circle rendering of this state read too similarly to the
-         warn triangle's stroked outline at 14×14 px. -->
+    <!-- A literal horizontal dash, not the old hollow circle — at 14×14 px the
+         circle read too similarly to the warn triangle's stroked outline. -->
     <svg
       v-else
       viewBox="0 0 16 16"

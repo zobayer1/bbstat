@@ -1,31 +1,19 @@
-// Per-repository PR sync. Walks /repositories/{ws}/{slug}/pullrequests
-// sorted newest-first by updated_on, stops at the cursor (delta mode) or at
-// a configurable cap (cold mode), resolves authors, and bulk-upserts via
-// PrStore.upsertPullRequests. The runner / cron / admin trigger that
-// invokes this lives in runner.ts; the tick orchestrator in pr-tick.ts.
+// Per-repository PR sync. Walks /pullrequests newest-first by updated_on,
+// stops at the cursor (delta) or a cap (cold), resolves authors, and
+// bulk-upserts via PrStore.upsertPullRequests (DO UPDATE, so PR state
+// mutations land and re-runs converge).
 //
-// Idempotency:
-//   * upsertPullRequests handles repeat (repo_id, bb_pr_id) conflicts with
-//     DO UPDATE — PR state mutates (OPEN → MERGED, comment churn), so we
-//     refresh the mutable columns rather than skipping. Re-runs converge.
-//   * Two concurrent ticks for the same repo are safe but wasteful;
-//     bounded concurrency lives in the tick orchestrator.
-//
-// Delta-cursor stop condition is strictly `updated_on < cursor`. PRs sharing
-// the cursor's exact second will re-flow through the upsert path — the
-// UPDATE is cheap and idempotent. Storing `last_pr_id` alongside is purely
-// advisory for ops debugging; it does NOT participate in the stop check
-// since BB's per-second ordering between same-updated_on PRs is not
+// Delta-cursor stop is strictly `updated_on < cursor`. PRs sharing the
+// cursor's exact second re-flow through the idempotent upsert.
+// `last_pr_id` is stored for ops debugging only — it does NOT participate in
+// the stop check, since BB's ordering between same-updated_on PRs isn't
 // documented as stable.
 //
 // Modes:
-//   * 'cold'     — first run for a repo (last_pr_updated_at is null). Capped
-//                  by firstRunMaxPages so a fresh tracked repo doesn't drain
-//                  the API budget on bootstrap.
-//   * 'delta'    — last_pr_updated_at is set. Walks newest-first until
-//                  updated_on < cursor. Idle repo costs one call.
-//   * 'no-state' — sync_state row missing. Caller should bootstrap it via
-//                  insertRepositoryWithSyncState before invoking us.
+//   * 'cold'     — first run (last_pr_updated_at null). Capped by
+//                  firstRunMaxPages so bootstrap doesn't drain the budget.
+//   * 'delta'    — cursor set. Walks until updated_on < cursor. Idle = 1 call.
+//   * 'no-state' — sync_state row missing; caller should bootstrap it first.
 
 import type { BitbucketClient, BitbucketLogger } from '../bitbucket/client.js';
 import { paginatePullRequests, type BitbucketPullRequest } from '../bitbucket/pull-requests.js';
@@ -33,8 +21,8 @@ import type { RepositoryHandle } from './commits.js';
 import type { PrStore, PullRequestInsertInput } from './pr-store.js';
 
 export interface PrSyncOptions {
-  // First-run cap: stop the initial backfill after this many pages of 100
-  // PRs. No effect on delta runs (they always stop at the cursor).
+  // First-run cap: stop the initial backfill after this many pages. No
+  // effect on delta runs (they always stop at the cursor).
   firstRunMaxPages?: number;
 }
 
@@ -151,9 +139,8 @@ async function pullPullRequests(
   opts: PrSyncOptions,
 ): Promise<PullResult> {
   const isCold = lastPrUpdatedAt === null;
-  // BB Cloud caps `/pullrequests` pagelen at 50 (see paginatePullRequests).
-  // Cold-mode cap is `pages * 50 PRs` to keep the per-page count honest —
-  // operators get exactly `PR_BACKFILL_MAX_PAGES` BB pages on first sync.
+  // BB Cloud caps `/pullrequests` pagelen at 50, so the cold cap is
+  // `pages * 50` to match exactly PR_BACKFILL_MAX_PAGES BB pages.
   const maxItems = opts.firstRunMaxPages !== undefined ? opts.firstRunMaxPages * 50 : undefined;
   const cursorMs = lastPrUpdatedAt?.getTime();
 

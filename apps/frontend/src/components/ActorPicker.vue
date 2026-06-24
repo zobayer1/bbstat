@@ -1,13 +1,8 @@
 <script setup lang="ts">
-// Phase 5 — shared activity-actor picker. A searchable combobox backed
-// by the Members store (the full person-aware roster: merged persons +
-// unattached users, persisted in Pinia and rarely changing). Shows the
-// top-N entities by default; typing fuzzy-searches the whole roster so a
-// contributor outside the top-N is still reachable. Emits an
-// ActivityActor — selecting a person filters the activity feed across
-// all its aliases (resolved server-side). Used by the Dashboard,
-// Activity, Projects, Project-detail, and Repo-detail actor filters in
-// place of the old per-page <select> dropdowns.
+// Shared activity-actor picker: a searchable combobox backed by the Members
+// store (person-aware roster, persisted in Pinia). Shows the top-N by default;
+// typing fuzzy-searches the whole roster. Emits an ActivityActor — selecting a
+// person filters the feed across all its aliases (resolved server-side).
 import { computed, onMounted, ref, watch } from 'vue';
 import Fuse from 'fuse.js';
 import { useMembersStore } from '@/stores/members';
@@ -22,27 +17,22 @@ const emit = defineEmits<{ 'update:modelValue': [value: ActivityActor | undefine
 
 const members = useMembersStore();
 onMounted(() => {
-  // The roster rarely changes and is persisted, so this is usually a
-  // no-op; fetch only when the store is cold (deep-linked into a page
-  // that didn't already hydrate it).
+  // Roster is persisted, so usually a no-op; fetch only when cold (deep-link
+  // into a page that didn't already hydrate it).
   if (members.members.length === 0) void members.fetch();
 });
 
 const TOP_N = 10;
-// `query` is the literal text in the input. It doubles as the display
-// value: when a selection is active and the user isn't mid-edit it holds
-// the selected entity's name (real, editable text — not a placeholder),
-// and while searching it holds whatever they've typed.
+// `query` is the input text and doubles as the display value: it holds the
+// selected entity's name when idle, or whatever's being typed while searching.
 const query = ref('');
 const open = ref(false);
 const focused = ref(false);
 
-// Tighter than the Members-page table search (which is 0.4): a dropdown
-// surfaces fewer rows, so loose matches read as noise (`Zob` shouldn't
-// rank Apu / Sazibul). Lower threshold + minMatchCharLength prunes the
-// long tail; weighting displayName above username and email far above
-// it keeps a name query from being outranked by an incidental
-// email-substring hit.
+// Tighter threshold than the Members-page table (0.4): a dropdown surfaces
+// fewer rows, so loose matches read as noise. Weighting displayName above
+// username, and email far below, keeps a name query from being outranked by
+// an incidental email-substring hit.
 const fuse = computed(
   () =>
     new Fuse(members.members, {
@@ -50,9 +40,8 @@ const fuse = computed(
         { name: 'displayName', weight: 3 },
         { name: 'username', weight: 1 },
         { name: 'email', weight: 0.3 },
-        // Every linked alias's name/username/email so a merged person is
-        // findable by a non-primary account too (low weight — the
-        // displayed identity should still rank first).
+        // Aliases so a merged person is findable by a non-primary account too
+        // (low weight — the displayed identity should still rank first).
         { name: 'aliasSearch', weight: 0.5 },
       ],
       threshold: 0.3,
@@ -61,9 +50,9 @@ const fuse = computed(
     }),
 );
 
-// Label for the current selection — resolved from the roster so a person
-// shows its canonical display name. Falls back if the roster hasn't
-// loaded yet or the entity dropped out (e.g. dissolved while selected).
+// Resolved from the roster so a person shows its canonical display name.
+// Falls back if the roster is cold or the entity dropped out (e.g. dissolved
+// while selected).
 const selectedLabel = computed(() => {
   const v = props.modelValue;
   if (v === undefined) return '';
@@ -71,9 +60,8 @@ const selectedLabel = computed(() => {
   return m?.displayName ?? `${v.kind} #${v.id}`;
 });
 
-// Mirror the selection into the input whenever it changes externally
-// (initial deep-link, URL navigation, roster finishing its async load).
-// Skip while the user is mid-edit so we don't clobber their typing.
+// Mirror external selection changes (deep-link, URL nav, async roster load)
+// into the input. Skip while focused so we don't clobber mid-edit typing.
 watch(
   selectedLabel,
   (label) => {
@@ -84,10 +72,9 @@ watch(
 
 const options = computed<WorkspaceMember[]>(() => {
   const q = query.value.trim();
-  // Empty box → browse the top-N. Otherwise always fuzzy-match the
-  // current text, including when it still holds the selected name — so
-  // clicking into a filled box filters consistently with editing it
-  // (no top-N-vs-fuzzy split between click and the first backspace).
+  // Empty box → browse the top-N. Otherwise always fuzzy-match the current
+  // text (even when it still holds the selected name), so clicking into a
+  // filled box filters consistently with editing it.
   if (q.length === 0) return members.members.slice(0, TOP_N);
   return fuse.value
     .search(q)
@@ -97,8 +84,7 @@ const options = computed<WorkspaceMember[]>(() => {
 
 function select(m: WorkspaceMember): void {
   emit('update:modelValue', { kind: m.entityKind, id: m.entityId });
-  // Show the picked name immediately (the watcher is skipped while the
-  // input still holds focus after a mousedown-select).
+  // Show the picked name immediately — the watcher is skipped while focused.
   query.value = m.displayName;
   open.value = false;
 }
@@ -115,8 +101,7 @@ function onBlur(): void {
   blurTimer = setTimeout(() => {
     focused.value = false;
     open.value = false;
-    // Revert a half-typed, unselected search back to the current
-    // selection so the box never shows orphan text.
+    // Revert a half-typed, unselected search so the box never shows orphan text.
     query.value = selectedLabel.value;
   }, 120);
 }
@@ -125,8 +110,7 @@ function onFocus(): void {
   focused.value = true;
   open.value = true;
 }
-// Clicking an already-focused input doesn't refire @focus, so open here
-// too — this is the case the user hit (re-click → dropdown didn't show).
+// Clicking an already-focused input doesn't refire @focus, so reopen here.
 function onClick(): void {
   open.value = true;
 }
@@ -134,9 +118,8 @@ function onClick(): void {
 
 <template>
   <div class="relative inline-block">
-    <!-- No inline clear button by design — the dropdown's "All
-         contributors" row resets the filter, and the surrounding pages
-         carry their own Clear control. -->
+    <!-- No inline clear button by design — the dropdown's "All contributors"
+         row resets the filter, and pages carry their own Clear control. -->
     <input
       :id="id"
       v-model="query"
