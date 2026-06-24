@@ -9,6 +9,74 @@ release gets a section.
 
 Nothing queued yet.
 
+## [1.5.2] — 2026-06-24
+
+Backend fix for a tracked repo going dark when it was empty at discovery
+time. A repo added with zero commits — e.g. one created moments before its
+first push — was auto-excluded by the very next deepen-backfill tick
+(`sync_excluded = true, reason = 'empty-on-bitbucket'`) and stayed excluded
+even after it gained commits, since the sync set filters on
+`sync_excluded = false`. Recovery required an operator to run
+`POST /api/admin/sync/revive-empty`. A configurable grace period now keeps
+freshly-tracked empty repos in active sync long enough to catch their first
+commit on their own. **Backend-only — no schema migration, no
+`CACHE_VERSION` bump, no Redis change.** Ship the backend image only.
+
+### Fixed
+
+- **New empty repos no longer get excluded in the gap before their first
+  push.** The empty-on-bitbucket auto-exclusion in the deepen-backfill tick
+  now honors a grace window anchored on `repositories.created_at` (when we
+  first tracked the repo). While a still-empty repo is younger than the
+  window it is left untouched — **not excluded, `deepen_complete` stays
+  false** — so the commit-sync tick keeps probing each cron firing and
+  ingests the first commit on its own, without operator intervention. The
+  grace is a delay, not a reprieve: a repo that ages past the window while
+  still empty is excluded exactly as before. The explicit admin
+  force-deepen path (`POST /sync/repositories/:ws/:slug/deepen`) carries no
+  `created_at` and excludes immediately, behavior unchanged.
+
+### Added
+
+- **`SYNC_EMPTY_GRACE_HOURS`** (default `24`) — the grace window above, in
+  hours. Set to `0` to restore the old immediate-exclusion behavior. Reuses
+  the existing `repositories.created_at` column threaded into the deepen
+  candidate query, so there is no schema change.
+
+### Operator notes — deploy runbook (1.5.1 → 1.5.2)
+
+Backend image rebuild (the sync runner changed). **No schema migration, no
+Redis clear, no frontend rebuild** — `CACHE_VERSION` is unchanged, so keep
+the 1.5.1 frontend image. `SYNC_EMPTY_GRACE_HOURS` is optional; the default
+of 24h applies if you don't set it.
+
+1. **Build + ship the backend image** (build host) — backend-only:
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.5.2 docker compose build backend
+   docker save -o bbstat-backend-v1.5.2.tar bbstat-backend:v1.5.2
+   scp bbstat-backend-v1.5.2.tar compose.yaml prod:/opt/bbstat/
+   ```
+2. **Load + pin** (prod) — backend / sync / migrate / mcp share the one image:
+   ```bash
+   docker load -i bbstat-backend-v1.5.2.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.5.2
+   export FRONTEND_IMAGE=bbstat-frontend:v1.5.1   # unchanged — keep the 1.5.1 SPA
+   ```
+3. **(Optional) tune the grace window** — only if 24h isn't what you want;
+   add to `.env.docker` (or your deploy env):
+   ```bash
+   SYNC_EMPTY_GRACE_HOURS=24
+   ```
+4. **Roll out:**
+   ```bash
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml logs migrate   # no new migration in 1.5.2 — no-op
+   ```
+5. **No data action required.** No schema change, no rollup rebuild, no
+   Redis clear. Any repos already excluded as `empty-on-bitbucket` before
+   this deploy stay excluded — the grace period is preventive, not
+   retroactive; revive those once with `POST /api/admin/sync/revive-empty`.
+
 ## [1.5.1] — 2026-06-13
 
 Frontend-only UX polish. The static "← Dashboard" back-link on every
@@ -671,7 +739,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.1...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/tigerit/bbstat/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tigerit/bbstat/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/tigerit/bbstat/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/tigerit/bbstat/compare/v1.4.0...v1.4.1

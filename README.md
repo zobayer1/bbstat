@@ -85,22 +85,22 @@ Five ways to run the stack — local without containers (HTTP or HTTPS), full lo
 
 ```bash
 # 1. Build + tag with a real version (on the build machine, with the repo)
-BACKEND_IMAGE=bbstat-backend:v1.5.1 FRONTEND_IMAGE=bbstat-frontend:v1.5.1 make build-images
+BACKEND_IMAGE=bbstat-backend:v1.5.2 FRONTEND_IMAGE=bbstat-frontend:v1.5.2 make build-images
 
 # 2. Save to portable tarballs
-docker save -o bbstat-v1.5.1.tar bbstat-backend:v1.5.1 bbstat-frontend:v1.5.1
+docker save -o bbstat-v1.5.2.tar bbstat-backend:v1.5.2 bbstat-frontend:v1.5.2
 
 # 3. Transfer images + compose.yaml + .env.docker (no secrets in it) to prod.
 #    compose.override.yaml is deliberately NOT shipped.
-scp bbstat-v1.5.1.tar compose.yaml .env.docker prod:/opt/bbstat/
+scp bbstat-v1.5.2.tar compose.yaml .env.docker prod:/opt/bbstat/
 
 # 4. On the production host: load images
-docker load -i bbstat-v1.5.1.tar
+docker load -i bbstat-v1.5.2.tar
 
 # 5. Write a one-shot deploy.env with the secrets, source it, delete it.
 cat > deploy.env <<'EOF'
-export BACKEND_IMAGE=bbstat-backend:v1.5.1
-export FRONTEND_IMAGE=bbstat-frontend:v1.5.1
+export BACKEND_IMAGE=bbstat-backend:v1.5.2
+export FRONTEND_IMAGE=bbstat-frontend:v1.5.2
 export DATABASE_URL=postgres://user:PASS@db-host:5432/bbstat
 export REDIS_URL=redis://redis-host:6379
 export BITBUCKET_AUTH_EMAIL=you@example.com
@@ -276,6 +276,7 @@ Full notes in [`CHANGELOG.md`](CHANGELOG.md). Untagged work-in-progress lives on
 
 | Version | Date       | Headline                                                                                                                                                                                                            |
 | ------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.5.2   | 2026-06-24 | Backend fix — new empty repos get a grace period (`SYNC_EMPTY_GRACE_HOURS`, default 24h) before the `empty-on-bitbucket` auto-exclusion, so a repo added just before its first push no longer goes dark             |
 | 1.5.1   | 2026-06-13 | Frontend UX — icon breadcrumbs replace the static back-link (home › section › `[id]`; Activity page retitled **Commits**); empty repos now listed in the Repositories **Issues** tab                                |
 | 1.5.0   | 2026-06-09 | Read-only **MCP server** for LLM agents — 11 tools over the dashboard read API (streamable-HTTP, bearer-gated), shipped as a new `mcp` role on the backend image + compose service (see [docs/mcp.md](docs/mcp.md)) |
 | 1.4.1   | 2026-06-09 | Hotfix — cold (never-synced) repos from a discovery sweep no longer starve the active sync rotation; warm repos served first, cold first-syncs capped per tick (`SYNC_MAX_COLD_REPOS_PER_TICK`)                     |
