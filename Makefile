@@ -11,6 +11,16 @@ PNPM := pnpm
 BACKEND := --filter @bbstat/backend
 FRONTEND := --filter @bbstat/frontend
 
+# Image names for build-images / export-images. Override via the environment
+# (the same vars compose reads); defaults mirror compose.yaml's `:latest`.
+BACKEND_IMAGE ?= bbstat-backend:latest
+FRONTEND_IMAGE ?= bbstat-frontend:latest
+
+# Release tag used to name the exported image tarball. Read from git: the exact
+# tag when HEAD is tagged, else `<tag>-<n>-g<sha>`, plus `-dirty` for an unclean
+# tree. Override explicitly with `make export-images RELEASE=v1.2.3`.
+RELEASE ?= $(shell git describe --tags --always --dirty 2>/dev/null)
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -84,6 +94,12 @@ logs-traefik: ## Tail logs for the dev Traefik container
 .PHONY: build-images
 build-images: ## Build backend + frontend Docker images
 	$(COMPOSE) build backend frontend
+
+.PHONY: export-images
+export-images: ## Save backend + frontend images to bbstat-<RELEASE>.tar (RELEASE from git)
+	@test -n "$(RELEASE)" || { echo "RELEASE is empty (not a git checkout?) — pass RELEASE=<tag> explicitly" >&2; exit 1; }
+	docker save -o bbstat-$(RELEASE).tar $(BACKEND_IMAGE) $(FRONTEND_IMAGE)
+	@echo "→ Wrote bbstat-$(RELEASE).tar ($(BACKEND_IMAGE), $(FRONTEND_IMAGE))"
 
 .PHONY: stack-migrate
 stack-migrate: ## Run the one-shot Drizzle migrator against the stack's postgres
