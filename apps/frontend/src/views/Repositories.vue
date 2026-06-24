@@ -220,8 +220,13 @@ const filtered = computed<TrackedRepositorySummary[]>(() => {
     if (statusScope === 'active' && (r.syncStatus !== 'ok' || r.archived)) return false;
     // Issues tab surfaces repos that aren't cleanly syncing: error / excluded
     // (red/amber, need attention) plus empty (benign gray — listed so empty
-    // tracked repos are easy to find and triage / archive).
-    if (statusScope === 'issues' && r.syncStatus !== 'error' && r.syncStatus !== 'excluded' && r.syncStatus !== 'empty')
+    // tracked repos are easy to find and triage / archive). Archived repos are
+    // excluded here regardless of their flags — they live in the Archived tab,
+    // which retains their issue icon — so an archived repo isn't double-listed.
+    if (
+      statusScope === 'issues' &&
+      (r.archived || (r.syncStatus !== 'error' && r.syncStatus !== 'excluded' && r.syncStatus !== 'empty'))
+    )
       return false;
     if (statusScope === 'archived' && !r.archived) return false;
     if (q !== '') {
