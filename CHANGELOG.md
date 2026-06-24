@@ -9,6 +9,69 @@ release gets a section.
 
 Nothing queued yet.
 
+## [1.5.3] — 2026-06-24
+
+Frontend bug-fix plus release tooling and an internal cleanup. Archived
+repositories no longer leak into the Repositories **Issues** tab — they live
+only in the **Archived** tab, where they keep their issue icon. Also adds a
+`make export-images` helper for the deploy flow and a sweep that trims trivial
+source comments. **Frontend-only behavior change — no schema, no
+`CACHE_VERSION`, no Redis change, no backend behavior change.** Ship the
+frontend image only.
+
+### Fixed
+
+- **Archived repos no longer appear in the Repositories "Issues" tab.** An
+  archived repo carrying an issue flag (empty / error / excluded) was listed in
+  both Issues and the dedicated Archived tab. Archiving now removes a repo from
+  Issues regardless of its flags — it shows only under Archived, which still
+  renders its issue icon (the row's status icon reflects the frozen
+  `syncStatus`, not the archived-neutral state). Mirrors the Active tab's
+  existing `|| archived` guard. Frontend-only computed-filter change.
+
+### Build
+
+- **`make export-images`** — saves the backend + frontend images to
+  `bbstat-<RELEASE>.tar`, the `docker save` step the production runbook
+  previously spelled out by hand. `RELEASE` is read from git
+  (`git describe --tags --always --dirty`): the exact tag on a tagged release,
+  else `<tag>-<n>-g<sha>` (`-dirty` for an unclean tree); override with
+  `make export-images RELEASE=v1.2.3`. Image names come from `BACKEND_IMAGE` /
+  `FRONTEND_IMAGE`, the same env vars `build-images` relies on.
+
+### Internal
+
+- **Source-comment cleanup.** Pruned trivial and excessive inline comments
+  across the backend and frontend source trees (~2.9k net lines), keeping the
+  high-value "why" (invariants, race/idempotency guards, cache and budget
+  reasoning, scoring formulae, the `CACHE_VERSION` bust protocol). Comment-only
+  — no code, test, or runtime change; verified by the full typecheck + test
+  suite.
+
+### Operator notes — deploy runbook (1.5.2 → 1.5.3)
+
+Frontend-only — rebuild + ship the **frontend** image; the backend image is
+behaviorally unchanged (its only diff since 1.5.2 is comment removal), so keep
+`v1.5.2`. **No schema migration, no Redis clear, no `CACHE_VERSION` bump** — the
+SPA's Vite-hashed bundles cache-bust themselves on the next load.
+
+1. **Build + ship the frontend image** (build host):
+   ```bash
+   FRONTEND_IMAGE=bbstat-frontend:v1.5.3 docker compose build frontend
+   docker save -o bbstat-frontend-v1.5.3.tar bbstat-frontend:v1.5.3
+   scp bbstat-frontend-v1.5.3.tar prod:/opt/bbstat/
+   ```
+2. **Load + pin** (prod):
+   ```bash
+   docker load -i bbstat-frontend-v1.5.3.tar
+   export FRONTEND_IMAGE=bbstat-frontend:v1.5.3
+   export BACKEND_IMAGE=bbstat-backend:v1.5.2   # unchanged
+   ```
+3. **Roll out** (your usual two-file invocation; only the frontend recreates):
+   ```bash
+   docker compose -f compose.yaml up -d
+   ```
+
 ## [1.5.2] — 2026-06-24
 
 Backend fix for a tracked repo going dark when it was empty at discovery
@@ -739,7 +802,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.2...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.3...HEAD
+[1.5.3]: https://github.com/tigerit/bbstat/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/tigerit/bbstat/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tigerit/bbstat/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/tigerit/bbstat/compare/v1.4.1...v1.5.0
