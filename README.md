@@ -85,23 +85,23 @@ Five ways to run the stack — local without containers (HTTP or HTTPS), full lo
 
 ```bash
 # 1. Build + tag with a real version (on the build machine, with the repo)
-BACKEND_IMAGE=bbstat-backend:v1.5.3 FRONTEND_IMAGE=bbstat-frontend:v1.5.3 make build-images
+BACKEND_IMAGE=bbstat-backend:v1.6.0 FRONTEND_IMAGE=bbstat-frontend:v1.6.0 make build-images
 
 # 2. Save both images to one portable tarball — named from the git release tag
-#    (on the v1.5.3 tag → bbstat-v1.5.3.tar; pass RELEASE=v1.5.3 to override).
+#    (on the v1.6.0 tag → bbstat-v1.6.0.tar; pass RELEASE=v1.6.0 to override).
 make export-images
 
 # 3. Transfer images + compose.yaml + .env.docker (no secrets in it) to prod.
 #    compose.override.yaml is deliberately NOT shipped.
-scp bbstat-v1.5.3.tar compose.yaml .env.docker prod:/opt/bbstat/
+scp bbstat-v1.6.0.tar compose.yaml .env.docker prod:/opt/bbstat/
 
 # 4. On the production host: load images
-docker load -i bbstat-v1.5.3.tar
+docker load -i bbstat-v1.6.0.tar
 
 # 5. Write a one-shot deploy.env with the secrets, source it, delete it.
 cat > deploy.env <<'EOF'
-export BACKEND_IMAGE=bbstat-backend:v1.5.3
-export FRONTEND_IMAGE=bbstat-frontend:v1.5.3
+export BACKEND_IMAGE=bbstat-backend:v1.6.0
+export FRONTEND_IMAGE=bbstat-frontend:v1.6.0
 export DATABASE_URL=postgres://user:PASS@db-host:5432/bbstat
 export REDIS_URL=redis://redis-host:6379
 export BITBUCKET_AUTH_EMAIL=you@example.com
@@ -277,6 +277,7 @@ Full notes in [`CHANGELOG.md`](CHANGELOG.md). Untagged work-in-progress lives on
 
 | Version | Date       | Headline                                                                                                                                                                                                            |
 | ------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.6.0   | 2026-07-12 | Members membership model — server-computed `membershipStatus` (member / departed / external) drives the `/members` labels, filters, styling **and** the leaderboard filter; operator override + `ORG_EMAIL_DOMAINS` |
 | 1.5.3   | 2026-06-24 | Frontend fix — archived repos no longer appear in the Repositories **Issues** tab (they stay in **Archived**, keeping their issue icon); plus a `make export-images` release helper and a source-comment cleanup    |
 | 1.5.2   | 2026-06-24 | Backend fix — new empty repos get a grace period (`SYNC_EMPTY_GRACE_HOURS`, default 24h) before the `empty-on-bitbucket` auto-exclusion, so a repo added just before its first push no longer goes dark             |
 | 1.5.1   | 2026-06-13 | Frontend UX — icon breadcrumbs replace the static back-link (home › section › `[id]`; Activity page retitled **Commits**); empty repos now listed in the Repositories **Issues** tab                                |

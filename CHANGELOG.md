@@ -9,6 +9,91 @@ release gets a section.
 
 Nothing queued yet.
 
+## [1.6.0] — 2026-07-12
+
+Members roster + leaderboards gain a real membership model. Every roster entity
+now carries a server-computed **`membershipStatus`** — `member`, `departed`, or
+`external` — that drives the `/members` labels, filters, styling **and** the
+leaderboard filter from one source of truth, replacing the earlier reliance on
+the raw `is_workspace_member` flag (which undercounted real members and let
+departed / external contributors rank). Ex-members and outside contributors are
+demoted from the rankings; operators get an explicit override for the cases no
+heuristic can resolve. **Schema migration, new backend env var, `CACHE_VERSION`
+22 → 23. Ship both images.**
+
+### Added
+
+- **Departure reconciliation in member sync.** `syncWorkspaceMembers` now flips
+  `is_workspace_member` **false** for accounts that dropped out of the BitBucket
+  `/workspaces/{ws}/members` roster since the last pull (they left the org),
+  guarded so an empty/failed roster fetch never mass-demotes. Rejoin
+  re-promotes via the existing upsert.
+- **Three-way membership classification** (`membershipStatus`), precedence:
+  operator override → `is_workspace_member` → merged person → member-roster
+  history (`username`) → org email domain → external. Emitted per entity and
+  used identically by the leaderboard filter, so labels and rankings never
+  diverge.
+- **`ORG_EMAIL_DOMAINS`** (backend config, default `tigerit.com`) — a
+  contributor at an org domain counts as a member even when their commit
+  account isn't in the roster (the common unflagged-colleague case). Empty
+  disables the heuristic.
+- **Operator override** — `users.membership_override` (tri-state) forces a
+  user's status when no signal can: a departed ex-employee whose org email reads
+  as `member` (→ force `departed`), or a colleague on a personal email that
+  reads as `external` (→ force `member`). `POST /api/admin/users/:id/override`
+  `{status}` and `POST /api/admin/users/:id/override/clear`. Separate from
+  `is_workspace_member`, so departure reconciliation never clears it.
+- **`/members` filter tabs** — All / Active / Departed / External (deep-linked
+  via `?status`), count tiles split three ways, and Departed / External row
+  pills.
+
+### Changed
+
+- **Leaderboards rank members only.** Top Contributors, project- and
+  repo-contributor lists filter to `membershipStatus='member'`; departed and
+  external are excluded (they still appear on `/members` under their tabs).
+- **Muting + red email now key off `membershipStatus`, not the raw flag.** A
+  member always renders full-strength — even when dormant — and its email is
+  never red; only `departed` / `external` rows are muted with a red email. Fixes
+  active-but-unflagged members (org-email or merged) reading as non-members.
+
+### Operator notes — deploy runbook (1.5.3 → 1.6.0)
+
+Both images rebuild (backend classification + frontend roster). **Runs a schema
+migration** (`membership_override` column + `leaderboard_entries` view
+recreation) and **bumps `CACHE_VERSION` to 23** (browsers self-bust stale
+`WorkspaceMember` on next load). **No Redis clear** — no `UserSummary` shape
+change.
+
+1. **Build + ship both images** (build host):
+   ```bash
+   BACKEND_IMAGE=bbstat-backend:v1.6.0 FRONTEND_IMAGE=bbstat-frontend:v1.6.0 make build-images
+   make export-images RELEASE=v1.6.0          # → bbstat-v1.6.0.tar
+   scp bbstat-v1.6.0.tar compose.yaml .env.docker prod:/opt/bbstat/
+   ```
+2. **Load + pin** (prod) — backend / sync / migrate / mcp share the one image:
+   ```bash
+   docker load -i bbstat-v1.6.0.tar
+   export BACKEND_IMAGE=bbstat-backend:v1.6.0
+   export FRONTEND_IMAGE=bbstat-frontend:v1.6.0
+   ```
+3. **Set the org email domain(s)** — add to `.env.docker` (containerized stack)
+   and, for the host workflow, `.env`. Optional but recommended; defaults to
+   `tigerit.com` if unset:
+   ```bash
+   ORG_EMAIL_DOMAINS=tigerit.com          # comma-separated, e.g. tigerit.com,tigeritbd.com
+   ```
+4. **Roll out** — the `migrate` one-shot gates backend/sync and applies the
+   migration:
+   ```bash
+   docker compose -f compose.yaml up -d
+   docker compose -f compose.yaml logs migrate   # applies 0005_add_membership_override
+   ```
+5. **Curate after deploy** (optional, ongoing) — mark any departed org-email
+   accounts still reading as `member`, e.g.
+   `POST /api/admin/users/:id/override {"status":"departed"}`; clear with
+   `/override/clear`.
+
 ## [1.5.3] — 2026-06-24
 
 Frontend bug-fix plus release tooling and an internal cleanup. Archived
@@ -802,7 +887,8 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase-by-phase landed summary
 (Phases 0–4 + follow-ups) and git history prior to `v1.0.0` for the full
 commit set.
 
-[unreleased]: https://github.com/tigerit/bbstat/compare/v1.5.3...HEAD
+[unreleased]: https://github.com/tigerit/bbstat/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/tigerit/bbstat/compare/v1.5.3...v1.6.0
 [1.5.3]: https://github.com/tigerit/bbstat/compare/v1.5.2...v1.5.3
 [1.5.2]: https://github.com/tigerit/bbstat/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tigerit/bbstat/compare/v1.5.0...v1.5.1
