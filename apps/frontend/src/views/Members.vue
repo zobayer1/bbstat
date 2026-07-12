@@ -69,14 +69,31 @@ function localDateString(d: Date): string {
 }
 const activitySinceThirtyDays = computed(() => localDateString(new Date(Date.now() - 30 * DAY_MS)));
 
-// Membership-status partition of the full roster (not activity-windowed;
-// these describe roster shape). `otherContributorCount` covers everyone
-// whose BB UUID isn't in the workspace `/members` set at sync time —
-// ex-employees, externals, AND current members committing from a separate
-// BB account. "Other Contributors" is the umbrella label that doesn't
-// overclaim about any subgroup.
-const workspaceMemberCount = computed<number>(() => store.members.filter((m) => m.isWorkspaceMember).length);
-const otherContributorCount = computed<number>(() => store.members.filter((m) => !m.isWorkspaceMember).length);
+// Membership provenance is computed server-side (single source of truth shared
+// with the leaderboard filter — see WorkspaceMember.membershipStatus in the
+// backend). The frontend just reads it: 'member' (flagged, overridden, merged
+// person, or org-email), 'departed' (was in the roster, since gone), or
+// 'external' (outside contributor). An operator forces any status via
+// POST /admin/users/:id/override.
+type MemberStatus = WorkspaceMember['membershipStatus'];
+function memberStatus(m: WorkspaceMember): MemberStatus {
+  return m.membershipStatus;
+}
+
+// Muting reflects MEMBERSHIP only — a member always renders full-strength, even
+// when dormant, so an active-but-quiet member (e.g. a merged person whose last
+// commit predates the 90d window) never looks like a non-member. Only departed
+// and external rows are muted; dormancy still shows via "Last active" + a low
+// momentum/consistency.
+function isMuted(m: WorkspaceMember): boolean {
+  return m.membershipStatus !== 'member';
+}
+
+const workspaceMemberCount = computed<number>(
+  () => store.members.filter((m) => m.membershipStatus === 'member').length,
+);
+const departedCount = computed<number>(() => store.members.filter((m) => m.membershipStatus === 'departed').length);
+const externalCount = computed<number>(() => store.members.filter((m) => m.membershipStatus === 'external').length);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -110,6 +127,25 @@ function toggleSort(key: SortKey): void {
 
 const search = ref('');
 
+// Roster segment, deep-linked via `?status` (mirrors the Repositories table's
+// status filter). `active` = current workspace members; `departed` = ex-members
+// (were in the roster, now gone); `external` = never-members (fork imports).
+// `all` keeps everyone but ranks member → departed → external (see `sorted`).
+type StatusFilter = 'all' | 'active' | 'departed' | 'external';
+const statusFilter = computed<StatusFilter>({
+  get: () => {
+    const v = route.query.status;
+    return v === 'active' || v === 'departed' || v === 'external' ? v : 'all';
+  },
+  set: (v) => {
+    const next = { ...route.query };
+    if (v === 'all') delete next.status;
+    else next.status = v;
+    void router.replace({ query: next });
+    page.value = 1;
+  },
+});
+
 const showMethodologyModal = ref(false);
 
 // Fuzzy search tuned to match the ActorPicker so the two behave identically:
@@ -134,16 +170,34 @@ const fuse = computed(
 );
 
 const filtered = computed<WorkspaceMember[]>(() => {
+  const status = statusFilter.value;
+  const wanted: MemberStatus | null =
+    status === 'active' ? 'member' : status === 'departed' ? 'departed' : status === 'external' ? 'external' : null;
+  const scoped = wanted === null ? store.members : store.members.filter((m) => memberStatus(m) === wanted);
   const q = search.value.trim();
-  if (q === '') return store.members;
-  return fuse.value.search(q).map((r) => r.item);
+  if (q === '') return scoped;
+  // Fuse indexes the full roster, so intersect its hits with the status scope
+  // (same object refs → identity Set works).
+  const allowed = new Set(scoped);
+  return fuse.value
+    .search(q)
+    .map((r) => r.item)
+    .filter((m) => allowed.has(m));
 });
 
 const sorted = computed<WorkspaceMember[]>(() => {
   const list = filtered.value.slice();
   const dir = sortDir.value === 'asc' ? 1 : -1;
   const key = sortKey.value;
+  // Membership tier is the primary key, regardless of column or direction:
+  // active members first, then departed ex-members, then never-member
+  // externals. Within a tier the chosen column decides.
+  const tier = (m: WorkspaceMember): number =>
+    m.membershipStatus === 'member' ? 0 : m.membershipStatus === 'departed' ? 1 : 2;
   list.sort((a, b) => {
+    const ta = tier(a);
+    const tb = tier(b);
+    if (ta !== tb) return ta - tb;
     if (key === 'displayName') {
       return a.displayName.localeCompare(b.displayName) * dir;
     }
@@ -295,16 +349,21 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           Tracked Members
           <span class="text-slate-400">({{ store.members.length }})</span>
         </h2>
-        <!-- Membership-status partition. Other Contributors (muted) =
-             ex-employees, externals, and members on a separate BB account. -->
-        <div class="mb-4 grid grid-cols-2 divide-x divide-slate-200 text-center">
+        <!-- Membership-status partition. Departed = ex-members (were in the
+             roster, now gone); External = never-members (fork imports). Both
+             are muted and excluded from the leaderboards. -->
+        <div class="mb-4 grid grid-cols-3 divide-x divide-slate-200 text-center">
           <div>
             <p class="text-2xl font-semibold tabular-nums text-slate-900">{{ workspaceMemberCount }}</p>
-            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">Workspace Members</p>
+            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">Members</p>
           </div>
           <div>
-            <p class="text-2xl font-semibold tabular-nums text-slate-400">{{ otherContributorCount }}</p>
-            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">Other Contributors</p>
+            <p class="text-2xl font-semibold tabular-nums text-amber-600">{{ departedCount }}</p>
+            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">Departed</p>
+          </div>
+          <div>
+            <p class="text-2xl font-semibold tabular-nums text-slate-400">{{ externalCount }}</p>
+            <p class="mt-0.5 text-[11px] uppercase tracking-wider text-slate-500">External</p>
           </div>
         </div>
         <div class="flex flex-1 items-center justify-center">
@@ -356,6 +415,54 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
             class="w-80 rounded-md border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-400"
             aria-label="Search workspace members"
           />
+        </div>
+        <!-- Roster segment. Active = current members; Departed = everyone no
+             longer in the workspace roster (muted). "All" keeps both, with
+             departed sorted below active. Counts are whole-roster, matching
+             the tiles above. -->
+        <div
+          class="inline-flex shrink-0 overflow-hidden rounded-md border border-slate-200 text-xs"
+          role="group"
+          aria-label="Membership status filter"
+        >
+          <button
+            type="button"
+            class="cursor-pointer px-3 py-2 transition"
+            :class="statusFilter === 'all' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'"
+            @click="statusFilter = 'all'"
+          >
+            All
+          </button>
+          <button
+            type="button"
+            class="cursor-pointer border-l border-slate-200 px-3 py-2 transition"
+            :class="
+              statusFilter === 'active' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+            "
+            @click="statusFilter = 'active'"
+          >
+            Active <span class="tabular-nums opacity-70">({{ workspaceMemberCount }})</span>
+          </button>
+          <button
+            type="button"
+            class="cursor-pointer border-l border-slate-200 px-3 py-2 transition"
+            :class="
+              statusFilter === 'departed' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+            "
+            @click="statusFilter = 'departed'"
+          >
+            Departed <span class="tabular-nums opacity-70">({{ departedCount }})</span>
+          </button>
+          <button
+            type="button"
+            class="cursor-pointer border-l border-slate-200 px-3 py-2 transition"
+            :class="
+              statusFilter === 'external' ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 hover:bg-slate-100'
+            "
+            @click="statusFilter = 'external'"
+          >
+            External <span class="tabular-nums opacity-70">({{ externalCount }})</span>
+          </button>
         </div>
       </div>
       <div class="flex items-center gap-3 text-xs text-slate-500">
@@ -437,15 +544,23 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-100">
-          <!-- Two independent row signals: dormant (`isDormant`, no
-               activity in 90d) grays the whole row; non-workspace-member
-               (`!isWorkspaceMember`) reddens the email. They're orthogonal
-               and can coexist. -->
+          <!-- Row muting is a single signal (`isMuted`): every non-member row
+               (departed OR external) is muted consistently, plus dormant active
+               members. Departed vs external is carried by the status pill next
+               to the name and the red email — orthogonal to muting. -->
           <tr
             v-for="m in paged"
             :key="`${m.entityKind}:${m.entityId}`"
-            :class="['hover:bg-slate-50', m.isDormant ? 'bg-slate-50/40 text-slate-400 opacity-70' : '']"
-            :title="m.isDormant ? 'Dormant — no eligible activity in the last 90 days' : ''"
+            :class="['hover:bg-slate-50', isMuted(m) ? 'bg-slate-50/40 text-slate-400 opacity-70' : '']"
+            :title="
+              memberStatus(m) === 'external'
+                ? 'External contributor — never in the workspace member list'
+                : memberStatus(m) === 'departed'
+                  ? 'Departed — no longer in the workspace member list'
+                  : m.isDormant
+                    ? 'Dormant — no eligible activity in the last 90 days'
+                    : ''
+            "
           >
             <td class="px-2 py-2 text-center align-middle">
               <BadgeIcon :badge="m.badge" :tier="m.badgeTier" />
@@ -461,7 +576,7 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                 "
                 :class="[
                   'flex items-center gap-1.5 font-medium hover:text-slate-600',
-                  m.isDormant ? 'text-slate-500' : 'text-slate-900',
+                  isMuted(m) ? 'text-slate-500' : 'text-slate-900',
                 ]"
               >
                 <span class="min-w-0 truncate" :title="m.displayName">{{ m.displayName }}</span>
@@ -472,17 +587,39 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
                 >
                   ×{{ m.attachedUserIds.length }}
                 </span>
+                <!-- Membership provenance pill — the consistent departed-vs-
+                     external marker, independent of dormancy. -->
+                <span
+                  v-if="memberStatus(m) === 'departed'"
+                  class="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
+                  title="Was a workspace member — since departed"
+                >
+                  Departed
+                </span>
+                <span
+                  v-else-if="memberStatus(m) === 'external'"
+                  class="shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600"
+                  title="Never a workspace member (fork import / external contributor)"
+                >
+                  External
+                </span>
               </RouterLink>
-              <!-- Git-author email (parsed at ingest). Muted when the BB
-                   account is in the workspace member list, RED when not.
-                   Hidden when null. -->
+              <!-- Git-author email (parsed at ingest). Muted for members, RED
+                   for non-members (departed or external) — keyed off the same
+                   membershipStatus as the pills/muting so the row reads
+                   consistently (an org-email member is NOT red). Hidden when null. -->
               <div
                 v-if="m.email"
-                :class="['mt-0.5 truncate text-xs', m.isWorkspaceMember ? 'text-slate-400' : 'text-red-600']"
+                :class="[
+                  'mt-0.5 truncate text-xs',
+                  m.membershipStatus === 'member' ? 'text-slate-400' : 'text-red-600',
+                ]"
                 :title="
-                  m.isWorkspaceMember
+                  memberStatus(m) === 'member'
                     ? m.email
-                    : `${m.email} — not in workspace member list (ex-employee, external, or separate BB account)`
+                    : memberStatus(m) === 'departed'
+                      ? `${m.email} — departed member (no longer in the workspace roster)`
+                      : `${m.email} — external contributor (never a workspace member)`
                 "
               >
                 {{ m.email }}
@@ -491,10 +628,10 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
             <td class="px-4 py-2">
               <Sparkline :points="m.last30Days" :width="96" :height="18" class="mx-auto block text-slate-400" />
             </td>
-            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-400' : 'text-slate-900'">
+            <td class="px-4 py-2 text-center tabular-nums" :class="isMuted(m) ? 'text-slate-400' : 'text-slate-900'">
               {{ formatMomentum(m.scoreTrending) }}
             </td>
-            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-400' : 'text-slate-700'">
+            <td class="px-4 py-2 text-center tabular-nums" :class="isMuted(m) ? 'text-slate-400' : 'text-slate-700'">
               {{ formatConsistency(m.consistency90d) }}
             </td>
             <td class="px-4 py-2 text-center text-slate-500" :title="m.lastActiveAt ?? ''">
@@ -502,11 +639,11 @@ const lorenzValues = computed(() => store.members.map((m) => m.commits30d));
             </td>
             <!-- Per-window: commit count + distinct-repo count in parens
                  (muted) as supplementary breadth context. -->
-            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-500' : 'text-slate-900'">
+            <td class="px-4 py-2 text-center tabular-nums" :class="isMuted(m) ? 'text-slate-500' : 'text-slate-900'">
               {{ m.commits7d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos7d }})</span>
             </td>
-            <td class="px-4 py-2 text-center tabular-nums" :class="m.isDormant ? 'text-slate-500' : 'text-slate-900'">
+            <td class="px-4 py-2 text-center tabular-nums" :class="isMuted(m) ? 'text-slate-500' : 'text-slate-900'">
               {{ m.commits30d }}
               <span class="ml-1 text-xs font-normal text-slate-400">({{ m.repos30d }})</span>
             </td>

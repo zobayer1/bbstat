@@ -19,6 +19,7 @@ import type { DiscoveryStore, RepositoryInsertInput, RepositoryRow, UserUpsertIn
 
 interface FakeStoreState {
   users: Map<string, UserUpsertInput>; // by bitbucketUuid
+  members: Set<string>; // bitbucketUuids currently is_workspace_member = true
   repositories: Map<string, RepositoryRow>; // by fullName
   syncStateRepoIds: Set<number>;
   nextRepoId: number;
@@ -27,6 +28,7 @@ interface FakeStoreState {
 function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
   const state: FakeStoreState = {
     users: new Map(),
+    members: new Set(),
     repositories: new Map(),
     syncStateRepoIds: new Set(),
     nextRepoId: 1,
@@ -36,7 +38,17 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
     async upsertUser(input) {
       const wasNew = !state.users.has(input.bitbucketUuid);
       state.users.set(input.bitbucketUuid, input);
+      // Mirror the real store: every member-sync upsert forces membership TRUE
+      // (this is the rejoin-flip seam).
+      state.members.add(input.bitbucketUuid);
       return { inserted: wasNew };
+    },
+    async markDepartedMembers(seenUuids) {
+      if (seenUuids.length === 0) return 0;
+      const seen = new Set(seenUuids);
+      const toDemote = [...state.members].filter((uuid) => !seen.has(uuid));
+      for (const uuid of toDemote) state.members.delete(uuid);
+      return toDemote.length;
     },
     async findRepositoryByFullName(fullName) {
       return state.repositories.get(fullName) ?? null;
@@ -269,7 +281,7 @@ describe('syncWorkspaceMembers', () => {
 
     const result = await syncWorkspaceMembers(deps, 'tigerit');
 
-    expect(result).toEqual({ total: 3, inserted: 3, updated: 0 });
+    expect(result).toEqual({ total: 3, inserted: 3, updated: 0, departed: 0 });
     expect(state.users.size).toBe(3);
     expect(state.users.get('{u2}')).toEqual({
       bitbucketUuid: '{u2}',
@@ -291,7 +303,70 @@ describe('syncWorkspaceMembers', () => {
 
     const result = await syncWorkspaceMembers(deps, 'tigerit');
 
-    expect(result).toEqual({ total: 1, inserted: 0, updated: 1 });
+    expect(result).toEqual({ total: 1, inserted: 0, updated: 1, departed: 0 });
+  });
+
+  it('demotes members who fell out of the roster (departed) and keeps their row', async () => {
+    // Prior roster had u1 + u2; this pull returns only u1 → u2 departed.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        pagelen: 100,
+        values: [{ user: { uuid: '{u1}', display_name: 'Alice', nickname: 'alice' } }],
+      }),
+    );
+    const { store, state } = createFakeStore();
+    await store.upsertUser({ bitbucketUuid: '{u1}', displayName: 'Alice', username: 'alice' });
+    await store.upsertUser({ bitbucketUuid: '{u2}', displayName: 'Bob', username: 'bob' });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await syncWorkspaceMembers(deps, 'tigerit');
+
+    expect(result).toEqual({ total: 1, inserted: 0, updated: 1, departed: 1 });
+    // Row is retained (history intact) — only the membership flag flips off.
+    expect(state.users.has('{u2}')).toBe(true);
+    expect(state.members.has('{u2}')).toBe(false);
+    expect(state.members.has('{u1}')).toBe(true);
+  });
+
+  it('re-promotes a returning member (rejoin flips the flag back)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ pagelen: 100, values: [] })) // u1 departs
+      .mockResolvedValueOnce(
+        jsonResponse({
+          pagelen: 100,
+          values: [{ user: { uuid: '{u1}', display_name: 'Alice', nickname: 'alice' } }],
+        }),
+      );
+    const { store, state } = createFakeStore();
+    await store.upsertUser({ bitbucketUuid: '{u1}', displayName: 'Alice', username: 'alice' });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    // Empty pull → guarded, no demotion (see the empty-roster guard test).
+    await syncWorkspaceMembers(deps, 'tigerit');
+    expect(state.members.has('{u1}')).toBe(true);
+
+    // Manually depart u1 to set up the rejoin, then a non-empty pull returns them.
+    await store.markDepartedMembers(['{other}']);
+    expect(state.members.has('{u1}')).toBe(false);
+    const rejoin = await syncWorkspaceMembers(deps, 'tigerit');
+
+    expect(rejoin.departed).toBe(0);
+    expect(state.members.has('{u1}')).toBe(true);
+  });
+
+  it('skips departure reconciliation on an empty roster pull (never mass-demotes)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ pagelen: 100, values: [] }));
+    const { store, state } = createFakeStore();
+    await store.upsertUser({ bitbucketUuid: '{u1}', displayName: 'Alice', username: 'alice' });
+    await store.upsertUser({ bitbucketUuid: '{u2}', displayName: 'Bob', username: 'bob' });
+    const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
+
+    const result = await syncWorkspaceMembers(deps, 'tigerit');
+
+    expect(result).toEqual({ total: 0, inserted: 0, updated: 0, departed: 0 });
+    // Both members survive — an empty pull is a failed fetch, not an exodus.
+    expect(state.members.has('{u1}')).toBe(true);
+    expect(state.members.has('{u2}')).toBe(true);
   });
 
   it('requests field-filtered values and includes `next`', async () => {

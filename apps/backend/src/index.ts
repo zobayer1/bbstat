@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   // are always wired. BB creds are optional — without them, admin / sync
   // routes are absent but the rest of the app still starts.
   const db = createDb(config.DATABASE_URL);
-  const statsStore = createDrizzleStatsStore(db);
+  const statsStore = createDrizzleStatsStore(db, { orgEmailDomains: config.ORG_EMAIL_DOMAINS });
   // Shared Redis client: backs the user-summary cache and the live-events
   // Redis bridge (so the API process receives events published by the
   // separate cron host process).

@@ -32,6 +32,7 @@ const testConfig: AppConfig = {
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
+  ORG_EMAIL_DOMAINS: [],
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
   BITBUCKET_MIN_CALL_INTERVAL_MS: 0,
   BITBUCKET_MAX_CALL_INTERVAL_MS: 0,
@@ -436,6 +437,10 @@ function createFakeStore(): { store: DiscoveryStore; state: FakeStoreState } {
       state.users.set(input.bitbucketUuid, input);
       return { inserted: wasNew };
     },
+    async markDepartedMembers() {
+      // Admin tests don't exercise member-roster reconciliation.
+      return 0;
+    },
     async findRepositoryByFullName(fullName) {
       return state.repositories.get(fullName) ?? null;
     },
@@ -628,7 +633,7 @@ describe('admin routes', () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.trigger).toBe('manual');
-      expect(body.members).toEqual({ total: 2, inserted: 2, updated: 0 });
+      expect(body.members).toEqual({ total: 2, inserted: 2, updated: 0, departed: 0 });
       expect(body.repos).toEqual({
         requested: 1,
         inserted: 1,
@@ -2449,6 +2454,7 @@ describe('admin routes', () => {
         detach: vi.fn(),
         setPrimary: vi.fn(),
         dissolve: vi.fn(),
+        setMembershipOverride: vi.fn(),
       };
     }
 
@@ -2514,6 +2520,88 @@ describe('admin routes', () => {
       expect(post.statusCode).toBe(503);
       const del = await appInstance.inject({ method: 'DELETE', url: '/api/admin/people/1' });
       expect(del.statusCode).toBe(503);
+    });
+
+    describe('POST /api/admin/users/:id/override and /override/clear', () => {
+      it('503s when peopleStore is not wired', async () => {
+        const { deps } = makeSyncDeps(vi.fn());
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/users/1/override',
+          payload: { status: 'departed' },
+        });
+        expect(res.statusCode).toBe(503);
+        expect(res.json()).toMatchObject({ error: 'people_store_not_wired' });
+      });
+
+      it('400s on an invalid status', async () => {
+        const setup = makePeopleSyncDeps();
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/users/42/override',
+          payload: { status: 'bogus' },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(setup.peopleStore.setMembershipOverride).not.toHaveBeenCalled();
+      });
+
+      it('400s on a non-numeric user id', async () => {
+        const setup = makePeopleSyncDeps();
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/users/abc/override',
+          payload: { status: 'departed' },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(setup.peopleStore.setMembershipOverride).not.toHaveBeenCalled();
+      });
+
+      it('override forces the status, returns 200, and invalidates the summary', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.setMembershipOverride.mockResolvedValue({ userId: 42, membershipOverride: 'departed' });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/users/42/override',
+          payload: { status: 'departed' },
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ userId: 42, membershipOverride: 'departed' });
+        expect(setup.peopleStore.setMembershipOverride).toHaveBeenCalledWith(42, 'departed');
+        expect(setup.invalidates).toEqual([42]);
+      });
+
+      it('override/clear resets to auto (null)', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.setMembershipOverride.mockResolvedValue({ userId: 42, membershipOverride: null });
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({ method: 'POST', url: '/api/admin/users/42/override/clear' });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ userId: 42, membershipOverride: null });
+        expect(setup.peopleStore.setMembershipOverride).toHaveBeenCalledWith(42, null);
+      });
+
+      it('404s when the user does not exist', async () => {
+        const setup = makePeopleSyncDeps();
+        setup.peopleStore.setMembershipOverride.mockRejectedValue(new UserNotFoundError(999));
+        appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: setup.deps });
+
+        const res = await appInstance.inject({
+          method: 'POST',
+          url: '/api/admin/users/999/override',
+          payload: { status: 'member' },
+        });
+
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toMatchObject({ error: 'user_not_found', userId: 999 });
+      });
     });
 
     describe('POST /api/admin/people', () => {

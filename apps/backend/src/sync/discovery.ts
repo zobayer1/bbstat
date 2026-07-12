@@ -39,10 +39,17 @@ export interface SyncMembersResult {
   total: number;
   inserted: number;
   updated: number;
+  // Members demoted this pull: rows still flagged `is_workspace_member` that
+  // no longer appear in `/workspaces/{ws}/members` (departed the org). Zero
+  // when the roster is unchanged or when reconciliation was skipped (empty
+  // pull). Departed rows are retained — only the flag flips — so their
+  // history stays; they just drop off the leaderboards.
+  departed: number;
 }
 
 export async function syncWorkspaceMembers(deps: DiscoveryDeps, workspace: string): Promise<SyncMembersResult> {
-  const result: SyncMembersResult = { total: 0, inserted: 0, updated: 0 };
+  const result: SyncMembersResult = { total: 0, inserted: 0, updated: 0, departed: 0 };
+  const seenUuids: string[] = [];
 
   for await (const membership of deps.client.paginate<WorkspaceMembership>(`/workspaces/${workspace}/members`, {
     fields: ['values.user.uuid', 'values.user.display_name', 'values.user.nickname'],
@@ -52,13 +59,34 @@ export async function syncWorkspaceMembers(deps: DiscoveryDeps, workspace: strin
       displayName: membership.user.display_name,
       username: membership.user.nickname ?? null,
     });
+    seenUuids.push(membership.user.uuid);
     result.total++;
     if (upsert.inserted) result.inserted++;
     else result.updated++;
   }
 
+  // Reconcile departures against the roster we just pulled. A member who fell
+  // out of the response has left the org — demote them so they drop off the
+  // ranked surfaces (rejoin re-promotes via upsertUser). Guarded on a
+  // non-empty roster: a zero-member pull is a failed / rate-limited fetch,
+  // not a mass exodus, and must never demote the entire workspace.
+  if (seenUuids.length > 0) {
+    result.departed = await deps.store.markDepartedMembers(seenUuids);
+  } else {
+    deps.logger?.warn?.(
+      { workspace },
+      'workspace members pull returned zero members — skipping departure reconciliation',
+    );
+  }
+
   deps.logger?.info?.(
-    { workspace, total: result.total, inserted: result.inserted, updated: result.updated },
+    {
+      workspace,
+      total: result.total,
+      inserted: result.inserted,
+      updated: result.updated,
+      departed: result.departed,
+    },
     'workspace members sync complete',
   );
   return result;

@@ -1,7 +1,7 @@
 // Storage interface for discovery operations, so discovery.ts stays
 // testable with a fake store without pulling in Drizzle / pg.
 
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, notInArray, sql } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { repositories, syncState, users } from '../db/schema.js';
 
@@ -69,6 +69,24 @@ export interface InsertRepositoryResult {
 
 export interface DiscoveryStore {
   upsertUser(input: UserUpsertInput): Promise<UserUpsertResult>;
+
+  // Roster reconciliation, the sibling of upsertUser. Flips
+  // `is_workspace_member` FALSE for every currently-member row whose
+  // bitbucket_uuid is NOT in `seenUuids` — i.e. members who dropped out of
+  // `/workspaces/{ws}/members` since the last pull (departed the org). This
+  // is the only writer that demotes an existing member; the rejoin path
+  // (upsertUser) forces the flag back TRUE. Returns the count demoted.
+  //
+  // MUST NOT be called with an empty `seenUuids`: a failed / rate-limited
+  // roster pull returns zero members, and demoting on that would wipe the
+  // whole workspace. The store no-ops on empty as a backstop, but the caller
+  // (syncWorkspaceMembers) is the real guard.
+  //
+  // Single-workspace assumption: every `is_workspace_member = true` row was
+  // written by the one configured BITBUCKET_WORKSPACE, so reconciling against
+  // that single roster is safe. Multi-workspace tracking would need a
+  // workspace scope on `users` before this could stay correct.
+  markDepartedMembers(seenUuids: string[]): Promise<number>;
   // Returns the row regardless of archived state — callers must inspect
   // `archived` explicitly. The tick paths use listTrackedRepositories()
   // instead, which filters archived rows out.
@@ -141,6 +159,18 @@ export function createDrizzleDiscoveryStore(db: Database): DiscoveryStore {
       const row = result[0];
       const inserted = row !== undefined && Date.now() - row.createdAt.getTime() < 5_000;
       return { inserted };
+    },
+
+    async markDepartedMembers(seenUuids) {
+      // Backstop against the empty-roster foot-gun (the caller guards too):
+      // never demote when the pull returned nobody.
+      if (seenUuids.length === 0) return 0;
+      const demoted = await db
+        .update(users)
+        .set({ isWorkspaceMember: false })
+        .where(and(eq(users.isWorkspaceMember, true), notInArray(users.bitbucketUuid, seenUuids)))
+        .returning({ id: users.id });
+      return demoted.length;
     },
 
     async findRepositoryByFullName(fullName) {

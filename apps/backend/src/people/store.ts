@@ -89,7 +89,18 @@ export interface PeopleStore {
   detach(personId: number, userId: number): Promise<DetachResult>;
   setPrimary(personId: number, userId: number): Promise<SetPrimaryResult>;
   dissolve(id: number): Promise<DissolveResult>;
+  // Operator override for `users.membership_override` — force an account's
+  // membershipStatus ('member' | 'departed' | 'external'), or pass null to
+  // clear back to auto-classification. Throws UserNotFoundError for an unknown
+  // id. Distinct from the merge operations: no person is created; the standalone
+  // user row is just flagged.
+  setMembershipOverride(
+    userId: number,
+    override: MembershipOverride | null,
+  ): Promise<{ userId: number; membershipOverride: MembershipOverride | null }>;
 }
+
+export type MembershipOverride = 'member' | 'departed' | 'external';
 
 // ---------------------------------------------------------------------------
 // Drizzle implementation
@@ -331,6 +342,15 @@ export function createDrizzlePeopleStore(db: Database): PeopleStore {
         await clearPrimaryFlagFor(tx, personId);
         await tx.update(users).set({ isPrimaryForPerson: true }).where(eq(users.id, userId));
         return { previousPrimaryUserId };
+      });
+    },
+
+    async setMembershipOverride(userId, override) {
+      return await db.transaction(async (tx) => {
+        const user = await findUserById(tx, userId);
+        if (user === null) throw new UserNotFoundError(userId);
+        await tx.update(users).set({ membershipOverride: override }).where(eq(users.id, userId));
+        return { userId, membershipOverride: override };
       });
     },
 

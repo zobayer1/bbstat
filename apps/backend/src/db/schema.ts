@@ -65,6 +65,14 @@ export const userBadgeEnum = bbstatSchema.enum('user_badge', [
 // live consistency distribution.
 export const userBadgeTierEnum = bbstatSchema.enum('user_badge_tier', ['bronze', 'silver', 'gold']);
 
+// Operator override for the Members classification (users.membership_override).
+// NULL = auto-classify; a set value FORCES that status and wins over every
+// heuristic. The escape hatch for cases no signal can resolve: a departed
+// ex-employee whose org-domain email otherwise reads as an active member
+// ('departed'), or a real colleague on a personal email that reads as an
+// outsider ('member'). Toggled via POST /admin/users/:id/override + /clear.
+export const membershipOverrideEnum = bbstatSchema.enum('membership_override', ['member', 'departed', 'external']);
+
 // `email`: the `<email>` from commits.author.raw, write-once via COALESCE
 // (first observed sticks). This is the git-configured email, NOT a verified
 // workspace email (BB's members endpoint never returned email). Same person
@@ -98,6 +106,15 @@ export const users = bbstatSchema.table(
     username: text('username'),
     email: text('email'),
     isWorkspaceMember: boolean('is_workspace_member').notNull().default(false),
+    // Operator override for the Members classification — NULL = auto-classify;
+    // a set value forces that membershipStatus and beats every heuristic. Fixes
+    // the two cases no signal can resolve: a departed ex-employee whose org
+    // email otherwise reads as 'member' (force 'departed'), and a colleague on
+    // a personal email that reads as 'external' (force 'member'). Deliberately
+    // SEPARATE from is_workspace_member so the member-sync departure
+    // reconciliation (which only flips is_workspace_member) never clears an
+    // operator decision. Toggled via POST /admin/users/:id/override + /clear.
+    membershipOverride: membershipOverrideEnum('membership_override'),
     personId: integer('person_id').references((): AnyPgColumn => people.id, { onDelete: 'set null' }),
     isPrimaryForPerson: boolean('is_primary_for_person').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -13,6 +13,7 @@ const testConfig: AppConfig = {
   DATABASE_URL: 'postgres://test:test@localhost:5432/test',
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
+  ORG_EMAIL_DOMAINS: [],
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
   BITBUCKET_MIN_CALL_INTERVAL_MS: 0,
   BITBUCKET_MAX_CALL_INTERVAL_MS: 0,

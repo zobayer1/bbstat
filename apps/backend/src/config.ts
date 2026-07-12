@@ -176,6 +176,22 @@ const envSchema = z.object({
   // previously minted token (the only revocation mechanism — tokens are
   // stateless, no DB).
   MCP_TOKEN_SECRET: z.string().optional(),
+
+  // Comma-separated org email domains (e.g. "tigerit.com,tigeritbd.com"). The
+  // Members classification treats a contributor at one of these domains as a
+  // workspace member (never "external"), even when their commit account isn't
+  // in the BB member roster and isn't merged. Empty disables the heuristic, so
+  // only flagged / merged / overridden accounts count as members. The operator
+  // override (POST /admin/users/:id/override) covers accounts outside it.
+  ORG_EMAIL_DOMAINS: z
+    .string()
+    .default('tigerit.com')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((d) => d.trim().toLowerCase())
+        .filter((d) => d.length > 0),
+    ),
 });
 
 export type AppConfig = z.infer<typeof envSchema>;

@@ -4,7 +4,7 @@
 // this is the seam: wrap handlers with a preHandler checking the admin role.
 // Read-only Bitbucket scopes are a backstop — nothing here can write to BB.
 
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { paginateCommits } from '../bitbucket/commits.js';
 import { parseAuthorEmail } from '../sync/author-email.js';
@@ -1061,4 +1061,50 @@ export const adminRoutes: FastifyPluginAsync<AdminRouteOptions> = async (app, op
       throw err;
     }
   });
+
+  // POST /users/:id/override {status} and /override/clear — operator override of
+  // a user's membershipStatus. Forces 'member' | 'departed' | 'external' (or
+  // clears back to auto). The escape hatch for cases no heuristic can resolve: a
+  // departed ex-employee whose org email reads as 'member' (→ force 'departed'),
+  // or a colleague on a personal email that reads as 'external' (→ force
+  // 'member'). Distinct from a people-merge: no person is created; the standalone
+  // user row is just flagged. See users.membership_override.
+  async function applyMembershipOverride(
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+    override: 'member' | 'departed' | 'external' | null,
+  ): Promise<FastifyReply> {
+    if (opts.syncDeps.peopleStore === undefined) {
+      return reply.code(503).send({ error: 'people_store_not_wired' });
+    }
+    const id = Number.parseInt(request.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return reply.code(400).send({ error: 'invalid_user_id' });
+    }
+    try {
+      const result = await opts.syncDeps.peopleStore.setMembershipOverride(id, override);
+      // Membership feeds the /users/:id summary; refresh its cache so the change
+      // shows immediately. The Members list + leaderboards read Postgres live.
+      await invalidateUserSummaries([id]);
+      return reply.code(200).send(result);
+    } catch (err) {
+      if (err instanceof UserNotFoundError) {
+        return reply.code(404).send({ error: 'user_not_found', userId: id });
+      }
+      throw err;
+    }
+  }
+
+  const membershipOverrideBody = z.object({ status: z.enum(['member', 'departed', 'external']) });
+
+  app.post<{ Params: { id: string } }>('/users/:id/override', (request, reply) => {
+    const parsed = membershipOverrideBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_status', allowed: ['member', 'departed', 'external'] });
+    }
+    return applyMembershipOverride(request, reply, parsed.data.status);
+  });
+  app.post<{ Params: { id: string } }>('/users/:id/override/clear', (request, reply) =>
+    applyMembershipOverride(request, reply, null),
+  );
 };

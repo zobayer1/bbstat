@@ -48,7 +48,11 @@
 //
 // 22: RepoActivity.repository gained `archived` — the repo detail page now
 // shows an "Archived" badge and neutralizes the sync icon for retired repos.
-export const CACHE_VERSION = 22;
+//
+// 23: WorkspaceMember gained `membershipStatus` ('member' | 'departed' |
+// 'external'), computed server-side, replacing the frontend's username/email
+// heuristic. Drives the /members filter tabs, muting, and status pills.
+export const CACHE_VERSION = 23;
 
 // Holds the version integer as a string. Outside the `bbstat-` prefix so the
 // bust pass doesn't wipe its own sentinel.

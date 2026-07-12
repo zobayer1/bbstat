@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   }
 
   const db = createDb(config.DATABASE_URL);
-  const store = createDrizzleStatsStore(db);
+  const store = createDrizzleStatsStore(db, { orgEmailDomains: config.ORG_EMAIL_DOMAINS });
 
   // TLS parity with the API server: terminate HTTPS in-process when
   // BACKEND_TLS=on (host dev); the container sets BACKEND_TLS=off and serves

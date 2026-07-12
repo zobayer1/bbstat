@@ -212,6 +212,12 @@ export interface WorkspaceMember {
   // Person rows: OR across attached aliases. User rows: the user's own.
   // Drives muted styling for out-of-workspace contributors.
   isWorkspaceMember: boolean;
+  // Server-computed 3-way membership provenance (mirrors the backend
+  // WorkspaceMember.membershipStatus): 'member' (flagged, manually-included,
+  // merged person, or org-email), 'departed' (was in the roster, since gone),
+  // or 'external' (outside contributor). The Members page filters + labels read
+  // this; only 'member' ranks on the leaderboards.
+  membershipStatus: 'member' | 'departed' | 'external';
   // user_ids behind this row, primary-first (length 1 for user rows). Drives
   // the "merged from N accounts" pill and tells SSE handlers which per-user
   // caches to drop.

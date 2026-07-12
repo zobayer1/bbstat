@@ -362,8 +362,20 @@ export interface WorkspaceMember {
   // see users.email in schema.ts.
   email: string | null;
   // Person rows: OR across aliases (true iff any alias is a workspace member).
-  // User rows: own flag. Drives muted styling + the "active team only" filter.
+  // User rows: own flag. Drives muted styling on the frontend.
   isWorkspaceMember: boolean;
+  // Three-way membership provenance, computed server-side so the Members labels
+  // and the leaderboard filter share one source of truth. Precedence — a set
+  // `membership_override` (operator, POST /admin/users/:id/override) wins over
+  // every heuristic below:
+  //   member   — override='member' OR is_workspace_member OR a merged person OR
+  //              an org-email-domain account (ORG_EMAIL_DOMAINS).
+  //   departed — override='departed' OR a lone account that WAS in the member
+  //              roster (username set, the member-sync-only signal) but no longer.
+  //   external — override='external' OR a lone, non-org-email account with no
+  //              member signal (fork imports / outsiders).
+  // Only `member` ranks on the leaderboards; departed + external are excluded.
+  membershipStatus: 'member' | 'departed' | 'external';
   // user_ids attached to this entity, primary-first. Length 1 for user rows.
   // Drives the "merged from N accounts" pill and per-alias SSE invalidation on
   // the frontend.
@@ -522,7 +534,47 @@ export interface DailyCommitPoint {
   commits: number;
 }
 
-export function createDrizzleStatsStore(db: Database): StatsStore {
+export interface StatsStoreOptions {
+  // Org email domains (lowercased) for the Members membership classification.
+  // A contributor at one of these domains is treated as a workspace member
+  // (never "external"), even when their commit account isn't in the BB member
+  // roster and isn't merged. Empty disables the heuristic (only flagged /
+  // merged / manually-included accounts count). Wired from config.ORG_EMAIL_DOMAINS.
+  orgEmailDomains?: readonly string[];
+}
+
+export function createDrizzleStatsStore(db: Database, options: StatsStoreOptions = {}): StatsStore {
+  const orgDomains: string[] = [...(options.orgEmailDomains ?? [])];
+  // Bind the domains as ONE comma-joined string param and split it back into an
+  // array inside SQL. A bare `${array}` interpolation makes drizzle emit a
+  // scalar bind, which Postgres rejects with "malformed array literal". Domains
+  // never contain commas (config validates trimmed hostnames), so this is safe.
+  const orgDomainsCsv = orgDomains.join(',');
+
+  // Shared membership classification, computed once so the /members labels and
+  // the leaderboard filter can never diverge. Both assume the leaderboard_entries
+  // row is aliased `le`.
+  //   orgDomainMatch      — the row's email is at a configured org domain.
+  //   ranksAsMember       — leaderboard-inclusion predicate (membershipStatus='member').
+  //   membershipStatusExpr — the 3-way label emitted to the Members roster.
+  // Precedence (see WorkspaceMember.membershipStatus): operator override →
+  // flag → merged person → member-roster history (username) → org email →
+  // external. A set `membership_override` wins over every heuristic.
+  const orgDomainMatch =
+    orgDomains.length === 0
+      ? sql`false`
+      : sql`lower(split_part(le.email, '@', 2)) = ANY(string_to_array(${orgDomainsCsv}, ','))`;
+  const autoIsMember = sql`(le.is_workspace_member OR le.entity_kind = 'person' OR (le.username IS NULL AND ${orgDomainMatch}))`;
+  const ranksAsMember = sql`(le.membership_override = 'member' OR (le.membership_override IS NULL AND ${autoIsMember}))`;
+  const membershipStatusExpr = sql`CASE
+        WHEN le.membership_override IS NOT NULL THEN le.membership_override::text
+        WHEN le.is_workspace_member THEN 'member'
+        WHEN le.entity_kind = 'person' THEN 'member'
+        WHEN le.username IS NOT NULL THEN 'departed'
+        WHEN ${orgDomainMatch} THEN 'member'
+        ELSE 'external'
+      END`;
+
   return {
     async getOverview() {
       // totalCommits / commitsLast7Days / contributors read from commit_daily
@@ -656,6 +708,11 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           FROM windowed w
           JOIN leaderboard_entries le
             ON le.entity_kind = w.entity_kind AND le.entity_id = w.entity_id
+           -- Leaderboard ranks workspace members only (membershipStatus='member':
+           -- flagged, manually-included, merged persons, and org-email accounts).
+           -- Departed ex-members and external contributors drop off; they stay
+           -- visible on the /members roster under their own filters.
+           AND ${ranksAsMember}
           ORDER BY le.score_trending DESC NULLS LAST, w.commits DESC
           LIMIT ${limit}
         ),
@@ -1219,6 +1276,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           FROM top t
           JOIN leaderboard_entries le
             ON le.entity_kind = t.entity_kind AND le.entity_id = t.entity_id
+           -- Members only (membershipStatus='member'): departed ex-members and
+           -- external contributors are excluded from this top-contributor
+           -- ranking, matching the overview leaderboard.
+           AND ${ranksAsMember}
           JOIN spark
             ON spark.entity_kind = t.entity_kind AND spark.entity_id = t.entity_id
           LEFT JOIN diff_summary
@@ -1499,6 +1560,10 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           FROM top t
           JOIN leaderboard_entries le
             ON le.entity_kind = t.entity_kind AND le.entity_id = t.entity_id
+           -- Members only (membershipStatus='member'): departed ex-members and
+           -- external contributors are excluded from this top-contributor
+           -- ranking, matching the overview leaderboard.
+           AND ${ranksAsMember}
           JOIN spark
             ON spark.entity_kind = t.entity_kind AND spark.entity_id = t.entity_id
           LEFT JOIN diff_summary
@@ -1588,6 +1653,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         username: string | null;
         email: string | null;
         is_workspace_member: boolean;
+        membership_status: 'member' | 'departed' | 'external';
         attached_user_ids: number[];
         alias_search: string;
         commits_7d: number;
@@ -1670,6 +1736,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
           le.username,
           le.email,
           le.is_workspace_member,
+          ${membershipStatusExpr} AS membership_status,
           -- attached_user_ids: primary-first ordering for stable display
           -- (the frontend's "merged from N" pill links to alias detail).
           CASE
@@ -1722,6 +1789,7 @@ export function createDrizzleStatsStore(db: Database): StatsStore {
         username: r.username,
         email: r.email,
         isWorkspaceMember: r.is_workspace_member,
+        membershipStatus: r.membership_status,
         attachedUserIds: r.attached_user_ids,
         aliasSearch: r.alias_search,
         commits7d: r.commits_7d,
