@@ -177,20 +177,37 @@ const envSchema = z.object({
   // stateless, no DB).
   MCP_TOKEN_SECRET: z.string().optional(),
 
-  // Comma-separated org email domains (e.g. "tigerit.com,tigeritbd.com"). The
+  // Comma-separated org email domains (e.g. "acme.com,acme.co.uk"). The
   // Members classification treats a contributor at one of these domains as a
   // workspace member (never "external"), even when their commit account isn't
-  // in the BB member roster and isn't merged. Empty disables the heuristic, so
-  // only flagged / merged / overridden accounts count as members. The operator
-  // override (POST /admin/users/:id/override) covers accounts outside it.
+  // in the BB member roster and isn't merged. Empty (the default) disables the
+  // heuristic, so only flagged / merged / overridden accounts count as members.
+  // The operator override (POST /admin/users/:id/override) covers accounts
+  // outside it.
   ORG_EMAIL_DOMAINS: z
     .string()
-    .default('tigerit.com')
+    .default('')
     .transform((v) =>
       v
         .split(',')
         .map((d) => d.trim().toLowerCase())
         .filter((d) => d.length > 0),
+    ),
+
+  // Comma-separated name tokens stripped before duplicate-account matching in
+  // the `find:duplicates` CLI — honorifics and naming-convention prefixes that
+  // carry no identifying signal. The default covers common English honorifics
+  // plus the South Asian "Md./Mohammad" prefixes, so "Md. Alex Rivera"
+  // matches "Alex Rivera". Set this to replace the list wholesale with
+  // whatever your org's naming conventions call for.
+  NAME_NOISE_TOKENS: z
+    .string()
+    .default('md,mohd,mohammad,mohammed,mohammod,muhammad,mr,mrs,ms,dr,engr,eng,prof')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((t) => t.trim().toLowerCase())
+        .filter((t) => t.length > 0),
     ),
 });
 

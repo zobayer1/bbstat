@@ -25,9 +25,9 @@ function commit(hash: string): BitbucketCommit {
 function repoRow(over: Partial<RepositoryRow> & { id: number; slug: string }): RepositoryRow {
   return {
     bitbucketUuid: `{${over.id}}`,
-    workspace: 'tigerit',
+    workspace: 'acme',
     project: null,
-    fullName: `tigerit/${over.slug}`,
+    fullName: `acme/${over.slug}`,
     archived: false,
     syncExcluded: true,
     syncExcludeReason: 'empty-on-bitbucket',
@@ -82,7 +82,7 @@ describe('runEmptyRevivalTick', () => {
     ]);
     const result = await runEmptyRevivalTick(deps, OPTS);
     expect(result.checked).toBe(1);
-    expect(result.revived).toEqual(['tigerit/revived']);
+    expect(result.revived).toEqual(['acme/revived']);
     expect(result.stoppedReason).toBe('done');
     expect(state.excludedCalls).toEqual([{ id: 7, excluded: false, reason: null }]);
     expect(state.resetCalls).toEqual([7]);

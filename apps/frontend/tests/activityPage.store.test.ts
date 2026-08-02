@@ -19,7 +19,7 @@ function makeCommit(sha: string, occurredAt: string): ActivityEntry {
     filesChanged: 1,
     isMerge: false,
     diffStatsUnavailable: false,
-    repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+    repository: { workspace: 'acme', slug: 'r1', fullName: 'acme/r1' },
     author: { userId: 1, displayName: 'Alice', bitbucketUuid: '{u1}' },
     occurredAt,
   };

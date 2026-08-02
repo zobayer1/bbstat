@@ -28,9 +28,9 @@ const sample: ProjectStats = {
   ],
   repositories: [
     {
-      workspace: 'tigerit',
+      workspace: 'acme',
       slug: 'r1',
-      fullName: 'tigerit/r1',
+      fullName: 'acme/r1',
       commits30d: 30,
       contributors30d: 3,
       lastCommitAt: '2026-05-12T00:00:00.000Z',

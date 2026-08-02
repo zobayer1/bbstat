@@ -329,17 +329,17 @@ describe('sweepOneRepo', () => {
 
   it('attributes commits with UUID + parseable email, auto-creates the user', async () => {
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/signalmessenger');
-    seedAnonymous(state, 1, 100, 'sha-foysal', '2026-05-18T10:00:00Z');
+    const repo = seedRepo(state, 1, 'acme/messenger');
+    seedAnonymous(state, 1, 100, 'sha-alex', '2026-05-18T10:00:00Z');
 
     fetchMock.mockResolvedValueOnce(
       commitsPage([
         makeBBCommit({
-          hash: 'sha-foysal',
+          hash: 'sha-alex',
           date: '2026-05-18T10:00:00+00:00',
-          raw: 'Foysal <thisisfoysal@gmail.com>',
-          userUuid: '{u-foysal}',
-          userDisplayName: 'Foysal',
+          raw: 'Alex <alex.rivera@gmail.com>',
+          userUuid: '{u-alex}',
+          userDisplayName: 'Alex',
         }),
       ]),
     );
@@ -354,13 +354,13 @@ describe('sweepOneRepo', () => {
     expect(result.attributed).toBe(1);
     expect(result.snapshotOnly).toBe(0);
     expect(result.complete).toBe(false); // attributed > 0 → not yet marked complete; will mark on next pass
-    expect(state.autoCreatedUuids.has('{u-foysal}')).toBe(true);
+    expect(state.autoCreatedUuids.has('{u-alex}')).toBe(true);
     expect(state.attributionUpdates).toEqual([
       {
         commitId: 100,
-        userId: state.usersByUuid.get('{u-foysal}'),
-        email: 'thisisfoysal@gmail.com',
-        displayName: 'Foysal',
+        userId: state.usersByUuid.get('{u-alex}'),
+        email: 'alex.rivera@gmail.com',
+        displayName: 'Alex',
       },
     ]);
     // Local anonymous list now empty for this repo.
@@ -371,7 +371,7 @@ describe('sweepOneRepo', () => {
     // Two commits: one has no BB user (snapshot-only), one has UUID
     // but author.raw is a noreply (also snapshot-only — email gate).
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/r');
+    const repo = seedRepo(state, 1, 'acme/r');
     seedAnonymous(state, 1, 10, 'sha-no-user', '2026-05-10T00:00:00Z');
     seedAnonymous(state, 1, 11, 'sha-noreply', '2026-05-11T00:00:00Z');
 
@@ -408,7 +408,7 @@ describe('sweepOneRepo', () => {
 
   it('marks complete and bails on BB 404 (repo gone upstream)', async () => {
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/gone');
+    const repo = seedRepo(state, 1, 'acme/gone');
     seedAnonymous(state, 1, 10, 'sha-orphan', '2026-05-10T00:00:00Z');
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: { message: 'Not Found' } }, 404));
@@ -427,7 +427,7 @@ describe('sweepOneRepo', () => {
 
   it('propagates BitbucketRateLimitError WITHOUT marking complete', async () => {
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/r');
+    const repo = seedRepo(state, 1, 'acme/r');
     seedAnonymous(state, 1, 10, 'sha-x', '2026-05-10T00:00:00Z');
 
     // EVERY fetch returns 429 — the BB client retries up to its
@@ -449,7 +449,7 @@ describe('sweepOneRepo', () => {
 
   it('shortcuts to complete when there are no local anonymous commits in the repo', async () => {
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/clean');
+    const repo = seedRepo(state, 1, 'acme/clean');
     // No anonymous rows seeded.
 
     const result = await sweepOneRepo(
@@ -467,7 +467,7 @@ describe('sweepOneRepo', () => {
     // Edge case: our local anonymous shas live on a feature branch BB's
     // default-branch walk doesn't reach.
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/r');
+    const repo = seedRepo(state, 1, 'acme/r');
     seedAnonymous(state, 1, 10, 'sha-on-feature-branch', '2026-05-10T00:00:00Z');
 
     fetchMock.mockResolvedValueOnce(
@@ -502,7 +502,7 @@ describe('sweepOneRepo', () => {
 
   it('recomputes commit_daily ONLY for attributed days, and invalidates affected user-summary caches', async () => {
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/r');
+    const repo = seedRepo(state, 1, 'acme/r');
     seedAnonymous(state, 1, 10, 'sha-may-15', '2026-05-15T00:00:00Z');
     seedAnonymous(state, 1, 11, 'sha-may-18', '2026-05-18T00:00:00Z');
     seedAnonymous(state, 1, 12, 'sha-stuck', '2026-05-12T00:00:00Z'); // no BB user — snapshot-only
@@ -554,7 +554,7 @@ describe('sweepOneRepo', () => {
     // Even though snapshot columns get updated, commit_daily aggregates
     // by author_user_id — snapshot-only changes don't affect the rollup.
     const { store, state } = createSweepFakeStore();
-    const repo = seedRepo(state, 1, 'tigerit/r');
+    const repo = seedRepo(state, 1, 'acme/r');
     seedAnonymous(state, 1, 10, 'sha-stuck', '2026-05-12T00:00:00Z');
 
     fetchMock.mockResolvedValueOnce(
@@ -607,7 +607,7 @@ describe('runAnonymousSweep', () => {
     // simulates the residual-stuck state after operator has already
     // run the sweep to convergence.
     const { store, state } = createSweepFakeStore();
-    const repo: AnonymousSweepCandidate = { repositoryId: 1, workspace: 'tigerit', slug: 'r', fullName: 'tigerit/r' };
+    const repo: AnonymousSweepCandidate = { repositoryId: 1, workspace: 'acme', slug: 'r', fullName: 'acme/r' };
     state.repos.set(1, repo);
     state.anonymous.set(1, [
       {
@@ -630,7 +630,7 @@ describe('runAnonymousSweep', () => {
 
   it('sleeps when budget is below threshold and resumes when budget recovers', async () => {
     const { store, state } = createSweepFakeStore();
-    const repo: AnonymousSweepCandidate = { repositoryId: 1, workspace: 'tigerit', slug: 'r', fullName: 'tigerit/r' };
+    const repo: AnonymousSweepCandidate = { repositoryId: 1, workspace: 'acme', slug: 'r', fullName: 'acme/r' };
     state.repos.set(1, repo);
     state.anonymous.set(1, [
       { commitId: 10, sha: 'sha-x', authoredAt: new Date('2026-05-12'), authorEmail: null, authorDisplayName: null },
@@ -678,8 +678,8 @@ describe('runAnonymousSweep', () => {
     // would re-pick the failing repo indefinitely (it has anonymous
     // commits + isn't marked complete) and the test would hang.
     const { store, state } = createSweepFakeStore();
-    state.repos.set(1, { repositoryId: 1, workspace: 'tigerit', slug: 'broken', fullName: 'tigerit/broken' });
-    state.repos.set(2, { repositoryId: 2, workspace: 'tigerit', slug: 'ok', fullName: 'tigerit/ok' });
+    state.repos.set(1, { repositoryId: 1, workspace: 'acme', slug: 'broken', fullName: 'acme/broken' });
+    state.repos.set(2, { repositoryId: 2, workspace: 'acme', slug: 'ok', fullName: 'acme/ok' });
     state.anonymous.set(1, [
       { commitId: 10, sha: 'sha-a', authoredAt: new Date('2026-05-10'), authorEmail: null, authorDisplayName: null },
     ]);
@@ -688,8 +688,8 @@ describe('runAnonymousSweep', () => {
     ]);
 
     const pickSequence: Array<AnonymousSweepCandidate | null> = [
-      { repositoryId: 1, workspace: 'tigerit', slug: 'broken', fullName: 'tigerit/broken' },
-      { repositoryId: 2, workspace: 'tigerit', slug: 'ok', fullName: 'tigerit/ok' },
+      { repositoryId: 1, workspace: 'acme', slug: 'broken', fullName: 'acme/broken' },
+      { repositoryId: 2, workspace: 'acme', slug: 'ok', fullName: 'acme/ok' },
       null,
     ];
     let pickIdx = 0;
@@ -703,10 +703,10 @@ describe('runAnonymousSweep', () => {
     // retry chain on repo 1 would consume the response queued for
     // repo 2 and corrupt the test scenario.
     fetchMock.mockImplementation((url: string) => {
-      if (url.includes('/repositories/tigerit/broken/')) {
+      if (url.includes('/repositories/acme/broken/')) {
         return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
       }
-      if (url.includes('/repositories/tigerit/ok/')) {
+      if (url.includes('/repositories/acme/ok/')) {
         return Promise.resolve(
           commitsPage([
             makeBBCommit({ hash: 'sha-b', date: '2026-05-11T00:00:00+00:00', raw: 'External <ext@elsewhere.com>' }),

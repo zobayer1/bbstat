@@ -101,7 +101,7 @@ describe('GET /api/live', () => {
 
     server.bus.publish({
       event: 'repository.deleted',
-      payload: { repositoryId: 42, fullName: 'tigerit/doomed' },
+      payload: { repositoryId: 42, fullName: 'acme/doomed' },
     });
 
     // Wait until the event frame shows up — single iteration is enough
@@ -114,7 +114,7 @@ describe('GET /api/live', () => {
 
     expect(acc).toContain('event: repository.deleted');
     expect(acc).toContain('"repositoryId":42');
-    expect(acc).toContain('"fullName":"tigerit/doomed"');
+    expect(acc).toContain('"fullName":"acme/doomed"');
   });
 
   it('drops the subscriber when the client disconnects', async () => {

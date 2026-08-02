@@ -34,9 +34,9 @@ const sampleSummary: UserSummary = {
   dailyCommits: [{ date: '2026-05-12', commits: 3 }],
   topRepos: [
     {
-      workspace: 'tigerit',
+      workspace: 'acme',
       slug: 'r1',
-      fullName: 'tigerit/r1',
+      fullName: 'acme/r1',
       project: 'COMM',
       commits: 8,
       syncStatus: 'ok',

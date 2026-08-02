@@ -25,8 +25,8 @@ function makeClient(fetchFn: typeof globalThis.fetch): BitbucketClient {
 function repo(over: Partial<BitbucketRepoSummary> & { slug: string; updated_on: string }): BitbucketRepoSummary {
   return {
     uuid: `{${over.slug}}`,
-    full_name: `tigerit/${over.slug}`,
-    workspace: { slug: 'tigerit' },
+    full_name: `acme/${over.slug}`,
+    workspace: { slug: 'acme' },
     is_private: true,
     ...over,
   };
@@ -81,7 +81,7 @@ function makeStore(tracked: Set<string> = new Set()): {
       return tracked.has(fullName)
         ? repoRow({
             bitbucketUuid: 'x',
-            workspace: 'tigerit',
+            workspace: 'acme',
             project: null,
             slug: fullName,
             fullName,
@@ -98,7 +98,7 @@ function makeDeps(
   cache: CacheClient,
   store: RepoDiscoveryDeps['store'],
 ): RepoDiscoveryDeps {
-  return { client: makeClient(fetchFn), cache, store, workspace: 'tigerit' };
+  return { client: makeClient(fetchFn), cache, store, workspace: 'acme' };
 }
 
 const OPTS = { maxReposPerSweep: 100, budgetThreshold: 10 };
@@ -137,7 +137,7 @@ describe('runRepoDiscoverySweep', () => {
     );
 
     expect(result.scanned).toBe(3);
-    expect(result.added).toEqual(['tigerit/a', 'tigerit/b', 'tigerit/c']);
+    expect(result.added).toEqual(['acme/a', 'acme/b', 'acme/c']);
     expect(result.newCursor).toBe('2022-12-31T00:00:00+00:00');
     expect(insertedCalls).toHaveLength(3);
     expect(map.get(CURSOR_KEY)).toBe('2022-12-31T00:00:00+00:00');
@@ -168,7 +168,7 @@ describe('runRepoDiscoverySweep', () => {
         repo({
           slug: 'int-fork',
           updated_on: '2020-03-01T00:00:00+00:00',
-          parent: { full_name: 'tigerit/upstream' },
+          parent: { full_name: 'acme/upstream' },
         }),
       ]),
     );
@@ -180,7 +180,7 @@ describe('runRepoDiscoverySweep', () => {
     );
 
     expect(result.skippedForks).toBe(1);
-    expect(result.added).toEqual(['tigerit/own', 'tigerit/int-fork']);
+    expect(result.added).toEqual(['acme/own', 'acme/int-fork']);
     // Cursor still advances past the skipped fork.
     expect(result.newCursor).toBe('2020-03-01T00:00:00+00:00');
   });
@@ -195,12 +195,12 @@ describe('runRepoDiscoverySweep', () => {
         ]),
       );
     const { cache } = makeCache();
-    const { store } = makeStore(new Set(['tigerit/tracked']));
+    const { store } = makeStore(new Set(['acme/tracked']));
     const result = await runRepoDiscoverySweep(
       makeDeps(fetchMock as unknown as typeof globalThis.fetch, cache, store),
       OPTS,
     );
-    expect(result.added).toEqual(['tigerit/fresh']);
+    expect(result.added).toEqual(['acme/fresh']);
   });
 
   it('dry-run lists untracked candidates without inserting or advancing the cursor', async () => {
@@ -213,7 +213,7 @@ describe('runRepoDiscoverySweep', () => {
         ]),
       );
     const { cache, map } = makeCache();
-    const { store, insertedCalls } = makeStore(new Set(['tigerit/tracked']));
+    const { store, insertedCalls } = makeStore(new Set(['acme/tracked']));
     const result = await runRepoDiscoverySweep(
       makeDeps(fetchMock as unknown as typeof globalThis.fetch, cache, store),
       {
@@ -222,7 +222,7 @@ describe('runRepoDiscoverySweep', () => {
       },
     );
     expect(result.dryRun).toBe(true);
-    expect(result.added).toEqual(['tigerit/new']); // only the untracked one
+    expect(result.added).toEqual(['acme/new']); // only the untracked one
     expect(insertedCalls).toHaveLength(0); // no writes
     expect(map.has(CURSOR_KEY)).toBe(false); // cursor untouched
   });

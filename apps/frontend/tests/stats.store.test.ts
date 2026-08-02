@@ -52,9 +52,9 @@ const sampleContributors = [
 ];
 const sampleRepositories = [
   {
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug: 'r1',
-    fullName: 'tigerit/r1',
+    fullName: 'acme/r1',
     project: 'COMM',
     commits30d: 30,
     contributors30d: 4,

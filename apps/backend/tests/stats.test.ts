@@ -37,6 +37,7 @@ const testConfig: AppConfig = {
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
   ORG_EMAIL_DOMAINS: [],
+  NAME_NOISE_TOKENS: [],
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
   BITBUCKET_MIN_CALL_INTERVAL_MS: 0,
   BITBUCKET_MAX_CALL_INTERVAL_MS: 0,
@@ -146,12 +147,12 @@ describe('GET /api/stats/repositories/:workspace/:slug/latest-commit', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/stats/repositories/tigerit/boing-server/latest-commit',
+      url: '/api/stats/repositories/acme/api-server/latest-commit',
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(commit);
-    expect(statsStore.getLatestCommitForRepository).toHaveBeenCalledWith('tigerit', 'boing-server');
+    expect(statsStore.getLatestCommitForRepository).toHaveBeenCalledWith('acme', 'api-server');
   });
 
   it('returns 404 when no commit (untracked or empty repo)', async () => {
@@ -162,11 +163,11 @@ describe('GET /api/stats/repositories/:workspace/:slug/latest-commit', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/stats/repositories/tigerit/never-tracked/latest-commit',
+      url: '/api/stats/repositories/acme/never-tracked/latest-commit',
     });
 
     expect(res.statusCode).toBe(404);
-    expect(res.json()).toEqual({ error: 'not_found', fullName: 'tigerit/never-tracked' });
+    expect(res.json()).toEqual({ error: 'not_found', fullName: 'acme/never-tracked' });
   });
 });
 
@@ -357,9 +358,9 @@ const sampleUserSummary: UserSummary = {
   dailyCommits: [{ date: '2026-05-12', commits: 3 }],
   topRepos: [
     {
-      workspace: 'tigerit',
+      workspace: 'acme',
       slug: 'r1',
-      fullName: 'tigerit/r1',
+      fullName: 'acme/r1',
       project: 'COMM',
       commits: 8,
       syncStatus: 'ok',
@@ -560,9 +561,9 @@ describe('GET /api/stats/projects/:projectKey', () => {
       ],
       repositories: [
         {
-          workspace: 'tigerit',
+          workspace: 'acme',
           slug: 'r1',
-          fullName: 'tigerit/r1',
+          fullName: 'acme/r1',
           commits30d: 7,
           contributors30d: 2,
           lastCommitAt: '2026-05-12T00:00:00.000Z',
@@ -603,9 +604,9 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
   it('returns the repo activity from the store', async () => {
     const activity: RepoActivity = {
       repository: {
-        workspace: 'tigerit',
+        workspace: 'acme',
         slug: 'r1',
-        fullName: 'tigerit/r1',
+        fullName: 'acme/r1',
         project: 'COMM',
         syncStatus: 'ok',
       },
@@ -631,12 +632,12 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/stats/repositories/tigerit/r1/activity',
+      url: '/api/stats/repositories/acme/r1/activity',
     });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual(activity);
-    expect(getRepositoryActivity).toHaveBeenCalledWith('tigerit', 'r1');
+    expect(getRepositoryActivity).toHaveBeenCalledWith('acme', 'r1');
   });
 
   it('returns 404 for untracked repos', async () => {
@@ -645,11 +646,11 @@ describe('GET /api/stats/repositories/:workspace/:slug/activity', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/stats/repositories/tigerit/never-tracked/activity',
+      url: '/api/stats/repositories/acme/never-tracked/activity',
     });
 
     expect(res.statusCode).toBe(404);
-    expect(res.json()).toEqual({ error: 'not_found', fullName: 'tigerit/never-tracked' });
+    expect(res.json()).toEqual({ error: 'not_found', fullName: 'acme/never-tracked' });
   });
 });
 
@@ -664,9 +665,9 @@ describe('GET /api/stats/repositories', () => {
   it('returns the tracked-repository list from the store', async () => {
     const repos = [
       {
-        workspace: 'tigerit',
+        workspace: 'acme',
         slug: 'r1',
-        fullName: 'tigerit/r1',
+        fullName: 'acme/r1',
         project: 'COMM',
         commits30d: 30,
         contributors30d: 4,
@@ -677,9 +678,9 @@ describe('GET /api/stats/repositories', () => {
         archived: false,
       },
       {
-        workspace: 'tigerit',
+        workspace: 'acme',
         slug: 'orphan',
-        fullName: 'tigerit/orphan',
+        fullName: 'acme/orphan',
         project: null,
         commits30d: 0,
         contributors30d: 0,
@@ -713,9 +714,9 @@ describe('GET /api/stats/repo-contributors', () => {
   it('returns the per-repo contributor breakdown with default caps', async () => {
     const payload = [
       {
-        workspace: 'tigerit',
+        workspace: 'acme',
         slug: 'r1',
-        fullName: 'tigerit/r1',
+        fullName: 'acme/r1',
         project: 'COMM',
         commits: 50,
         contributors: [{ userId: 1, displayName: 'Alice', commits: 30 }],
@@ -776,7 +777,7 @@ const sampleActivity: ActivityEntry[] = [
     state: 'OPEN',
     sourceBranch: 'feat',
     destinationBranch: 'main',
-    repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+    repository: { workspace: 'acme', slug: 'r1', fullName: 'acme/r1' },
     author: { userId: 1, displayName: 'Alice', bitbucketUuid: '{u1}' },
     occurredAt: '2026-05-12T18:00:00.000Z',
   },
@@ -789,7 +790,7 @@ const sampleActivity: ActivityEntry[] = [
     filesChanged: 4,
     isMerge: false,
     diffStatsUnavailable: false,
-    repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+    repository: { workspace: 'acme', slug: 'r1', fullName: 'acme/r1' },
     author: null,
     occurredAt: '2026-05-12T14:00:00.000Z',
   },
@@ -832,13 +833,13 @@ describe('GET /api/activity', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/activity?actor=7&repo=tigerit/boing-server&project=COMM&before=2026-05-12T18:00:00.000Z&after=2026-05-01T00:00:00.000Z&hashPrefix=abc123&message=widget&limit=25&offset=200',
+      url: '/api/activity?actor=7&repo=acme/api-server&project=COMM&before=2026-05-12T18:00:00.000Z&after=2026-05-01T00:00:00.000Z&hashPrefix=abc123&message=widget&limit=25&offset=200',
     });
 
     expect(res.statusCode).toBe(200);
     expect(getActivity).toHaveBeenCalledWith({
       actor: { kind: 'user', id: 7 },
-      repo: { workspace: 'tigerit', slug: 'boing-server' },
+      repo: { workspace: 'acme', slug: 'api-server' },
       project: 'COMM',
       before: new Date('2026-05-12T18:00:00.000Z'),
       after: new Date('2026-05-01T00:00:00.000Z'),
@@ -910,7 +911,7 @@ describe('GET /api/activity', () => {
     const statsStore = makeStatsStore({ getActivity });
     appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), statsStore });
 
-    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?repo=tigerit' });
+    const res = await appInstance.inject({ method: 'GET', url: '/api/activity?repo=acme' });
 
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe('invalid_query');
@@ -969,13 +970,13 @@ describe('GET /api/activity-daily', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/activity-daily?actor=7&repo=tigerit/boing-server&project=COMM',
+      url: '/api/activity-daily?actor=7&repo=acme/api-server&project=COMM',
     });
 
     expect(res.statusCode).toBe(200);
     expect(getActivityDaily).toHaveBeenCalledWith({
       actor: { kind: 'user', id: 7 },
-      repo: { workspace: 'tigerit', slug: 'boing-server' },
+      repo: { workspace: 'acme', slug: 'api-server' },
       project: 'COMM',
     });
   });
@@ -1018,14 +1019,14 @@ describe('GET /api/activity-count', () => {
 
     const res = await appInstance.inject({
       method: 'GET',
-      url: '/api/activity-count?actor=7&repo=tigerit/r1&project=COMM&after=2026-05-01T00:00:00.000Z&message=widget',
+      url: '/api/activity-count?actor=7&repo=acme/r1&project=COMM&after=2026-05-01T00:00:00.000Z&message=widget',
     });
 
     expect(res.statusCode).toBe(200);
     expect(getActivityCount).toHaveBeenCalledWith(
       expect.objectContaining({
         actor: { kind: 'user', id: 7 },
-        repo: { workspace: 'tigerit', slug: 'r1' },
+        repo: { workspace: 'acme', slug: 'r1' },
         project: 'COMM',
         after: new Date('2026-05-01T00:00:00.000Z'),
         message: 'widget',

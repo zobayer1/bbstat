@@ -33,7 +33,7 @@ const commit: ActivityEntry = {
   filesChanged: 4,
   isMerge: false,
   diffStatsUnavailable: false,
-  repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+  repository: { workspace: 'acme', slug: 'r1', fullName: 'acme/r1' },
   author: { userId: 1, displayName: 'Alice', bitbucketUuid: '{u1}' },
   occurredAt: '2026-05-12T18:00:00.000Z',
 };
@@ -45,7 +45,7 @@ const pr: ActivityEntry = {
   state: 'MERGED',
   sourceBranch: 'feat',
   destinationBranch: 'main',
-  repository: { workspace: 'tigerit', slug: 'r1', fullName: 'tigerit/r1' },
+  repository: { workspace: 'acme', slug: 'r1', fullName: 'acme/r1' },
   author: null,
   occurredAt: '2026-05-12T14:00:00.000Z',
 };
@@ -119,9 +119,9 @@ describe('ActivityFeed', () => {
   it('forwards filter props into the API call', async () => {
     vi.mocked(api.activity).mockResolvedValueOnce([]);
 
-    await mountFeed({ actor: { kind: 'user', id: 7 }, repo: 'tigerit/r1' });
+    await mountFeed({ actor: { kind: 'user', id: 7 }, repo: 'acme/r1' });
 
-    expect(api.activity).toHaveBeenCalledWith({ actor: { kind: 'user', id: 7 }, repo: 'tigerit/r1', limit: 50 });
+    expect(api.activity).toHaveBeenCalledWith({ actor: { kind: 'user', id: 7 }, repo: 'acme/r1', limit: 50 });
   });
 
   it('renders an uppercase state badge for PR entries', async () => {

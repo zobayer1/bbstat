@@ -247,12 +247,12 @@ function createFakeCommitStore(seed?: { syncState?: SyncStateRow[]; users?: Arra
 // Fixtures + HTTP helpers
 // ---------------------------------------------------------------------------
 
-function makeRepo(repositoryId: number, slug = 'boing-server'): RepositoryHandle {
+function makeRepo(repositoryId: number, slug = 'api-server'): RepositoryHandle {
   return {
     repositoryId,
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug,
-    fullName: `tigerit/${slug}`,
+    fullName: `acme/${slug}`,
     diffStatsExcludePatterns: [],
   };
 }
@@ -378,12 +378,12 @@ describe('syncRepositoryCommits — cold mode', () => {
     // 2 pages of 100, then a third we should never reach.
     fetchMock
       .mockResolvedValueOnce(
-        commitsPage(manyCommits(100), 'https://api.bitbucket.org/2.0/repositories/tigerit/boing-server/commits?page=2'),
+        commitsPage(manyCommits(100), 'https://api.bitbucket.org/2.0/repositories/acme/api-server/commits?page=2'),
       )
       .mockResolvedValueOnce(
         commitsPage(
           manyCommits(100).map((c, i) => ({ ...c, hash: `p2-${i}` })),
-          'https://api.bitbucket.org/2.0/repositories/tigerit/boing-server/commits?page=3',
+          'https://api.bitbucket.org/2.0/repositories/acme/api-server/commits?page=3',
         ),
       )
       .mockResolvedValueOnce(commitsPage(manyCommits(100).map((c, i) => ({ ...c, hash: `p3-${i}` }))));
@@ -522,12 +522,12 @@ describe('syncRepositoryCommits — delta mode', () => {
     // 250 commits across 3 pages, none matching the orphaned cursor.
     fetchMock
       .mockResolvedValueOnce(
-        commitsPage(manyCommits(100), 'https://api.bitbucket.org/2.0/repositories/tigerit/boing-server/commits?page=2'),
+        commitsPage(manyCommits(100), 'https://api.bitbucket.org/2.0/repositories/acme/api-server/commits?page=2'),
       )
       .mockResolvedValueOnce(
         commitsPage(
           manyCommits(100).map((c, i) => ({ ...c, hash: `p2-${i}` })),
-          'https://api.bitbucket.org/2.0/repositories/tigerit/boing-server/commits?page=3',
+          'https://api.bitbucket.org/2.0/repositories/acme/api-server/commits?page=3',
         ),
       )
       .mockResolvedValueOnce(commitsPage(manyCommits(50).map((c, i) => ({ ...c, hash: `p3-${i}` }))));
@@ -1001,7 +1001,7 @@ describe('syncRepositoryCommits — reattribution on re-sync', () => {
     fetchMock.mockResolvedValueOnce(commitsPage([makeCommit('sha-anon', { date: '2026-05-18T10:28:18+00:00' })]));
     const { store, state } = createFakeCommitStore({
       syncState: [makeSyncStateRow(1)],
-      users: [['{u-foysal}', 142]],
+      users: [['{u-alex}', 142]],
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
@@ -1016,7 +1016,7 @@ describe('syncRepositoryCommits — reattribution on re-sync', () => {
       commitsPage([
         makeCommit('sha-anon', {
           date: '2026-05-18T10:28:18+00:00',
-          user: { uuid: '{u-foysal}', display_name: 'Foysal Ahamed' },
+          user: { uuid: '{u-alex}', display_name: 'Alex Rivera' },
         }),
       ]),
     );
@@ -1083,7 +1083,7 @@ describe('syncRepositoryCommits — reattribution on re-sync', () => {
     );
     const { store, state } = createFakeCommitStore({
       syncState: [makeSyncStateRow(1)],
-      users: [['{u-foysal}', 142]],
+      users: [['{u-alex}', 142]],
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
     await syncRepositoryCommits(deps, makeRepo(1));
@@ -1095,11 +1095,11 @@ describe('syncRepositoryCommits — reattribution on re-sync', () => {
       commitsPage([
         makeCommit('sha-newer', {
           date: '2026-05-18T12:00:00+00:00',
-          user: { uuid: '{u-foysal}', display_name: 'Foysal' },
+          user: { uuid: '{u-alex}', display_name: 'Alex' },
         }),
         makeCommit('sha-older', {
           date: '2026-05-15T08:00:00+00:00',
-          user: { uuid: '{u-foysal}', display_name: 'Foysal' },
+          user: { uuid: '{u-alex}', display_name: 'Alex' },
         }),
       ]),
     );
@@ -1115,7 +1115,7 @@ describe('syncRepositoryCommits — reattribution on re-sync', () => {
     fetchMock.mockResolvedValueOnce(commitsPage([makeCommit('sha-anon', { date: '2026-05-18T10:00:00+00:00' })]));
     const { store, state } = createFakeCommitStore({
       syncState: [makeSyncStateRow(1)],
-      users: [['{u-foysal}', 142]],
+      users: [['{u-alex}', 142]],
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
     await syncRepositoryCommits(deps, makeRepo(1));
@@ -1129,7 +1129,7 @@ describe('syncRepositoryCommits — reattribution on re-sync', () => {
       commitsPage([
         makeCommit('sha-anon', {
           date: '2026-05-18T10:00:00+00:00',
-          user: { uuid: '{u-foysal}', display_name: 'Foysal' },
+          user: { uuid: '{u-alex}', display_name: 'Alex' },
         }),
       ]),
     );

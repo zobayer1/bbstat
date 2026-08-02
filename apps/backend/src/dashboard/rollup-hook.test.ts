@@ -16,9 +16,9 @@ function makeCache(overrides: Partial<UserSummaryCache> = {}): UserSummaryCache 
 function makeRepo(): RepositoryHandle {
   return {
     repositoryId: 1,
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug: 'r',
-    fullName: 'tigerit/r',
+    fullName: 'acme/r',
     diffStatsExcludePatterns: [],
   };
 }
@@ -35,7 +35,7 @@ function makeRollupStore(overrides: Partial<RollupStore> = {}): RollupStore {
 function makeResult(over: Partial<RepoCommitSyncResult> = {}): RepoCommitSyncResult {
   return {
     repositoryId: 1,
-    fullName: 'tigerit/r',
+    fullName: 'acme/r',
     mode: 'delta',
     fetched: 0,
     inserted: 0,

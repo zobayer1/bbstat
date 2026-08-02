@@ -7,7 +7,38 @@ release gets a section.
 
 ## [Unreleased]
 
-Nothing queued yet.
+Deployment-neutral configuration — groundwork for publishing the project. No
+organization-specific value is compiled in any more; every one reads from the
+environment, the seed file, or a neutral default. **Operators upgrading must
+set `ORG_EMAIL_DOMAINS` explicitly** (see Changed).
+
+### Added
+
+- **`NAME_NOISE_TOKENS`** (backend config) — comma-separated name tokens the
+  `find:duplicates` CLI strips before matching display names. Previously a
+  hard-coded list inside `scripts/find-duplicate-candidates.ts`; now
+  configurable, with the same list as the default (English honorifics + the
+  South Asian `Md./Mohammad` prefixes). Setting it replaces the list wholesale.
+- **"Configuring for your organization"** section in the README — one table of
+  every org-shaped setting and where it lives.
+
+### Changed
+
+- **`ORG_EMAIL_DOMAINS` now defaults to empty** (was `tigerit.com`). The
+  org-email membership heuristic is off until a deployment opts in; only
+  flagged / merged / overridden accounts count as members otherwise.
+  **Deployments that relied on the old default must now set it explicitly** —
+  without it, contributors previously classified `member` by domain alone fall
+  back to `external`.
+- **The scoring methodology modal's "suggest a change" contact** is driven by
+  `VITE_CONTACT_EMAIL` (the same var the global footer uses) instead of a
+  hard-coded address. Unset hides the line rather than pointing at a stranger's
+  inbox.
+- **Genericized example and fixture data** — `tracked-repos.yaml.example`, the
+  `docs/admin.md` curl examples, the MCP `workspace` argument description, and
+  every test fixture now use neutral placeholders instead of a real workspace
+  slug, real internal repository names, and a real contributor's name and
+  personal email address.
 
 ## [1.6.0] — 2026-07-12
 

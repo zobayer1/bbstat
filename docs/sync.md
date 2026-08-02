@@ -868,7 +868,7 @@ is mutable, so the regular delta walk handles updates inline.
 
 PR ingest runs on its own hourly cron (`SYNC_PRS_CRON` default `0 * * * *`),
 gated behind `SYNC_PRS_ENABLED` (default `false`). The current backlog has
-been ingested and mutations are rare at TigerIT scale, so the scheduled
+been ingested and mutations are rare at typical org scale, so the scheduled
 tick was disabled in 2026-05 to stop burning budget for near-zero delta.
 The admin manual trigger (`POST /api/admin/sync/prs`) remains live
 unconditionally — flip it on per-tick when needed, or set
@@ -1144,7 +1144,7 @@ data: {"trigger":"cron","startedAt":"2026-05-15T21:00:00Z", …}
 : keepalive 1747...
 \n
 event: repository.included
-data: {"repositoryId":47,"fullName":"tigerit/bbstat","source":"include"}
+data: {"repositoryId":47,"fullName":"acme/bbstat","source":"include"}
 \n
 ```
 

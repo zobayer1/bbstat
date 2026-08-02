@@ -153,7 +153,7 @@ const showMethodologyModal = ref(false);
 // displayName highest keeps the displayed identity ranking first.
 // `aliasSearch` carries every linked account's name/username/email so a
 // merged person is findable by a non-primary alias. `ignoreLocation` lets a
-// match land anywhere ("han" hits "Zobayer Hasan").
+// match land anywhere ("ada" hits "Ada Lovelace").
 const fuse = computed(
   () =>
     new Fuse(store.members, {

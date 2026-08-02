@@ -12,9 +12,9 @@ import { runCommitsTick } from './commits-tick.js';
 function makeRepo(id: number): RepositoryHandle {
   return {
     repositoryId: id,
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug: `repo-${id}`,
-    fullName: `tigerit/repo-${id}`,
+    fullName: `acme/repo-${id}`,
     diffStatsExcludePatterns: [],
   };
 }
@@ -305,7 +305,7 @@ describe('runCommitsTick', () => {
         store: fakeStore(),
         syncOne: async (_d, r) => {
           if (r.repositoryId === 2) {
-            throw new BitbucketRateLimitError('/repositories/tigerit/repo-2/commits', 1);
+            throw new BitbucketRateLimitError('/repositories/acme/repo-2/commits', 1);
           }
           return makeOkResult(r);
         },

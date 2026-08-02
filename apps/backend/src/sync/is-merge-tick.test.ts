@@ -118,9 +118,9 @@ function makeClient(fetchFn: typeof globalThis.fetch, opts: { budget?: number } 
 
 const COLD: IsMergeBackfillCandidate = {
   repositoryId: 7,
-  workspace: 'tigerit',
-  slug: 'boing',
-  fullName: 'tigerit/boing',
+  workspace: 'acme',
+  slug: 'api',
+  fullName: 'acme/api',
   cursorSha: null,
 };
 
@@ -264,8 +264,8 @@ describe('runIsMergeBackfillTick', () => {
   it('drains multiple repos, returns queue-empty when the queue is exhausted', async () => {
     const { store, state } = makeStore({
       candidates: [
-        { ...COLD, repositoryId: 1, fullName: 'tigerit/a' },
-        { ...COLD, repositoryId: 2, fullName: 'tigerit/b' },
+        { ...COLD, repositoryId: 1, fullName: 'acme/a' },
+        { ...COLD, repositoryId: 2, fullName: 'acme/b' },
       ],
     });
     fetchMock

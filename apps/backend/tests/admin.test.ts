@@ -33,6 +33,7 @@ const testConfig: AppConfig = {
   REDIS_URL: 'redis://localhost:6379',
   BITBUCKET_BASE_URL: 'https://api.bitbucket.org/2.0',
   ORG_EMAIL_DOMAINS: [],
+  NAME_NOISE_TOKENS: [],
   BITBUCKET_HOURLY_CALL_BUDGET: 800,
   BITBUCKET_MIN_CALL_INTERVAL_MS: 0,
   BITBUCKET_MAX_CALL_INTERVAL_MS: 0,
@@ -566,7 +567,7 @@ function makeSyncDeps(
       client,
       store,
       logger,
-      workspace: 'tigerit',
+      workspace: 'acme',
       seeds: () => [],
       commitStore: noopCommitStore(),
       prStore: noopPrStore(),
@@ -613,14 +614,14 @@ describe('admin routes', () => {
         .mockResolvedValueOnce(
           jsonResponse({
             uuid: '{r1}',
-            slug: 'boing-server',
-            full_name: 'tigerit/boing-server',
-            workspace: { slug: 'tigerit' },
-            project: { key: 'BOING' },
+            slug: 'api-server',
+            full_name: 'acme/api-server',
+            workspace: { slug: 'acme' },
+            project: { key: 'PLATFORM' },
           }),
         );
       const { deps, state } = makeSyncDeps(fetchMock, {
-        seeds: () => [{ workspace: 'tigerit', slug: 'boing-server', archived: false }],
+        seeds: () => [{ workspace: 'acme', slug: 'api-server', archived: false }],
       });
       appInstance = await buildApp({
         config: testConfig,
@@ -651,10 +652,10 @@ describe('admin routes', () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse({
           uuid: '{r1}',
-          slug: 'boing-relay',
-          full_name: 'tigerit/boing-relay',
-          workspace: { slug: 'tigerit' },
-          project: { key: 'BOING' },
+          slug: 'relay-service',
+          full_name: 'acme/relay-service',
+          workspace: { slug: 'acme' },
+          project: { key: 'PLATFORM' },
         }),
       );
       const { deps, state } = makeSyncDeps(fetchMock);
@@ -667,12 +668,12 @@ describe('admin routes', () => {
       const res = await appInstance.inject({
         method: 'POST',
         url: '/api/admin/repositories',
-        payload: { workspace: 'tigerit', slug: 'boing-relay' },
+        payload: { workspace: 'acme', slug: 'relay-service' },
       });
 
       expect(res.statusCode).toBe(201);
       expect(res.json()).toEqual({
-        fullName: 'tigerit/boing-relay',
+        fullName: 'acme/relay-service',
         status: 'inserted',
       });
       expect(state.repositories.size).toBe(1);
@@ -682,10 +683,10 @@ describe('admin routes', () => {
       const { deps, state } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -698,12 +699,12 @@ describe('admin routes', () => {
       const res = await appInstance.inject({
         method: 'POST',
         url: '/api/admin/repositories',
-        payload: { workspace: 'tigerit', slug: 'boing-server' },
+        payload: { workspace: 'acme', slug: 'api-server' },
       });
 
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({
-        fullName: 'tigerit/boing-server',
+        fullName: 'acme/api-server',
         status: 'already-tracked',
       });
       expect(state.repositories.size).toBe(1);
@@ -722,12 +723,12 @@ describe('admin routes', () => {
       const res = await appInstance.inject({
         method: 'POST',
         url: '/api/admin/repositories',
-        payload: { workspace: 'tigerit', slug: 'does-not-exist' },
+        payload: { workspace: 'acme', slug: 'does-not-exist' },
       });
 
       expect(res.statusCode).toBe(404);
       expect(res.json()).toMatchObject({
-        fullName: 'tigerit/does-not-exist',
+        fullName: 'acme/does-not-exist',
         status: 'not-found',
       });
     });
@@ -743,7 +744,7 @@ describe('admin routes', () => {
       const res = await appInstance.inject({
         method: 'POST',
         url: '/api/admin/repositories',
-        payload: { workspace: 'tigerit' }, // missing slug
+        payload: { workspace: 'acme' }, // missing slug
       });
 
       expect(res.statusCode).toBe(400);
@@ -758,10 +759,10 @@ describe('admin routes', () => {
       const { deps, state } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -769,12 +770,12 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/archive',
+        url: '/api/admin/repositories/acme/api-server/archive',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/boing-server', archived: true });
-      const row = await deps.store.findRepositoryByFullName('tigerit/boing-server');
+      expect(res.json()).toEqual({ fullName: 'acme/api-server', archived: true });
+      const row = await deps.store.findRepositoryByFullName('acme/api-server');
       expect(row?.archived).toBe(true);
       // Archived rows drop out of listTrackedRepositories.
       const tracked = await deps.store.listTrackedRepositories();
@@ -786,10 +787,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: true,
       });
@@ -797,11 +798,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/archive',
+        url: '/api/admin/repositories/acme/api-server/archive',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/boing-server', archived: true });
+      expect(res.json()).toEqual({ fullName: 'acme/api-server', archived: true });
     });
 
     it('returns 404 when the repo is not tracked', async () => {
@@ -810,11 +811,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/ghost/archive',
+        url: '/api/admin/repositories/acme/ghost/archive',
       });
 
       expect(res.statusCode).toBe(404);
-      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/ghost' });
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'acme/ghost' });
     });
   });
 
@@ -823,10 +824,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: true,
       });
@@ -834,14 +835,14 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/unarchive',
+        url: '/api/admin/repositories/acme/api-server/unarchive',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/boing-server', archived: false });
+      expect(res.json()).toEqual({ fullName: 'acme/api-server', archived: false });
       // Back in the tracked list.
       const tracked = await deps.store.listTrackedRepositories();
-      expect(tracked.map((r) => r.fullName)).toEqual(['tigerit/boing-server']);
+      expect(tracked.map((r) => r.fullName)).toEqual(['acme/api-server']);
     });
 
     it('returns 404 when the repo is not tracked', async () => {
@@ -850,7 +851,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/ghost/unarchive',
+        url: '/api/admin/repositories/acme/ghost/unarchive',
       });
 
       expect(res.statusCode).toBe(404);
@@ -862,10 +863,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       const { row } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -874,16 +875,16 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/include',
+        url: '/api/admin/repositories/acme/api-server/include',
       });
 
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({
-        fullName: 'tigerit/boing-server',
+        fullName: 'acme/api-server',
         syncExcluded: false,
         cursorsReset: true,
       });
-      const after = await deps.store.findRepositoryByFullName('tigerit/boing-server');
+      const after = await deps.store.findRepositoryByFullName('acme/api-server');
       expect(after?.syncExcluded).toBe(false);
       expect(after?.syncExcludeReason).toBeNull();
     });
@@ -892,10 +893,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -903,7 +904,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/include',
+        url: '/api/admin/repositories/acme/api-server/include',
       });
 
       expect(res.statusCode).toBe(200);
@@ -915,7 +916,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/ghost/include',
+        url: '/api/admin/repositories/acme/ghost/include',
       });
 
       expect(res.statusCode).toBe(404);
@@ -929,21 +930,21 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/ghost/reconcile',
+        url: '/api/admin/repositories/acme/ghost/reconcile',
       });
 
       expect(res.statusCode).toBe(404);
-      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/ghost' });
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'acme/ghost' });
     });
 
     it('returns 409 when the repo is not excluded (wrong state)', async () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -951,7 +952,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/reconcile',
+        url: '/api/admin/repositories/acme/api-server/reconcile',
       });
 
       expect(res.statusCode).toBe(409);
@@ -962,10 +963,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       const { row } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -974,7 +975,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/boing-server/reconcile',
+        url: '/api/admin/repositories/acme/api-server/reconcile',
       });
 
       expect(res.statusCode).toBe(409);
@@ -987,10 +988,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       const { row } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: 'OLD',
         slug: 'old-name',
-        fullName: 'tigerit/old-name',
+        fullName: 'acme/old-name',
 
         archived: false,
       });
@@ -999,8 +1000,8 @@ describe('admin routes', () => {
         jsonResponse({
           uuid: '{r1}',
           slug: 'new-name',
-          full_name: 'tigerit/new-name',
-          workspace: { slug: 'tigerit' },
+          full_name: 'acme/new-name',
+          workspace: { slug: 'acme' },
           project: { key: 'NEW' },
         }),
       );
@@ -1008,18 +1009,18 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/old-name/rename',
-        payload: { workspace: 'tigerit', slug: 'new-name' },
+        url: '/api/admin/repositories/acme/old-name/rename',
+        payload: { workspace: 'acme', slug: 'new-name' },
       });
 
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({
-        previousFullName: 'tigerit/old-name',
-        fullName: 'tigerit/new-name',
+        previousFullName: 'acme/old-name',
+        fullName: 'acme/new-name',
         syncExcluded: false,
         cursorsReset: true,
       });
-      const after = await deps.store.findRepositoryByFullName('tigerit/new-name');
+      const after = await deps.store.findRepositoryByFullName('acme/new-name');
       expect(after?.slug).toBe('new-name');
       expect(after?.project).toBe('NEW');
       expect(after?.syncExcluded).toBe(false);
@@ -1029,10 +1030,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'old-name',
-        fullName: 'tigerit/old-name',
+        fullName: 'acme/old-name',
 
         archived: false,
       });
@@ -1040,22 +1041,22 @@ describe('admin routes', () => {
         jsonResponse({
           uuid: '{r-different}',
           slug: 'other',
-          full_name: 'tigerit/other',
-          workspace: { slug: 'tigerit' },
+          full_name: 'acme/other',
+          workspace: { slug: 'acme' },
         }),
       );
       appInstance = await buildApp({ config: testConfig, logger: createLogger('test'), syncDeps: deps });
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/old-name/rename',
-        payload: { workspace: 'tigerit', slug: 'other' },
+        url: '/api/admin/repositories/acme/old-name/rename',
+        payload: { workspace: 'acme', slug: 'other' },
       });
 
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({ error: 'uuid_mismatch' });
       // Row unchanged.
-      const after = await deps.store.findRepositoryByFullName('tigerit/old-name');
+      const after = await deps.store.findRepositoryByFullName('acme/old-name');
       expect(after?.slug).toBe('old-name');
     });
 
@@ -1063,10 +1064,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'old-name',
-        fullName: 'tigerit/old-name',
+        fullName: 'acme/old-name',
 
         archived: false,
       });
@@ -1075,8 +1076,8 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/old-name/rename',
-        payload: { workspace: 'tigerit', slug: 'ghost' },
+        url: '/api/admin/repositories/acme/old-name/rename',
+        payload: { workspace: 'acme', slug: 'ghost' },
       });
 
       expect(res.statusCode).toBe(404);
@@ -1087,10 +1088,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'old-name',
-        fullName: 'tigerit/old-name',
+        fullName: 'acme/old-name',
 
         archived: false,
       });
@@ -1098,7 +1099,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/old-name/rename',
+        url: '/api/admin/repositories/acme/old-name/rename',
         payload: { workspace: '', slug: '' },
       });
 
@@ -1110,10 +1111,10 @@ describe('admin routes', () => {
     async function seedRepo(deps: SyncRunnerDeps): Promise<void> {
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'r',
-        fullName: 'tigerit/r',
+        fullName: 'acme/r',
 
         archived: false,
       });
@@ -1126,11 +1127,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'GET',
-        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/r/diff-stats/exclusions',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/r', patterns: [] });
+      expect(res.json()).toEqual({ fullName: 'acme/r', patterns: [] });
     });
 
     it('PUT replaces the pattern list and is round-trippable via GET', async () => {
@@ -1140,21 +1141,21 @@ describe('admin routes', () => {
 
       const putRes = await appInstance.inject({
         method: 'PUT',
-        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/r/diff-stats/exclusions',
         payload: { patterns: ['*.png', '**/pnpm-lock.yaml', 'dist/**'] },
       });
       expect(putRes.statusCode).toBe(200);
       expect(putRes.json()).toEqual({
-        fullName: 'tigerit/r',
+        fullName: 'acme/r',
         patterns: ['*.png', '**/pnpm-lock.yaml', 'dist/**'],
       });
 
       const getRes = await appInstance.inject({
         method: 'GET',
-        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/r/diff-stats/exclusions',
       });
       expect(getRes.json()).toEqual({
-        fullName: 'tigerit/r',
+        fullName: 'acme/r',
         patterns: ['*.png', '**/pnpm-lock.yaml', 'dist/**'],
       });
     });
@@ -1166,7 +1167,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'PUT',
-        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/r/diff-stats/exclusions',
         payload: { patterns: ['*.png', ''] },
       });
 
@@ -1181,7 +1182,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'PUT',
-        url: '/api/admin/repositories/tigerit/r/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/r/diff-stats/exclusions',
         payload: { patterns: 'not-an-array' },
       });
 
@@ -1194,13 +1195,13 @@ describe('admin routes', () => {
 
       const getRes = await appInstance.inject({
         method: 'GET',
-        url: '/api/admin/repositories/tigerit/ghost/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/ghost/diff-stats/exclusions',
       });
       expect(getRes.statusCode).toBe(404);
 
       const putRes = await appInstance.inject({
         method: 'PUT',
-        url: '/api/admin/repositories/tigerit/ghost/diff-stats/exclusions',
+        url: '/api/admin/repositories/acme/ghost/diff-stats/exclusions',
         payload: { patterns: [] },
       });
       expect(putRes.statusCode).toBe(404);
@@ -1213,7 +1214,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/r/diff-stats/reset',
+        url: '/api/admin/repositories/acme/r/diff-stats/reset',
       });
 
       // The fake commitStore returns 0 for resetCount; we just verify
@@ -1221,7 +1222,7 @@ describe('admin routes', () => {
       // are covered in the resetDiffStatsForRepo unit tests / manual
       // smoke testing.
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/r', resetCount: 0 });
+      expect(res.json()).toEqual({ fullName: 'acme/r', resetCount: 0 });
     });
 
     it('POST /reset returns 404 for unknown repo', async () => {
@@ -1230,7 +1231,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/ghost/diff-stats/reset',
+        url: '/api/admin/repositories/acme/ghost/diff-stats/reset',
       });
 
       expect(res.statusCode).toBe(404);
@@ -1242,10 +1243,10 @@ describe('admin routes', () => {
       const { deps, state } = makeSyncDeps(fetchMock);
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'doomed',
-        fullName: 'tigerit/doomed',
+        fullName: 'acme/doomed',
 
         archived: false,
       });
@@ -1253,12 +1254,12 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'DELETE',
-        url: '/api/admin/repositories/tigerit/doomed',
+        url: '/api/admin/repositories/acme/doomed',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/doomed', deleted: 1 });
-      expect(state.repositories.has('tigerit/doomed')).toBe(false);
+      expect(res.json()).toEqual({ fullName: 'acme/doomed', deleted: 1 });
+      expect(state.repositories.has('acme/doomed')).toBe(false);
     });
 
     it('returns 404 when the repo is not tracked', async () => {
@@ -1267,7 +1268,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'DELETE',
-        url: '/api/admin/repositories/tigerit/ghost',
+        url: '/api/admin/repositories/acme/ghost',
       });
 
       expect(res.statusCode).toBe(404);
@@ -1288,11 +1289,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/never-tracked/commits',
+        url: '/api/admin/sync/repositories/acme/never-tracked/commits',
       });
 
       expect(res.statusCode).toBe(404);
-      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/never-tracked' });
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'acme/never-tracked' });
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
@@ -1302,10 +1303,10 @@ describe('admin routes', () => {
       // Seed a tracked repo + sync_state row at the existing cursor.
       const { row: repo } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -1351,14 +1352,14 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/boing-server/commits',
+        url: '/api/admin/sync/repositories/acme/api-server/commits',
       });
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body).toMatchObject({
         repositoryId: repo.id,
-        fullName: 'tigerit/boing-server',
+        fullName: 'acme/api-server',
         mode: 'delta',
         fetched: 2,
         inserted: 2,
@@ -1375,10 +1376,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock, { commitStore });
       const { row: repo } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -1412,11 +1413,11 @@ describe('admin routes', () => {
 
       const res1 = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/boing-server/commits',
+        url: '/api/admin/sync/repositories/acme/api-server/commits',
       });
       const res2 = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/boing-server/commits',
+        url: '/api/admin/sync/repositories/acme/api-server/commits',
       });
 
       expect(res1.json()).toMatchObject({ inserted: 0, hitKnownSha: true });
@@ -1432,19 +1433,19 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock, { commitStore });
       const { row: r1 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'a',
-        fullName: 'tigerit/a',
+        fullName: 'acme/a',
 
         archived: false,
       });
       const { row: r2 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r2}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'b',
-        fullName: 'tigerit/b',
+        fullName: 'acme/b',
 
         archived: false,
       });
@@ -1461,7 +1462,7 @@ describe('admin routes', () => {
       }
       // Each repo: a single page with one commit.
       fetchMock.mockImplementation((url) => {
-        const slug = String(url).includes('/tigerit/a/') ? 'a' : 'b';
+        const slug = String(url).includes('/acme/a/') ? 'a' : 'b';
         return Promise.resolve(
           jsonResponse({
             pagelen: 100,
@@ -1527,11 +1528,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/never-tracked/pullrequests',
+        url: '/api/admin/sync/repositories/acme/never-tracked/pullrequests',
       });
 
       expect(res.statusCode).toBe(404);
-      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/never-tracked' });
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'acme/never-tracked' });
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
@@ -1540,10 +1541,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock, { prStore });
       const { row: repo } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
-        project: 'BOING',
-        slug: 'boing-server',
-        fullName: 'tigerit/boing-server',
+        workspace: 'acme',
+        project: 'PLATFORM',
+        slug: 'api-server',
+        fullName: 'acme/api-server',
 
         archived: false,
       });
@@ -1573,14 +1574,14 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/boing-server/pullrequests',
+        url: '/api/admin/sync/repositories/acme/api-server/pullrequests',
       });
 
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body).toMatchObject({
         repositoryId: repo.id,
-        fullName: 'tigerit/boing-server',
+        fullName: 'acme/api-server',
         mode: 'cold',
         fetched: 1,
         inserted: 1,
@@ -1596,19 +1597,19 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock, { prStore });
       const { row: repo1 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'a',
-        fullName: 'tigerit/a',
+        fullName: 'acme/a',
 
         archived: false,
       });
       const { row: repo2 } = await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r2}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'b',
-        fullName: 'tigerit/b',
+        fullName: 'acme/b',
 
         archived: false,
       });
@@ -1684,11 +1685,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/never-tracked/deepen',
+        url: '/api/admin/sync/repositories/acme/never-tracked/deepen',
       });
 
       expect(res.statusCode).toBe(404);
-      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'tigerit/never-tracked' });
+      expect(res.json()).toEqual({ error: 'not_tracked', fullName: 'acme/never-tracked' });
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
@@ -1697,10 +1698,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock, { commitStore });
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'fresh',
-        fullName: 'tigerit/fresh',
+        fullName: 'acme/fresh',
 
         archived: false,
       });
@@ -1713,11 +1714,11 @@ describe('admin routes', () => {
       // route is 200, no BB call was made.
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/sync/repositories/tigerit/fresh/deepen',
+        url: '/api/admin/sync/repositories/acme/fresh/deepen',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toMatchObject({ fullName: 'tigerit/fresh', fetched: 0 });
+      expect(res.json()).toMatchObject({ fullName: 'acme/fresh', fetched: 0 });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
@@ -1750,10 +1751,10 @@ describe('admin routes', () => {
       const { deps } = makeSyncDeps(fetchMock, { commitStore });
       await deps.store.insertRepositoryWithSyncState({
         bitbucketUuid: '{r1}',
-        workspace: 'tigerit',
+        workspace: 'acme',
         project: null,
         slug: 'r1',
-        fullName: 'tigerit/r1',
+        fullName: 'acme/r1',
 
         archived: false,
       });
@@ -1761,11 +1762,11 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/r1/backfill/is_merge',
+        url: '/api/admin/repositories/acme/r1/backfill/is_merge',
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ fullName: 'tigerit/r1', walked: 3, pages: 1, updated: 3 });
+      expect(res.json()).toEqual({ fullName: 'acme/r1', walked: 3, pages: 1, updated: 3 });
 
       // The fake captures the bulk call — assert the sha → isMerge mapping.
       expect(commitState.isMergeBackfillCalls).toHaveLength(1);
@@ -1783,7 +1784,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/repositories/tigerit/never-tracked/backfill/is_merge',
+        url: '/api/admin/repositories/acme/never-tracked/backfill/is_merge',
       });
 
       expect(res.statusCode).toBe(404);
@@ -1835,8 +1836,8 @@ describe('admin routes', () => {
 
     it('writes the parsed email for each user that yields a parseable address', async () => {
       const { store: commitStore, writes } = makeBackfillCommitStore([
-        { userId: 1, bitbucketUuid: '{u1}', workspace: 'tigerit', slug: 'repo-a', sha: 'sha-a' },
-        { userId: 2, bitbucketUuid: '{u2}', workspace: 'tigerit', slug: 'repo-b', sha: 'sha-b' },
+        { userId: 1, bitbucketUuid: '{u1}', workspace: 'acme', slug: 'repo-a', sha: 'sha-a' },
+        { userId: 2, bitbucketUuid: '{u2}', workspace: 'acme', slug: 'repo-b', sha: 'sha-b' },
       ]);
       fetchMock
         .mockResolvedValueOnce(commitPageWithRaw('sha-a', 'Alice Example <alice@example.com>'))
@@ -1862,9 +1863,9 @@ describe('admin routes', () => {
 
     it('skips users whose author.raw fails to parse (noreply / malformed) without aborting the batch', async () => {
       const { store: commitStore, writes } = makeBackfillCommitStore([
-        { userId: 1, bitbucketUuid: '{u1}', workspace: 'tigerit', slug: 'repo-a', sha: 'sha-a' },
-        { userId: 2, bitbucketUuid: '{u2}', workspace: 'tigerit', slug: 'repo-b', sha: 'sha-b' },
-        { userId: 3, bitbucketUuid: '{u3}', workspace: 'tigerit', slug: 'repo-c', sha: 'sha-c' },
+        { userId: 1, bitbucketUuid: '{u1}', workspace: 'acme', slug: 'repo-a', sha: 'sha-a' },
+        { userId: 2, bitbucketUuid: '{u2}', workspace: 'acme', slug: 'repo-b', sha: 'sha-b' },
+        { userId: 3, bitbucketUuid: '{u3}', workspace: 'acme', slug: 'repo-c', sha: 'sha-c' },
       ]);
       fetchMock
         .mockResolvedValueOnce(commitPageWithRaw('sha-a', 'Alice <alice@example.com>'))
@@ -1888,8 +1889,8 @@ describe('admin routes', () => {
 
     it('records per-user fetch failures without poisoning the rest of the batch', async () => {
       const { store: commitStore, writes } = makeBackfillCommitStore([
-        { userId: 1, bitbucketUuid: '{u1}', workspace: 'tigerit', slug: 'gone', sha: 'sha-gone' },
-        { userId: 2, bitbucketUuid: '{u2}', workspace: 'tigerit', slug: 'live', sha: 'sha-live' },
+        { userId: 1, bitbucketUuid: '{u1}', workspace: 'acme', slug: 'gone', sha: 'sha-gone' },
+        { userId: 2, bitbucketUuid: '{u2}', workspace: 'acme', slug: 'live', sha: 'sha-live' },
       ]);
       fetchMock
         .mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404))
@@ -1998,8 +1999,8 @@ describe('admin routes', () => {
             date: '2026-05-18T10:00:00+00:00',
             parents: [],
             author: {
-              raw: 'Foysal <thisisfoysal@gmail.com>',
-              ...(opts.uuid ? { user: { uuid: opts.uuid, display_name: 'Foysal' } } : {}),
+              raw: 'Alex <alex.rivera@gmail.com>',
+              ...(opts.uuid ? { user: { uuid: opts.uuid, display_name: 'Alex' } } : {}),
             },
           },
         ],
@@ -2044,7 +2045,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: '/api/admin/users/%7Bfdc5c167-6eb0-43ec-b46c-59983574b07e%7D/reattribute-anonymous?workspace=tigerit',
+        url: '/api/admin/users/%7Bfdc5c167-6eb0-43ec-b46c-59983574b07e%7D/reattribute-anonymous?workspace=acme',
       });
 
       expect(res.statusCode).toBe(400);
@@ -2059,36 +2060,36 @@ describe('admin routes', () => {
       state.anonymousCandidates.push(
         {
           commitId: 1,
-          sha: 'sha-foysal-a',
+          sha: 'sha-alex-a',
           repositoryId: 10,
-          workspace: 'tigerit',
-          slug: 'signalmessenger',
-          fullName: 'tigerit/signalmessenger',
+          workspace: 'acme',
+          slug: 'messenger',
+          fullName: 'acme/messenger',
           authoredAt: new Date('2026-05-18T10:00:00Z'),
         },
         {
           commitId: 2,
           sha: 'sha-someone-else',
           repositoryId: 10,
-          workspace: 'tigerit',
-          slug: 'signalmessenger',
-          fullName: 'tigerit/signalmessenger',
+          workspace: 'acme',
+          slug: 'messenger',
+          fullName: 'acme/messenger',
           authoredAt: new Date('2026-05-15T08:00:00Z'),
         },
         {
           commitId: 3,
           sha: 'sha-still-anon',
           repositoryId: 10,
-          workspace: 'tigerit',
-          slug: 'signalmessenger',
-          fullName: 'tigerit/signalmessenger',
+          workspace: 'acme',
+          slug: 'messenger',
+          fullName: 'acme/messenger',
           authoredAt: new Date('2026-05-12T08:00:00Z'),
         },
       );
-      // BB now resolves sha-foysal-a to the target; sha-someone-else
+      // BB now resolves sha-alex-a to the target; sha-someone-else
       // to a different user; sha-still-anon stays anonymous on BB.
       fetchMock
-        .mockResolvedValueOnce(bbCommitPage('sha-foysal-a', { uuid: targetUuid }))
+        .mockResolvedValueOnce(bbCommitPage('sha-alex-a', { uuid: targetUuid }))
         .mockResolvedValueOnce(bbCommitPage('sha-someone-else', { uuid: otherUuid }))
         .mockResolvedValueOnce(bbCommitPage('sha-still-anon'));
 
@@ -2132,18 +2133,18 @@ describe('admin routes', () => {
           commitId: 1,
           sha: 'sha-in-scope',
           repositoryId: 10,
-          workspace: 'tigerit',
-          slug: 'signalmessenger',
-          fullName: 'tigerit/signalmessenger',
+          workspace: 'acme',
+          slug: 'messenger',
+          fullName: 'acme/messenger',
           authoredAt: new Date('2026-05-18T10:00:00Z'),
         },
         {
           commitId: 2,
           sha: 'sha-out-of-scope',
           repositoryId: 11,
-          workspace: 'tigerit',
+          workspace: 'acme',
           slug: 'other-repo',
-          fullName: 'tigerit/other-repo',
+          fullName: 'acme/other-repo',
           authoredAt: new Date('2026-05-18T10:00:00Z'),
         },
       );
@@ -2155,7 +2156,7 @@ describe('admin routes', () => {
 
       const res = await appInstance.inject({
         method: 'POST',
-        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous?workspace=tigerit&slug=signalmessenger`,
+        url: `/api/admin/users/${encodeURIComponent(targetUuid)}/reattribute-anonymous?workspace=acme&slug=messenger`,
       });
 
       expect(res.statusCode).toBe(200);
@@ -2211,9 +2212,9 @@ describe('admin routes', () => {
           commitId: i,
           sha: `sha-${i}`,
           repositoryId: 10,
-          workspace: 'tigerit',
+          workspace: 'acme',
           slug: 'r',
-          fullName: 'tigerit/r',
+          fullName: 'acme/r',
           authoredAt: new Date('2026-05-18T10:00:00Z'),
         });
       }
@@ -2243,18 +2244,18 @@ describe('admin routes', () => {
           commitId: 1,
           sha: 'sha-gone',
           repositoryId: 10,
-          workspace: 'tigerit',
+          workspace: 'acme',
           slug: 'r',
-          fullName: 'tigerit/r',
+          fullName: 'acme/r',
           authoredAt: new Date('2026-05-18T10:00:00Z'),
         },
         {
           commitId: 2,
           sha: 'sha-live',
           repositoryId: 10,
-          workspace: 'tigerit',
+          workspace: 'acme',
           slug: 'r',
-          fullName: 'tigerit/r',
+          fullName: 'acme/r',
           authoredAt: new Date('2026-05-18T10:00:00Z'),
         },
       );

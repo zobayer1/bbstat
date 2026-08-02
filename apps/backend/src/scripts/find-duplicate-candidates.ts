@@ -14,25 +14,6 @@ import { loadConfig } from '../config.js';
 import { createDb } from '../db/client.js';
 import { users } from '../db/schema.js';
 
-// Tokens stripped from names before matching: honorifics + the near-universal
-// Bangladeshi name prefixes, so "Md. Foysal Ahamed" matches "Foysal Ahamed".
-// Tune for your org's naming conventions.
-const NAME_NOISE = new Set([
-  'md',
-  'mohd',
-  'mohammad',
-  'mohammed',
-  'mohammod',
-  'muhammad',
-  'mr',
-  'mrs',
-  'ms',
-  'dr',
-  'engr',
-  'eng',
-  'prof',
-]);
-
 const DEFAULT_MIN_SCORE = 0.55;
 
 interface UserRec {
@@ -47,14 +28,17 @@ interface UserRec {
   emailLocalTokens: string[];
 }
 
-function normalizeName(raw: string): string[] {
+// `noise` holds the tokens to strip — honorifics and naming-convention
+// prefixes that carry no identifying signal. Configured per deployment via
+// NAME_NOISE_TOKENS (see config.ts).
+function normalizeName(raw: string, noise: ReadonlySet<string>): string[] {
   const tokens = raw
     .toLowerCase()
     .replace(/[^a-z\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .split(' ')
-    .filter((t) => t.length > 1 && !NAME_NOISE.has(t));
+    .filter((t) => t.length > 1 && !noise.has(t));
   return Array.from(new Set(tokens)).sort();
 }
 
@@ -195,6 +179,7 @@ function main(): void {
 
   const config = loadConfig();
   const db = createDb(config.DATABASE_URL);
+  const nameNoise = new Set(config.NAME_NOISE_TOKENS);
 
   void (async () => {
     const rows = await db
@@ -215,7 +200,7 @@ function main(): void {
         displayName: r.displayName ?? '',
         username: r.username,
         email: r.email,
-        nameTokens: normalizeName(r.displayName ?? ''),
+        nameTokens: normalizeName(r.displayName ?? '', nameNoise),
         emailNorm: e?.norm ?? null,
         emailLocal: e?.local ?? null,
         emailLocalTokens: e?.localTokens ?? [],

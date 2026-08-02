@@ -96,7 +96,7 @@ describe('wrapBusWithRedis', () => {
     bridgeA.subscribe((e) => seenA.push(e));
     bridgeB.subscribe((e) => seenB.push(e));
 
-    bridgeA.publish({ event: 'repository.deleted', payload: { repositoryId: 42, fullName: 'tigerit/x' } });
+    bridgeA.publish({ event: 'repository.deleted', payload: { repositoryId: 42, fullName: 'acme/x' } });
 
     // Redis publish() is async — give the fake event loop a tick.
     await flushMicrotasks();
@@ -104,7 +104,7 @@ describe('wrapBusWithRedis', () => {
     // A sees it locally (synchronous), B sees it via the bridge.
     expect(seenA).toHaveLength(1);
     expect(seenB).toHaveLength(1);
-    expect(seenB[0]).toEqual({ event: 'repository.deleted', payload: { repositoryId: 42, fullName: 'tigerit/x' } });
+    expect(seenB[0]).toEqual({ event: 'repository.deleted', payload: { repositoryId: 42, fullName: 'acme/x' } });
 
     await bridgeA.dispose();
     await bridgeB.dispose();

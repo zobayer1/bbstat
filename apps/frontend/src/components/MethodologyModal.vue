@@ -26,6 +26,12 @@ const STATIC = {
   steadyEddieSilverPct: 50,
 } as const;
 
+// Deployment-specific contact, baked at build time by Vite — same var the
+// global footer in App.vue uses. Unset (the default) hides the suggestion
+// line rather than pointing at someone else's inbox.
+const contactEmail = import.meta.env.VITE_CONTACT_EMAIL ?? '';
+const suggestionMailto = `mailto:${contactEmail}?subject=${encodeURIComponent('ShipShow Score — algorithm suggestion')}`;
+
 // `throwOnError: false` renders bad LaTeX as red source text instead of
 // crashing the whole component — a safety net while iterating on formulas.
 function tex(src: string): string {
@@ -264,12 +270,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
           </div>
         </section>
 
-        <p class="border-t border-slate-100 pt-4 text-xs text-slate-500">
+        <p v-if="contactEmail" class="border-t border-slate-100 pt-4 text-xs text-slate-500">
           Suggest changes in the algorithm to
           <a
-            href="mailto:zobayer@tigerit.com?subject=ShipShow%20Score%20%E2%80%94%20algorithm%20suggestion"
+            :href="suggestionMailto"
             class="font-medium text-blue-600 underline-offset-2 hover:text-blue-800 hover:underline"
-            >zobayer@tigerit.com</a
+            >{{ contactEmail }}</a
           >.
         </p>
       </div>

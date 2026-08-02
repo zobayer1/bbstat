@@ -11,14 +11,14 @@ describe('createEventBus', () => {
 
     bus.publish({
       event: 'repository.deleted',
-      payload: { repositoryId: 1, fullName: 'tigerit/r' },
+      payload: { repositoryId: 1, fullName: 'acme/r' },
     });
 
     expect(a).toHaveBeenCalledOnce();
     expect(b).toHaveBeenCalledOnce();
     expect(a.mock.calls[0]?.[0]).toEqual({
       event: 'repository.deleted',
-      payload: { repositoryId: 1, fullName: 'tigerit/r' },
+      payload: { repositoryId: 1, fullName: 'acme/r' },
     });
   });
 

@@ -35,9 +35,11 @@
 # Missing file is treated as "no seeds" when using the default path;
 # explicit paths must exist.
 
+# Replace `acme` below with your own BitBucket workspace slug — the same value
+# as BITBUCKET_WORKSPACE in `.env`.
 repos:
-  - tigerit/boing-server
-  - tigerit/boing-relay
-  - tigerit/boing-instances
-  # - { name: tigerit/legacy-thing, archived: true }
-  # - tigerit/comm-video-chat
+  - acme/api-server
+  - acme/web-client
+  - acme/shared-lib
+  # - { name: acme/legacy-thing, archived: true }
+  # - acme/internal-tooling

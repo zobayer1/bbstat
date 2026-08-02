@@ -14,9 +14,9 @@ import { fetchDiffStatsForCommits } from './diff-stats.js';
 function makeRepo(over: Partial<RepositoryHandle> = {}): RepositoryHandle {
   return {
     repositoryId: 1,
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug: 'r',
-    fullName: 'tigerit/r',
+    fullName: 'acme/r',
     diffStatsExcludePatterns: [],
     ...over,
   };

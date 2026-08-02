@@ -12,9 +12,9 @@ import type { PrSyncDeps, PrSyncOptions, RepoPrSyncResult } from './pull-request
 function makeRepo(id: number): RepositoryHandle {
   return {
     repositoryId: id,
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug: `repo-${id}`,
-    fullName: `tigerit/repo-${id}`,
+    fullName: `acme/repo-${id}`,
     diffStatsExcludePatterns: [],
   };
 }

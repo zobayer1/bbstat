@@ -11,9 +11,9 @@ import type { RepoActivity } from '../src/api/client';
 
 const sample: RepoActivity = {
   repository: {
-    workspace: 'tigerit',
+    workspace: 'acme',
     slug: 'r1',
-    fullName: 'tigerit/r1',
+    fullName: 'acme/r1',
     project: 'COMM',
     syncStatus: 'ok',
     archived: false,
@@ -48,25 +48,25 @@ describe('repoActivity store', () => {
 
   it('keyFor() composes "<workspace>/<slug>"', () => {
     const store = useRepoActivityStore();
-    expect(store.keyFor('tigerit', 'r1')).toBe('tigerit/r1');
+    expect(store.keyFor('acme', 'r1')).toBe('acme/r1');
   });
 
   it('fetch(workspace, slug) populates byFullName under the composite key', async () => {
     vi.mocked(api.repositoryActivity).mockResolvedValueOnce(sample);
     const store = useRepoActivityStore();
 
-    await store.fetch('tigerit', 'r1');
+    await store.fetch('acme', 'r1');
 
-    expect(store.byFullName['tigerit/r1']).toEqual(sample);
-    expect(api.repositoryActivity).toHaveBeenCalledWith('tigerit', 'r1');
+    expect(store.byFullName['acme/r1']).toEqual(sample);
+    expect(api.repositoryActivity).toHaveBeenCalledWith('acme', 'r1');
   });
 
   it('records error on API rejection', async () => {
     vi.mocked(api.repositoryActivity).mockRejectedValueOnce(new Error('down'));
     const store = useRepoActivityStore();
 
-    await store.fetch('tigerit', 'r1');
+    await store.fetch('acme', 'r1');
 
-    expect(store.error['tigerit/r1']).toBe('down');
+    expect(store.error['acme/r1']).toBe('down');
   });
 });

@@ -59,6 +59,24 @@ cp tracked-repos.yaml.example tracked-repos.yaml  # curated seed list (gitignore
 
 Then pick a run mode from the table below.
 
+## Configuring for your organization
+
+Nothing about a specific organization is compiled in — every org-shaped value is
+read from the environment or the seed file, and every default is neutral. These
+are the knobs to set before a first ingest:
+
+| Setting                           | Where                  | What it does                                                                                                                                                                                                                 |
+| --------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BITBUCKET_WORKSPACE`             | `.env` / `.env.docker` | The BitBucket workspace slug to ingest. Required for sync and the `/api/admin/*` routes; unset gracefully disables both and the dashboard serves whatever is already stored.                                                 |
+| `BITBUCKET_AUTH_EMAIL` / `_TOKEN` | `.env` / `.env.docker` | API credentials for that workspace.                                                                                                                                                                                          |
+| `repos:` list                     | `tracked-repos.yaml`   | Curated `<workspace>/<slug>` seed list. Seed-only — the DB is canonical once a row exists. Or skip it and enable `REPO_DISCOVERY_ENABLED` to auto-track the workspace.                                                       |
+| `ORG_EMAIL_DOMAINS`               | `.env` / `.env.docker` | Comma-separated domains whose contributors count as workspace members on `/members` even when unflagged upstream. **Empty by default** — the heuristic is off until you set it.                                              |
+| `NAME_NOISE_TOKENS`               | `.env` / `.env.docker` | Name tokens the `make find-duplicates` CLI strips before matching (honorifics, naming-convention prefixes). Defaults to common English honorifics plus the South Asian `Md./Mohammad` prefixes; set it to replace that list. |
+| `VITE_CONTACT_EMAIL`              | `.env` (build-time)    | Contact address in the page footer and the scoring methodology modal. Empty hides both. Baked into the frontend bundle at build time, so rebuild the image to change it.                                                     |
+
+Single-workspace is a current limitation, not a hidden assumption — see the
+multi-workspace note in [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## Run modes
 
 Five ways to run the stack — local without containers (HTTP or HTTPS), full local Docker (with Traefik), or production-base Docker (with or without an external Traefik). Use this table to pick the one that matches what you're working on.

@@ -176,40 +176,40 @@ describe('parseSeedRepoFile', () => {
   it('parses workspace/slug strings and tolerates surrounding whitespace', () => {
     const text = `
 repos:
-  - "  tigerit/boing-server  "
-  - tigerit/boing-relay
+  - "  acme/api-server  "
+  - acme/relay-service
 `;
     expect(parseSeedRepoFile(text)).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', archived: false },
-      { workspace: 'tigerit', slug: 'boing-relay', archived: false },
+      { workspace: 'acme', slug: 'api-server', archived: false },
+      { workspace: 'acme', slug: 'relay-service', archived: false },
     ]);
   });
 
   it('parses the object form { name, diffStats, archived } and mixes it with plain strings', () => {
     const text = `
 repos:
-  - tigerit/boing-server
-  - { name: tigerit/boing-relay, diffStats: true }
-  - name: tigerit/comm-adm
+  - acme/api-server
+  - { name: acme/relay-service, diffStats: true }
+  - name: acme/admin-portal
     diffStats: false
     archived: true
-  - name: tigerit/no-explicit-flag
+  - name: acme/no-explicit-flag
 `;
     expect(parseSeedRepoFile(text)).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', archived: false },
-      { workspace: 'tigerit', slug: 'boing-relay', archived: false },
-      { workspace: 'tigerit', slug: 'comm-adm', archived: true },
+      { workspace: 'acme', slug: 'api-server', archived: false },
+      { workspace: 'acme', slug: 'relay-service', archived: false },
+      { workspace: 'acme', slug: 'admin-portal', archived: true },
       // Both flags omitted on the object form default to false.
-      { workspace: 'tigerit', slug: 'no-explicit-flag', archived: false },
+      { workspace: 'acme', slug: 'no-explicit-flag', archived: false },
     ]);
   });
 
   it('throws on malformed entries', () => {
-    expect(() => parseSeedRepoFile('repos: ["tigerit"]')).toThrow(/must be "<workspace>\/<slug>"/);
-    expect(() => parseSeedRepoFile('repos: ["tigerit/"]')).toThrow(/must be "<workspace>\/<slug>"/);
+    expect(() => parseSeedRepoFile('repos: ["acme"]')).toThrow(/must be "<workspace>\/<slug>"/);
+    expect(() => parseSeedRepoFile('repos: ["acme/"]')).toThrow(/must be "<workspace>\/<slug>"/);
     expect(() => parseSeedRepoFile('repos: ["/repo"]')).toThrow(/must be "<workspace>\/<slug>"/);
     // Object form with a bad `name`.
-    expect(() => parseSeedRepoFile('repos: [{ name: tigerit, diffStats: true }]')).toThrow(
+    expect(() => parseSeedRepoFile('repos: [{ name: acme, diffStats: true }]')).toThrow(
       /must be "<workspace>\/<slug>"/,
     );
   });
@@ -244,9 +244,9 @@ describe('loadSeedTrackedRepos', () => {
 
   it('reads and parses an existing seed file', () => {
     const path = join(dir, 'seeds.yaml');
-    writeFileSync(path, 'repos:\n  - tigerit/boing-server\n');
+    writeFileSync(path, 'repos:\n  - acme/api-server\n');
     expect(loadSeedTrackedRepos(path, { required: false })).toEqual([
-      { workspace: 'tigerit', slug: 'boing-server', archived: false },
+      { workspace: 'acme', slug: 'api-server', archived: false },
     ]);
   });
 });
@@ -267,7 +267,7 @@ describe('syncWorkspaceMembers', () => {
             { user: { uuid: '{u1}', display_name: 'Alice', nickname: 'alice' } },
             { user: { uuid: '{u2}', display_name: 'Bob' } },
           ],
-          next: 'https://api.bitbucket.org/2.0/workspaces/tigerit/members?page=2',
+          next: 'https://api.bitbucket.org/2.0/workspaces/acme/members?page=2',
         }),
       )
       .mockResolvedValueOnce(
@@ -279,7 +279,7 @@ describe('syncWorkspaceMembers', () => {
     const { store, state } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await syncWorkspaceMembers(deps, 'tigerit');
+    const result = await syncWorkspaceMembers(deps, 'acme');
 
     expect(result).toEqual({ total: 3, inserted: 3, updated: 0, departed: 0 });
     expect(state.users.size).toBe(3);
@@ -301,7 +301,7 @@ describe('syncWorkspaceMembers', () => {
     await store.upsertUser({ bitbucketUuid: '{u1}', displayName: 'Old Name', username: null });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await syncWorkspaceMembers(deps, 'tigerit');
+    const result = await syncWorkspaceMembers(deps, 'acme');
 
     expect(result).toEqual({ total: 1, inserted: 0, updated: 1, departed: 0 });
   });
@@ -319,7 +319,7 @@ describe('syncWorkspaceMembers', () => {
     await store.upsertUser({ bitbucketUuid: '{u2}', displayName: 'Bob', username: 'bob' });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await syncWorkspaceMembers(deps, 'tigerit');
+    const result = await syncWorkspaceMembers(deps, 'acme');
 
     expect(result).toEqual({ total: 1, inserted: 0, updated: 1, departed: 1 });
     // Row is retained (history intact) — only the membership flag flips off.
@@ -342,13 +342,13 @@ describe('syncWorkspaceMembers', () => {
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     // Empty pull → guarded, no demotion (see the empty-roster guard test).
-    await syncWorkspaceMembers(deps, 'tigerit');
+    await syncWorkspaceMembers(deps, 'acme');
     expect(state.members.has('{u1}')).toBe(true);
 
     // Manually depart u1 to set up the rejoin, then a non-empty pull returns them.
     await store.markDepartedMembers(['{other}']);
     expect(state.members.has('{u1}')).toBe(false);
-    const rejoin = await syncWorkspaceMembers(deps, 'tigerit');
+    const rejoin = await syncWorkspaceMembers(deps, 'acme');
 
     expect(rejoin.departed).toBe(0);
     expect(state.members.has('{u1}')).toBe(true);
@@ -361,7 +361,7 @@ describe('syncWorkspaceMembers', () => {
     await store.upsertUser({ bitbucketUuid: '{u2}', displayName: 'Bob', username: 'bob' });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await syncWorkspaceMembers(deps, 'tigerit');
+    const result = await syncWorkspaceMembers(deps, 'acme');
 
     expect(result).toEqual({ total: 0, inserted: 0, updated: 0, departed: 0 });
     // Both members survive — an empty pull is a failed fetch, not an exodus.
@@ -374,7 +374,7 @@ describe('syncWorkspaceMembers', () => {
     const { store } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    await syncWorkspaceMembers(deps, 'tigerit');
+    await syncWorkspaceMembers(deps, 'acme');
 
     const [url] = fetchMock.mock.calls[0]!;
     const fields = new URL(url as string).searchParams.get('fields')!.split(',');
@@ -395,27 +395,27 @@ describe('addTrackedRepository', () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
         uuid: '{r1}',
-        slug: 'boing-server',
-        full_name: 'tigerit/boing-server',
-        workspace: { slug: 'tigerit' },
-        project: { key: 'BOING' },
+        slug: 'api-server',
+        full_name: 'acme/api-server',
+        workspace: { slug: 'acme' },
+        project: { key: 'PLATFORM' },
       }),
     );
     const { store, state } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await addTrackedRepository(deps, 'tigerit', 'boing-server');
+    const result = await addTrackedRepository(deps, 'acme', 'api-server');
 
-    expect(result).toEqual({ fullName: 'tigerit/boing-server', status: 'inserted' });
+    expect(result).toEqual({ fullName: 'acme/api-server', status: 'inserted' });
     expect(state.repositories.size).toBe(1);
     expect(state.syncStateRepoIds.size).toBe(1);
-    const row = state.repositories.get('tigerit/boing-server')!;
+    const row = state.repositories.get('acme/api-server')!;
     expect(row).toMatchObject({
       bitbucketUuid: '{r1}',
-      workspace: 'tigerit',
-      project: 'BOING',
-      slug: 'boing-server',
-      fullName: 'tigerit/boing-server',
+      workspace: 'acme',
+      project: 'PLATFORM',
+      slug: 'api-server',
+      fullName: 'acme/api-server',
       archived: false,
     });
   });
@@ -424,17 +424,17 @@ describe('addTrackedRepository', () => {
     const { store, state } = createFakeStore();
     await store.insertRepositoryWithSyncState({
       bitbucketUuid: '{r1}',
-      workspace: 'tigerit',
-      project: 'BOING',
-      slug: 'boing-server',
-      fullName: 'tigerit/boing-server',
+      workspace: 'acme',
+      project: 'PLATFORM',
+      slug: 'api-server',
+      fullName: 'acme/api-server',
       archived: false,
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await addTrackedRepository(deps, 'tigerit', 'boing-server');
+    const result = await addTrackedRepository(deps, 'acme', 'api-server');
 
-    expect(result).toEqual({ fullName: 'tigerit/boing-server', status: 'already-tracked' });
+    expect(result).toEqual({ fullName: 'acme/api-server', status: 'already-tracked' });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(state.repositories.size).toBe(1);
   });
@@ -444,9 +444,9 @@ describe('addTrackedRepository', () => {
     const { store, state } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await addTrackedRepository(deps, 'tigerit', 'does-not-exist');
+    const result = await addTrackedRepository(deps, 'acme', 'does-not-exist');
 
-    expect(result).toEqual({ fullName: 'tigerit/does-not-exist', status: 'not-found' });
+    expect(result).toEqual({ fullName: 'acme/does-not-exist', status: 'not-found' });
     expect(state.repositories.size).toBe(0);
   });
 
@@ -455,47 +455,47 @@ describe('addTrackedRepository', () => {
       jsonResponse({
         uuid: '{r2}',
         slug: 'orphan',
-        full_name: 'tigerit/orphan',
-        workspace: { slug: 'tigerit' },
+        full_name: 'acme/orphan',
+        workspace: { slug: 'acme' },
       }),
     );
     const { store, state } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    await addTrackedRepository(deps, 'tigerit', 'orphan');
+    await addTrackedRepository(deps, 'acme', 'orphan');
 
-    expect(state.repositories.get('tigerit/orphan')!.project).toBeNull();
+    expect(state.repositories.get('acme/orphan')!.project).toBeNull();
   });
 
   it('returns already-tracked when the canonical bitbucket_uuid already exists', async () => {
-    // The canonical row is keyed at tigerit/boing-server in the store. An
-    // input alias like tigerit/Boing-Server misses findRepositoryByFullName
+    // The canonical row is keyed at acme/api-server in the store. An
+    // input alias like acme/Api-Server misses findRepositoryByFullName
     // (strict string compare), proceeds to fetch BB, which returns the
     // canonical entity with the same uuid {r1}. The store-level ON CONFLICT
     // recovers — no 23505 bubbles up.
     const { store, state } = createFakeStore();
     await store.insertRepositoryWithSyncState({
       bitbucketUuid: '{r1}',
-      workspace: 'tigerit',
-      project: 'BOING',
-      slug: 'boing-server',
-      fullName: 'tigerit/boing-server',
+      workspace: 'acme',
+      project: 'PLATFORM',
+      slug: 'api-server',
+      fullName: 'acme/api-server',
       archived: false,
     });
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
         uuid: '{r1}',
-        slug: 'boing-server',
-        full_name: 'tigerit/boing-server',
-        workspace: { slug: 'tigerit' },
-        project: { key: 'BOING' },
+        slug: 'api-server',
+        full_name: 'acme/api-server',
+        workspace: { slug: 'acme' },
+        project: { key: 'PLATFORM' },
       }),
     );
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    const result = await addTrackedRepository(deps, 'tigerit', 'Boing-Server');
+    const result = await addTrackedRepository(deps, 'acme', 'Api-Server');
 
-    expect(result).toEqual({ fullName: 'tigerit/boing-server', status: 'already-tracked' });
+    expect(result).toEqual({ fullName: 'acme/api-server', status: 'already-tracked' });
     // Still just one row — no duplicate inserted.
     expect(state.repositories.size).toBe(1);
   });
@@ -513,10 +513,10 @@ describe('bootstrapTrackedRepositories', () => {
     const { store } = createFakeStore();
     await store.insertRepositoryWithSyncState({
       bitbucketUuid: '{rb}',
-      workspace: 'tigerit',
+      workspace: 'acme',
       project: null,
       slug: 'b',
-      fullName: 'tigerit/b',
+      fullName: 'acme/b',
       archived: false,
     });
 
@@ -525,8 +525,8 @@ describe('bootstrapTrackedRepositories', () => {
         jsonResponse({
           uuid: '{ra}',
           slug: 'a',
-          full_name: 'tigerit/a',
-          workspace: { slug: 'tigerit' },
+          full_name: 'acme/a',
+          workspace: { slug: 'acme' },
         }),
       )
       .mockResolvedValueOnce(jsonResponse({ error: { message: 'Not found' } }, 404));
@@ -534,16 +534,16 @@ describe('bootstrapTrackedRepositories', () => {
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'a', archived: false },
-      { workspace: 'tigerit', slug: 'b', archived: false },
-      { workspace: 'tigerit', slug: 'c', archived: false },
+      { workspace: 'acme', slug: 'a', archived: false },
+      { workspace: 'acme', slug: 'b', archived: false },
+      { workspace: 'acme', slug: 'c', archived: false },
     ]);
 
     expect(result).toEqual({
       requested: 3,
       inserted: 1,
       alreadyTracked: 1,
-      notFound: ['tigerit/c'],
+      notFound: ['acme/c'],
       errors: [],
     });
     // 2 HTTP calls total — `b` was a cache hit and made none.
@@ -573,15 +573,15 @@ describe('bootstrapTrackedRepositories', () => {
       jsonResponse({
         uuid: '{rb}',
         slug: 'b',
-        full_name: 'tigerit/b',
-        workspace: { slug: 'tigerit' },
+        full_name: 'acme/b',
+        workspace: { slug: 'acme' },
       }),
     );
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'a', archived: false },
-      { workspace: 'tigerit', slug: 'b', archived: false },
+      { workspace: 'acme', slug: 'a', archived: false },
+      { workspace: 'acme', slug: 'b', archived: false },
     ]);
 
     expect(result.requested).toBe(2);
@@ -589,10 +589,10 @@ describe('bootstrapTrackedRepositories', () => {
     expect(result.alreadyTracked).toBe(0);
     expect(result.notFound).toEqual([]);
     expect(result.errors).toHaveLength(1);
-    expect(result.errors[0]).toMatchObject({ fullName: 'tigerit/a' });
+    expect(result.errors[0]).toMatchObject({ fullName: 'acme/a' });
     expect(result.errors[0]?.error).toContain('400');
     // `b` still landed.
-    expect(state.repositories.has('tigerit/b')).toBe(true);
+    expect(state.repositories.has('acme/b')).toBe(true);
   });
 
   it('does NOT reconcile per-repo flags from YAML on existing rows (DB is canonical)', async () => {
@@ -602,20 +602,20 @@ describe('bootstrapTrackedRepositories', () => {
     const { store } = createFakeStore();
     await store.insertRepositoryWithSyncState({
       bitbucketUuid: '{r1}',
-      workspace: 'tigerit',
-      project: 'BOING',
-      slug: 'boing-server',
-      fullName: 'tigerit/boing-server',
+      workspace: 'acme',
+      project: 'PLATFORM',
+      slug: 'api-server',
+      fullName: 'acme/api-server',
       archived: true,
     });
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
     const result = await bootstrapTrackedRepositories(deps, [
-      { workspace: 'tigerit', slug: 'boing-server', archived: false },
+      { workspace: 'acme', slug: 'api-server', archived: false },
     ]);
 
     expect(result.alreadyTracked).toBe(1);
-    const row = await store.findRepositoryByFullName('tigerit/boing-server');
+    const row = await store.findRepositoryByFullName('acme/api-server');
     // DB value preserved — YAML did not write through.
     expect(row?.archived).toBe(true);
     // No HTTP call either — already-tracked short-circuits before BB lookup.
@@ -629,17 +629,17 @@ describe('bootstrapTrackedRepositories', () => {
       jsonResponse({
         uuid: '{r-new}',
         slug: 'fresh',
-        full_name: 'tigerit/fresh',
-        workspace: { slug: 'tigerit' },
-        project: { key: 'BOING' },
+        full_name: 'acme/fresh',
+        workspace: { slug: 'acme' },
+        project: { key: 'PLATFORM' },
       }),
     );
     const { store } = createFakeStore();
     const deps = { client: makeClient(fetchMock as unknown as typeof globalThis.fetch), store };
 
-    await bootstrapTrackedRepositories(deps, [{ workspace: 'tigerit', slug: 'fresh', archived: true }]);
+    await bootstrapTrackedRepositories(deps, [{ workspace: 'acme', slug: 'fresh', archived: true }]);
 
-    const row = await store.findRepositoryByFullName('tigerit/fresh');
+    const row = await store.findRepositoryByFullName('acme/fresh');
     expect(row?.archived).toBe(true);
   });
 });

@@ -26,4 +26,4 @@ right move is usually to extract it here and link from both.
 - **Architecture rules** (Postgres = truth, Redis = user-summary only, Pinia = browser cache, no auth today) — top-level [`CLAUDE.md`](../CLAUDE.md).
 - **Run modes, deploy flows, env vars** — top-level [`README.md`](../README.md).
 - **Release notes** — top-level [`CHANGELOG.md`](../CHANGELOG.md).
-- **Memory** — `~/.claude/projects/-home-zobayer-Projects-personal-bbstat/memory/` (per-developer; not committed).
+- **Memory** — your coding agent's own memory directory (per-developer; not committed).

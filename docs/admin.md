@@ -51,7 +51,7 @@ directly, so they also bypass the adaptive backoff layer.
 
 ```bash
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/sync/repositories/tigerit/boing-server/commits | jq
+  https://bbstat.localhost:8443/api/admin/sync/repositories/acme/api-server/commits | jq
 ```
 
 ## Curated set management
@@ -79,42 +79,42 @@ seed-only semantics.
 # Add a new repo to the curated set
 curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories \
   -H 'Content-Type: application/json' \
-  -d '{"workspace":"tigerit","slug":"some-new-repo"}'
+  -d '{"workspace":"acme","slug":"some-new-repo"}'
 
 # Archive a renamed / deprecated repo (404 noise stops, data preserved)
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/old-repo/archive
+  https://bbstat.localhost:8443/api/admin/repositories/acme/old-repo/archive
 
 # Retroactively flag historical merge commits
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/boing-server/backfill/is_merge
+  https://bbstat.localhost:8443/api/admin/repositories/acme/api-server/backfill/is_merge
 
 # Recover a repo the sync auto-excluded (any reason)
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/some-repo/include
+  https://bbstat.localhost:8443/api/admin/repositories/acme/some-repo/include
 
 # Surgically recover a history-rewritten repo — preview, then apply.
 # Run this BEFORE /include (see "Reason: history-rewritten" below).
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/some-repo/reconcile   # dry-run plan
+  https://bbstat.localhost:8443/api/admin/repositories/acme/some-repo/reconcile   # dry-run plan
 curl -k -X POST \
-  'https://bbstat.localhost:8443/api/admin/repositories/tigerit/some-repo/reconcile?dryRun=false'  # apply
+  'https://bbstat.localhost:8443/api/admin/repositories/acme/some-repo/reconcile?dryRun=false'  # apply
 
 # Rename a repo that's been renamed on BB (UUID must match)
-curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories/tigerit/old-name/rename \
+curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories/acme/old-name/rename \
   -H 'Content-Type: application/json' \
-  -d '{"workspace":"tigerit","slug":"new-name"}'
+  -d '{"workspace":"acme","slug":"new-name"}'
 
 # Hard-delete a tracked repo and all its history
 curl -k -X DELETE \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/doomed
+  https://bbstat.localhost:8443/api/admin/repositories/acme/doomed
 
 # Set the per-repo diff-stat blacklist, then queue a recount
-curl -k -X PUT https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/diff-stats/exclusions \
+curl -k -X PUT https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>/diff-stats/exclusions \
   -H 'Content-Type: application/json' \
   -d '{"patterns":["*.png","*.jpg","*.svg","**/pnpm-lock.yaml","Assets/**","dist/**"]}'
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/diff-stats/reset
+  https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>/diff-stats/reset
 ```
 
 ## Recovering auto-excluded repositories
@@ -166,7 +166,7 @@ the "needs attention" surface:
 
 ```bash
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/archive
+  https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>/archive
 ```
 
 ### Reason: `repo-404`
@@ -183,9 +183,9 @@ pointing at a different repo by accident), updates
 ws/slug/full_name/project, clears the exclusion, and resets cursors.
 
 ```bash
-curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories/tigerit/old-name/rename \
+curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories/acme/old-name/rename \
   -H 'Content-Type: application/json' \
-  -d '{"workspace":"tigerit","slug":"new-name"}'
+  -d '{"workspace":"acme","slug":"new-name"}'
 ```
 
 **If deleted upstream:** either archive (preserve historical data,
@@ -195,11 +195,11 @@ right default — historical commits stay in dashboards.
 ```bash
 # Default: keep the data, stop the sync noise
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/archive
+  https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>/archive
 
 # Only if you want every trace of this repo gone
 curl -k -X DELETE \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>
+  https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>
 ```
 
 ### Reason: `history-rewritten`
@@ -224,11 +224,11 @@ before the irreversible delete.
 #    ancestor sha, the exact orphan shas to delete, and the count of
 #    new commits the apply step will ingest.
 curl -k -X POST \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/reconcile
+  https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>/reconcile
 
 # 2. Eyeball the orphan list, then apply.
 curl -k -X POST \
-  'https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>/reconcile?dryRun=false'
+  'https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>/reconcile?dryRun=false'
 ```
 
 Applying recomputes the affected `commit_daily` day range and re-runs
@@ -255,13 +255,13 @@ clean single-history row:
 # 1. Drop the tracked row and all its history (cascades to commits,
 #    sync_state, branches, pull_requests).
 curl -k -X DELETE \
-  https://bbstat.localhost:8443/api/admin/repositories/tigerit/<slug>
+  https://bbstat.localhost:8443/api/admin/repositories/acme/<slug>
 
 # 2. Re-add it. POST /repositories does a BB metadata fetch and
 #    inserts a fresh row + sync_state. Returns 201 on success.
 curl -k -X POST https://bbstat.localhost:8443/api/admin/repositories \
   -H 'Content-Type: application/json' \
-  -d '{"workspace":"tigerit","slug":"<slug>"}'
+  -d '{"workspace":"acme","slug":"<slug>"}'
 ```
 
 The next commit-sync tick cold-walks recent history; deepen + is-merge

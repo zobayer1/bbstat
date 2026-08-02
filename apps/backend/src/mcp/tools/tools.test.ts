@@ -122,14 +122,14 @@ describe('get_repository_activity', () => {
   it('returns activity for a tracked repo', async () => {
     const store = makeStore();
     store.getRepositoryActivity.mockResolvedValue({ slug: 'bbstat' });
-    const result = await invoke('get_repository_activity', store, { workspace: 'tigerit', slug: 'bbstat' });
+    const result = await invoke('get_repository_activity', store, { workspace: 'acme', slug: 'bbstat' });
     expect(result).toEqual({ slug: 'bbstat' });
-    expect(store.getRepositoryActivity).toHaveBeenCalledWith('tigerit', 'bbstat');
+    expect(store.getRepositoryActivity).toHaveBeenCalledWith('acme', 'bbstat');
   });
 
   it('throws ToolError for an untracked repo', async () => {
     await expect(
-      invoke('get_repository_activity', makeStore(), { workspace: 'tigerit', slug: 'nope' }),
+      invoke('get_repository_activity', makeStore(), { workspace: 'acme', slug: 'nope' }),
     ).rejects.toBeInstanceOf(ToolError);
   });
 });
@@ -145,7 +145,7 @@ describe('search_activity', () => {
     const store = makeStore();
     await invoke('search_activity', store, {
       actor: { kind: 'user', id: 3 },
-      repo: { workspace: 'tigerit', slug: 'bbstat' },
+      repo: { workspace: 'acme', slug: 'bbstat' },
       message: 'fix',
       hash_prefix: 'AbCd',
       after: '2026-01-01',
@@ -153,7 +153,7 @@ describe('search_activity', () => {
     });
     expect(store.getActivity).toHaveBeenCalledWith({
       actor: { kind: 'user', id: 3 },
-      repo: { workspace: 'tigerit', slug: 'bbstat' },
+      repo: { workspace: 'acme', slug: 'bbstat' },
       project: null,
       before: null,
       after: new Date('2026-01-01'),

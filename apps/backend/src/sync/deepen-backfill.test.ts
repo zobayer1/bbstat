@@ -185,9 +185,9 @@ function makeClient(fetchFn: typeof globalThis.fetch, opts: { budget?: number } 
 
 const REPO: DeepenCandidate = {
   repositoryId: 7,
-  workspace: 'tigerit',
-  slug: 'boing',
-  fullName: 'tigerit/boing',
+  workspace: 'acme',
+  slug: 'api',
+  fullName: 'acme/api',
   oldestSha: 'sha-oldest',
 };
 
@@ -450,7 +450,7 @@ describe('deepenOneRepo', () => {
 
     expect(result).toMatchObject({
       repositoryId: 7,
-      fullName: 'tigerit/boing',
+      fullName: 'acme/api',
       fetched: 2,
       inserted: 2,
       reachedRoot: true,
@@ -607,9 +607,9 @@ describe('deepenOneRepo', () => {
       { maxPages: 5, budgetThreshold: 100 },
       {
         repositoryId: 42,
-        workspace: 'tigerit',
+        workspace: 'acme',
         slug: 'force',
-        fullName: 'tigerit/force',
+        fullName: 'acme/force',
       },
     );
 
@@ -630,9 +630,9 @@ describe('runDeepenTick', () => {
     // repo until the queue is empty. Mirrors the production store's
     // round-robin behavior.
     const remaining: DeepenCandidate[] = [
-      { repositoryId: 1, workspace: 'tigerit', slug: 'a', fullName: 'tigerit/a', oldestSha: 'a-seed' },
-      { repositoryId: 2, workspace: 'tigerit', slug: 'b', fullName: 'tigerit/b', oldestSha: 'b-seed' },
-      { repositoryId: 3, workspace: 'tigerit', slug: 'c', fullName: 'tigerit/c', oldestSha: 'c-seed' },
+      { repositoryId: 1, workspace: 'acme', slug: 'a', fullName: 'acme/a', oldestSha: 'a-seed' },
+      { repositoryId: 2, workspace: 'acme', slug: 'b', fullName: 'acme/b', oldestSha: 'b-seed' },
+      { repositoryId: 3, workspace: 'acme', slug: 'c', fullName: 'acme/c', oldestSha: 'c-seed' },
     ];
     const { store, state } = makeStore({});
     store.pickRepoForDeepening = async () => remaining.shift() ?? null;
@@ -657,9 +657,9 @@ describe('runDeepenTick', () => {
 
   it('stops with stoppedReason=budget when getBudgetRemaining falls below threshold', async () => {
     const remaining: DeepenCandidate[] = [
-      { repositoryId: 1, workspace: 'tigerit', slug: 'a', fullName: 'tigerit/a', oldestSha: 'a-seed' },
-      { repositoryId: 2, workspace: 'tigerit', slug: 'b', fullName: 'tigerit/b', oldestSha: 'b-seed' },
-      { repositoryId: 3, workspace: 'tigerit', slug: 'c', fullName: 'tigerit/c', oldestSha: 'c-seed' },
+      { repositoryId: 1, workspace: 'acme', slug: 'a', fullName: 'acme/a', oldestSha: 'a-seed' },
+      { repositoryId: 2, workspace: 'acme', slug: 'b', fullName: 'acme/b', oldestSha: 'b-seed' },
+      { repositoryId: 3, workspace: 'acme', slug: 'c', fullName: 'acme/c', oldestSha: 'c-seed' },
     ];
     const { store } = makeStore({});
     store.pickRepoForDeepening = async () => remaining.shift() ?? null;
@@ -694,8 +694,8 @@ describe('runDeepenTick', () => {
     // logs at 100% CPU. Now: each repo gets exactly one attempt per tick;
     // a repeat repositoryId terminates the loop cleanly.
     const remaining: DeepenCandidate[] = [
-      { repositoryId: 1, workspace: 'tigerit', slug: 'a', fullName: 'tigerit/a', oldestSha: null },
-      { repositoryId: 2, workspace: 'tigerit', slug: 'b', fullName: 'tigerit/b', oldestSha: null },
+      { repositoryId: 1, workspace: 'acme', slug: 'a', fullName: 'acme/a', oldestSha: null },
+      { repositoryId: 2, workspace: 'acme', slug: 'b', fullName: 'acme/b', oldestSha: null },
     ];
     const { store, state } = makeStore({});
     // Production picker emits the candidate then rotates to the next; on
@@ -727,8 +727,8 @@ describe('runDeepenTick', () => {
     // catches that, returns rateLimited: true, and runDeepenTick stops
     // BEFORE touching the second repo.
     const remaining: DeepenCandidate[] = [
-      { repositoryId: 1, workspace: 'tigerit', slug: 'a', fullName: 'tigerit/a', oldestSha: 'a-seed' },
-      { repositoryId: 2, workspace: 'tigerit', slug: 'b', fullName: 'tigerit/b', oldestSha: 'b-seed' },
+      { repositoryId: 1, workspace: 'acme', slug: 'a', fullName: 'acme/a', oldestSha: 'a-seed' },
+      { repositoryId: 2, workspace: 'acme', slug: 'b', fullName: 'acme/b', oldestSha: 'b-seed' },
     ];
     const { store } = makeStore({});
     store.pickRepoForDeepening = async () => remaining.shift() ?? null;
@@ -743,10 +743,10 @@ describe('runDeepenTick', () => {
     expect(tick.stoppedReason).toBe('rate-limited');
     expect(tick.repos).toHaveLength(1);
     expect(tick.repos[0]?.rateLimited).toBe(true);
-    expect(tick.repos[0]?.fullName).toBe('tigerit/a');
+    expect(tick.repos[0]?.fullName).toBe('acme/a');
     // Second repo never picked → still in the queue for next tick.
     expect(remaining).toHaveLength(1);
-    expect(remaining[0]?.fullName).toBe('tigerit/b');
+    expect(remaining[0]?.fullName).toBe('acme/b');
   });
 
   it('skips entirely and returns stoppedReason=budget when no budget headroom at start', async () => {

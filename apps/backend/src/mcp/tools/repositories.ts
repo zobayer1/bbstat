@@ -18,7 +18,7 @@ export const repositoryActivityTool = defineTool({
   description:
     'Activity detail for one repository: commit/line totals, contributor breakdown, recent activity, and sync state. Identify the repo by workspace + slug (get them from list_repositories). Errors if the repo is not tracked.',
   inputShape: {
-    workspace: z.string().min(1).describe('Workspace slug, e.g. "tigerit".'),
+    workspace: z.string().min(1).describe('Workspace slug, as returned by list_repositories.'),
     slug: z.string().min(1).describe('Repository slug, e.g. "bbstat".'),
   },
   async handler(store, args) {
