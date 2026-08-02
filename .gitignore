@@ -38,6 +38,14 @@ yarn-error.log*
 *.swo
 *~
 
+# --- Coding-agent local state ---
+# `.claude/settings.local.json` is a per-developer permission allowlist full of
+# machine-specific absolute paths — private, same rationale as .vscode/* above.
+# A shared `.claude/settings.json` is allowlisted for if/when we want committed
+# project-wide agent config. The root CLAUDE.md is committed and unaffected.
+.claude/*
+!.claude/settings.json
+
 # --- OS metadata ---
 .DS_Store
 Thumbs.db
