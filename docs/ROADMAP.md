@@ -209,13 +209,51 @@ One human, many `bitbucket_uuid`s. Today a contributor who uses both a corp and 
 
 **Person-awareness completed in 1.2.0** (`CACHE_VERSION` 14 → 20). The two read-path deferrals — per-person activity feed and Top Contributors person-awareness — landed, and the sweep was extended to every remaining contributor surface: the repository and project detail pages (entity-keyed contributor lists + counts via `RepoContributorEntity`; project card switched 7d → 30d), multi-actor activity filtering (`/api/activity*` take `actor` + `actorKind`; shared `ActorPicker` / `useActorFilter`), the Person-page activity feed + per-alias Last-active column, and the User-page "Linked accounts" table. A merged person now collapses its aliases everywhere it's counted. Only the `bbstat:person-summary:*` Redis cache remains deferred (below).
 
-### Phase 6 — Org-email auth + BitBucket account linking (planning TBD)
+### Phase 6 — Login with BitBucket (Atlassian OAuth 2.0 / 3LO)
 
-Bridge org identity (Workspace SSO / Google / Microsoft) to BitBucket identity so a logged-in user is bound to one or more `users` rows from Phase 5.
+Bind a browser session to a BitBucket identity, so every request can name its actor. **Login is available but not required in this phase** — the dashboard stays open. The gate flip is Phase 7, deliberately split so the flow can be shaken out against real users before a bug in the member check can lock the org out.
 
-- Design open: which OIDC provider, what the linking flow looks like, where the binding lives (`user_org_identities` table seems likely), how to handle users who log in but have no matching BB commits yet.
-- Depends on Phase 5 to define the canonical-user concept the org-side binding points at.
-- Still **no per-request auth gate** at this phase — adds the identity plumbing without flipping the dashboard from open to gated. The gate flip happens in Phase 7.
+An earlier draft of this phase assumed generic OIDC (Workspace SSO / Google / Microsoft) and therefore needed a _linking_ flow plus a `user_org_identities` table with a fuzzy matcher — a Google identity tells you nothing about which `users` row it is. **Atlassian 3LO removes all of it:** `GET /2.0/user` returns the account `uuid`, which is already `users.bitbucket_uuid` (unique, not null). The link is an equality join. No linking UI, no binding table, no matcher.
+
+**Tokens are not stored.** OAuth is used purely as an identity assertion at login: exchange code → one `GET /2.0/user` → mint our own session → discard the BitBucket access + refresh tokens. This follows from the standing rule that the backend never proxies live BitBucket calls on the request path (`CLAUDE.md`) — the sync worker has its own credential and doesn't need to act as the logged-in user. It also sidesteps the 2-hour access-token expiry, refresh scheduling, and encryption-at-rest entirely. Revisit only if a feature genuinely needs to act _as_ the user.
+
+#### Upstream constraints (verified against Atlassian docs)
+
+| Fact                                                                                                                       | Consequence for us                                                                                                                                                         |
+| -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Consumer is registered under **Workspace settings → OAuth consumers**, and a **Callback URL** is mandatory                 | Requires a publicly reachable URL. Same dependency that has kept webhooks parked; see below.                                                                               |
+| Scopes are **fixed on the consumer**. The `scope` request parameter can only _narrow_ the consumer's set, never extend it. | Register the consumer with `account` only (plus `email` if we want addresses without a commit). A read-only consumer is far easier to justify to a downstream OSS adopter. |
+| Access tokens expire in **2 hours**; a refresh token unused for 3 months expires outright                                  | Moot — we discard both.                                                                                                                                                    |
+| **PKCE is not documented** for Bitbucket Cloud                                                                             | Confidential client (secret stays server-side) + a `state` nonce is the mitigation. Re-check the docs at implementation time.                                              |
+| One consumer authenticates _any_ BitBucket user; `/2.0/user/permissions/workspaces` reports which workspaces they're in    | A single hosted consumer can serve many tenants — relevant to the hosted-subscription plan under "Open future considerations".                                             |
+
+Endpoints: authorize `https://bitbucket.org/site/oauth2/authorize?client_id=…&response_type=code&state=…`; token `POST https://bitbucket.org/site/oauth2/access_token` with HTTP Basic `client_id:secret` and `grant_type=authorization_code`.
+
+#### Authentication vs. authorization
+
+Proving identity is the easy half. The gate question — _should this person see this dashboard?_ — reuses what 1.6.0 already shipped rather than inventing a second notion of membership:
+
+- **Primary signal:** the resolved `users` row has `is_workspace_member = true`, or its `membershipStatus` is `member`. Free, already synced, already the thing the Members page and leaderboard agree on.
+- **Fallback for the cold case:** someone who logs in before their first commit has been ingested has no `users` row at all. Check `/2.0/user/permissions/workspaces` live for `BITBUCKET_WORKSPACE`; on a hit, auto-create the `users` row from the `/2.0/user` payload. Commits attach by UUID later on their own — no reconciliation needed.
+- A successful login by a non-member is an authenticated 403, not a 500 and not a silent empty dashboard.
+
+#### Deliverables
+
+- **Schema (V1_7):** `users.last_login_at` (nullable timestamptz) and `users.role` (enum `viewer` | `admin`, default `viewer`) — the role column exists now so Phase 7's admin check has something to read. First admin bootstrapped from a `BOOTSTRAP_ADMIN_UUIDS` env var on startup, idempotent. Mirror into `apps/backend/schema/V1_7__auth.sql` in lockstep.
+- **Backend routes** (`apps/backend/src/routes/auth.ts`, registered at `/api/auth`): `GET /bitbucket/start` (mint `state`, 302 to the authorize URL), `GET /bitbucket/callback` (verify `state`, exchange code, resolve identity, set session cookie, 302 back into the SPA), `POST /logout` (clear cookie), `GET /me` (current actor or 401).
+- **Session:** stateless HMAC-signed cookie carrying `{ userId, uuid, exp }`, mirroring the `MCP_TOKEN_SECRET` precedent — no DB, no per-request lookup, rotate the secret to revoke everything. Accepted trade-off: no per-session revocation. HTTP-only, `Secure`, and see the SameSite wrinkle below.
+- **`state` nonce** rides in its own short-TTL signed cookie (double-submit), _not_ Redis — keeps the "Redis is user-summary rollups only" rule intact.
+- **Frontend:** `/login` view with the single OAuth button, a non-persisted `auth` Pinia store, and `GET /me` on boot. **Deliberately not persisted** — the session cookie is authoritative, and identity in `localStorage` invites stale-actor bugs after logout. That also means no `CACHE_VERSION` bump for this phase.
+- **Config:** `BITBUCKET_OAUTH_CLIENT_ID`, `BITBUCKET_OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `PUBLIC_BASE_URL` (used to build `redirect_uri`; must match the consumer's registered callback exactly). All optional in the schema so the login routes simply don't register when unset — same graceful-degradation shape as the existing `syncDeps` gate in `app.ts`.
+
+#### Two wrinkles to price in
+
+1. **CORS + cookies.** `app.ts` currently registers `@fastify/cors` with `origin: true, credentials: false`. Credentialed requests cannot use a wildcard origin, so this becomes an explicit allowlist with `credentials: true`. Worse, the two run modes differ: host dev is **cross-origin** (`:5173` → `:8443`) and needs `SameSite=None; Secure`, while the containerized and production paths are **same-origin** through nginx and want `SameSite=Lax`. That is a per-mode config branch, and `make dev` does not exercise nginx — validate the cookie round-trip with `make up` before believing it works.
+2. **Public URL — now the critical path.** Decided: **ngrok for development**, with a _reserved_ domain so the consumer's registered callback URL stays stable across tunnel restarts (a rotating tunnel hostname means re-editing the consumer on every session). A real public host is still needed before Phase 7's webhooks and before any hosted offering.
+
+**Out of scope for this phase** — the per-request auth gate and admin role enforcement (Phase 7); storing or refreshing user BitBucket tokens; per-session revocation; any admin UI for roles (Phase 8); multi-workspace tenancy.
+
+**Testing** mirrors the existing fake-store convention: a fake token-exchange client covering `state` mismatch, replayed / expired code, a non-member login, an unknown UUID taking the auto-create path, and assertions on the cookie flags per run mode.
 
 ### Phase 7 — Authentication + webhook trigger + admin UI
 
@@ -224,7 +262,7 @@ Flip the dashboard from open to gated, take advantage of the public URL that aut
 - Per-request auth gate enforced via the Phase 6 identity plumbing. Admin endpoints get a real role check (today they're open-by-design — see `CLAUDE.md`).
 - **Webhook trigger** (originally Phase 5): add `write:webhook:bitbucket` scope, one-time bootstrap to register webhooks per tracked repo, signature-verifying receiver that dispatches `runSync(trigger='webhook', repositorySlug=…)`. Cron cadence drops from 5 min → 1 h once webhooks are live; the polling tick stays as a safety net for missed events.
 - Admin UI: per-repo sync state, manual re-sync button, recent sync runs + errors, **add-repo picker** that browses the broader workspace (workspace-wide repo enumeration as a one-shot list call, not persisted).
-- **Requires a public URL** — the same dependency that drives webhook readiness drives the OIDC redirect. Today the deploy lives on `bbstat.onudaan.com`, only reachable from the local network, which is why webhooks are still parked. Decide between ngrok-for-dev vs. a staging deploy at the start of the phase.
+- **Requires a public URL** — the same dependency that drives webhook readiness drives the OAuth callback. Today the deploy lives on `bbstat.onudaan.com`, only reachable from the local network, which is why webhooks are still parked. Phase 6 unblocks itself with a reserved ngrok domain for development; webhooks delivered to a real deployment need an actual public host, so that decision lands here.
 
 ### Phase 8 — Admin dashboard (planning TBD)
 
